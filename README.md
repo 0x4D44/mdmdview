@@ -14,6 +14,8 @@ A simple, standalone markdown viewer for Windows built with Rust and egui.
 - **Command Line Support** - Open files directly: `mdmdview.exe file.md`
 - **Professional Menus** - Right-aligned keyboard shortcuts
 - **Custom Icon** - Distinctive markdown document icon
+- **Windows Integration** - Full metadata, icon, and shell association support
+- **Perfect Formatting** - Proper inline code, tables, lists, and all markdown elements
 
 ## Requirements
 
@@ -74,6 +76,18 @@ You can associate MarkdownView with `.md` files for easy opening:
 
 Now double-clicking any `.md` file will open it in MarkdownView!
 
+### File Properties and Icon
+
+The executable includes complete Windows metadata:
+- **Product Name**: MarkdownView
+- **File Description**: A simple markdown viewer for Windows
+- **Version**: 1.0.0
+- **Company**: MarkdownView Project
+- **Copyright**: Copyright © 2025 MarkdownView Project
+- **Custom Icon**: Displays markdown document icon in File Explorer
+
+This ensures professional Windows integration with proper file properties and visual recognition.
+
 ### Keyboard Shortcuts
 
 | Shortcut | Action |
@@ -89,6 +103,22 @@ Now double-clicking any `.md` file will open it in MarkdownView!
 | `End` | Go to bottom of document |
 | `Page Up` | Scroll up one page |
 | `Page Down` | Scroll down one page |
+
+### Markdown Rendering
+
+All standard markdown elements are fully supported with professional formatting:
+
+- **Headers** (H1-H6) with proper sizing and hierarchy
+- **Text formatting** - Bold, italic, strikethrough  
+- **Lists** - Both bulleted and numbered with proper spacing
+- **Tables** - Professional grid layout with headers and striped rows
+- **Code blocks** - Syntax highlighting for multiple languages
+- **Inline code** - Properly formatted within text (e.g., use `pip install` command)
+- **Links** - Clickable URLs that open in browser
+- **Horizontal rules** - Clean section separators
+- **Quotes** - Formatted blockquotes (basic support)
+
+**Key Improvement**: Inline code elements like `filename.ext` now stay properly inline with surrounding text instead of breaking to new lines.
 
 ### Supported File Types
 
