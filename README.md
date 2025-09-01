@@ -85,6 +85,10 @@ Now double-clicking any `.md` file will open it in MarkdownView!
 | `Ctrl++` | Zoom in (increase font size) |
 | `Ctrl+-` | Zoom out (decrease font size) |
 | `Ctrl+0` | Reset zoom to default size |
+| `Home` | Go to top of document |
+| `End` | Go to bottom of document |
+| `Page Up` | Scroll up one page |
+| `Page Down` | Scroll down one page |
 
 ### Supported File Types
 
