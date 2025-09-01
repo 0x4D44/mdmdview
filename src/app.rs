@@ -176,15 +176,25 @@ impl MarkdownViewerApp {
             menu::bar(ui, |ui| {
                 // File menu
                 ui.menu_button("File", |ui| {
-                    if ui.button("📁 Open...\t\t\tCtrl+O").clicked() {
-                        self.open_file_dialog();
-                        ui.close_menu();
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("📁 Open...").clicked() {
+                            self.open_file_dialog();
+                            ui.close_menu();
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.weak("Ctrl+O");
+                        });
+                    });
 
-                    if ui.button("📄 Close\t\t\tCtrl+W").clicked() {
-                        self.close_current_file();
-                        ui.close_menu();
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("📄 Close").clicked() {
+                            self.close_current_file();
+                            ui.close_menu();
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.weak("Ctrl+W");
+                        });
+                    });
 
                     ui.separator();
 
@@ -200,35 +210,60 @@ impl MarkdownViewerApp {
 
                     ui.separator();
 
-                    if ui.button("❌ Exit\t\t\tCtrl+Q").clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("❌ Exit").clicked() {
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.weak("Ctrl+Q");
+                        });
+                    });
                 });
 
                 // View menu
                 ui.menu_button("View", |ui| {
-                    if ui.button("🔍 Zoom In\t\t\tCtrl++").clicked() {
-                        self.renderer.zoom_in();
-                        ui.close_menu();
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("🔍 Zoom In").clicked() {
+                            self.renderer.zoom_in();
+                            ui.close_menu();
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.weak("Ctrl++");
+                        });
+                    });
 
-                    if ui.button("🔍 Zoom Out\t\t\tCtrl+-").clicked() {
-                        self.renderer.zoom_out();
-                        ui.close_menu();
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("🔍 Zoom Out").clicked() {
+                            self.renderer.zoom_out();
+                            ui.close_menu();
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.weak("Ctrl+-");
+                        });
+                    });
 
-                    if ui.button("↩ Reset Zoom\t\t\tCtrl+0").clicked() {
-                        self.renderer.reset_zoom();
-                        ui.close_menu();
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("↩ Reset Zoom").clicked() {
+                            self.renderer.reset_zoom();
+                            ui.close_menu();
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.weak("Ctrl+0");
+                        });
+                    });
 
                     ui.separator();
 
-                    if ui.button("⛶ Toggle Fullscreen\t\t\tF11").clicked() {
-                        let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!is_fullscreen));
-                        ui.close_menu();
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("⛶ Toggle Fullscreen").clicked() {
+                            let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!is_fullscreen));
+                            ui.close_menu();
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.weak("F11");
+                        });
+                    });
                 });
 
                 // Help menu

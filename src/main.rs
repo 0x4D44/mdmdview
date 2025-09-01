@@ -146,15 +146,17 @@ fn configure_egui_style(ctx: &egui::Context) {
     style.interaction.resize_grab_radius_side = 8.0;
     style.interaction.resize_grab_radius_corner = 12.0;
 
-    // Configure visuals for better contrast
+    // Configure visuals for better contrast with black background
     style.visuals.window_rounding = egui::Rounding::same(4.0);
     style.visuals.menu_rounding = egui::Rounding::same(4.0);
     
-    // Dark theme adjustments for markdown content
+    // Set to true black background for maximum contrast
     if style.visuals.dark_mode {
-        style.visuals.window_fill = egui::Color32::from_rgb(25, 25, 25);
-        style.visuals.panel_fill = egui::Color32::from_rgb(30, 30, 30);
-        style.visuals.faint_bg_color = egui::Color32::from_rgb(40, 40, 40);
+        style.visuals.window_fill = egui::Color32::BLACK;
+        style.visuals.panel_fill = egui::Color32::BLACK;
+        style.visuals.faint_bg_color = egui::Color32::from_gray(20);
+        style.visuals.extreme_bg_color = egui::Color32::BLACK;
+        // The text color will be handled by egui's theme system
     }
 
     ctx.set_style(style);
