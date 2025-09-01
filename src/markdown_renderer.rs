@@ -83,6 +83,9 @@ impl MarkdownRenderer {
         let mut in_code_block = false;
         let mut code_language: Option<String> = None;
         let mut code_text = String::new();
+        let mut table_headers: Vec<String> = Vec::new();
+        let mut table_rows: Vec<Vec<String>> = Vec::new();
+        let mut current_row: Vec<String> = Vec::new();
 
         for event in parser {
             match event {
@@ -116,6 +119,45 @@ impl MarkdownRenderer {
                     });
                     code_text.clear();
                     code_language = None;
+                }
+                Event::Start(Tag::Table(_)) => {
+                    table_headers.clear();
+                    table_rows.clear();
+                    current_row.clear();
+                }
+                Event::End(Tag::Table(_)) => {
+                    elements.push(MarkdownElement::Table {
+                        headers: table_headers.clone(),
+                        rows: table_rows.clone(),
+                    });
+                    table_headers.clear();
+                    table_rows.clear();
+                }
+                Event::Start(Tag::TableHead) => {
+                    // Starting table header section
+                }
+                Event::End(Tag::TableHead) => {
+                    // Finished table header section
+                    if !current_row.is_empty() {
+                        table_headers = current_row.clone();
+                        current_row.clear();
+                    }
+                }
+                Event::Start(Tag::TableRow) => {
+                    current_row.clear();
+                }
+                Event::End(Tag::TableRow) => {
+                    if !current_row.is_empty() && !table_headers.is_empty() {
+                        table_rows.push(current_row.clone());
+                        current_row.clear();
+                    }
+                }
+                Event::Start(Tag::TableCell) => {
+                    current_text.clear();
+                }
+                Event::End(Tag::TableCell) => {
+                    current_row.push(current_text.clone());
+                    current_text.clear();
                 }
                 Event::Text(text) => {
                     if in_code_block {
@@ -236,8 +278,11 @@ impl MarkdownRenderer {
                     ui.separator();
                     ui.add_space(8.0);
                 }
+                MarkdownElement::Table { headers, rows } => {
+                    self.render_table(ui, headers, rows);
+                }
                 _ => {
-                    // Handle other elements (lists, tables, quotes) if needed
+                    // Handle other elements (lists, quotes) if needed
                     ui.label(format!("Unsupported element: {:?}", element));
                 }
             }
@@ -299,6 +344,58 @@ impl MarkdownRenderer {
                 }
             });
         }
+    }
+
+    /// Render a table with headers and rows
+    fn render_table(&self, ui: &mut egui::Ui, headers: &[String], rows: &[Vec<String>]) {
+        if headers.is_empty() {
+            return;
+        }
+
+        ui.add_space(8.0);
+        
+        egui::Frame::none()
+            .stroke(Stroke::new(1.0, Color32::from_rgb(80, 80, 80)))
+            .inner_margin(4.0)
+            .show(ui, |ui| {
+                egui::Grid::new("markdown_table")
+                    .striped(true)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        // Render headers
+                        for header in headers {
+                            ui.label(
+                                RichText::new(header)
+                                    .strong()
+                                    .size(self.font_sizes.body)
+                                    .color(Color32::from_rgb(220, 220, 220))
+                            );
+                        }
+                        ui.end_row();
+
+                        // Render separator
+                        for _ in headers {
+                            ui.separator();
+                        }
+                        ui.end_row();
+
+                        // Render data rows
+                        for row in rows {
+                            for (i, cell) in row.iter().enumerate() {
+                                if i < headers.len() {
+                                    ui.label(
+                                        RichText::new(cell)
+                                            .size(self.font_sizes.body)
+                                            .color(Color32::from_rgb(200, 200, 200))
+                                    );
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
+        
+        ui.add_space(8.0);
     }
 
     /// Open URL in default browser
@@ -542,5 +639,31 @@ The end.
         
         // Should successfully parse without panicking
         assert!(!elements.is_empty());
+    }
+
+    #[test]
+    fn test_parse_table() {
+        let renderer = MarkdownRenderer::new();
+        let markdown = r#"| Feature | Supported | Notes |
+|---------|-----------|-------|
+| Headers | ✓ | All levels 1-6 |
+| Tables | ✓ | Basic table support |"#;
+        
+        let elements = renderer.parse(markdown).unwrap();
+        
+        let table_elements: Vec<_> = elements.iter()
+            .filter_map(|e| match e {
+                MarkdownElement::Table { headers, rows } => Some((headers, rows)),
+                _ => None,
+            })
+            .collect();
+        
+        assert!(!table_elements.is_empty());
+        let (headers, rows) = table_elements[0];
+        assert_eq!(headers.len(), 3);
+        assert!(headers.contains(&"Feature".to_string()));
+        assert!(headers.contains(&"Supported".to_string()));
+        assert!(headers.contains(&"Notes".to_string()));
+        assert_eq!(rows.len(), 2);
     }
 }

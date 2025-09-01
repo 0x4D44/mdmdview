@@ -279,12 +279,12 @@ const USAGE_CONTENT: &str = r#"# Usage Instructions
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl+O` | Open file |
+| `Ctrl+W` | Close current file |
 | `Ctrl+Q` | Quit application |
 | `F11` | Toggle fullscreen |
 | `Ctrl++` | Zoom in (increase font size) |
 | `Ctrl+-` | Zoom out (decrease font size) |
 | `Ctrl+0` | Reset zoom to default size |
-| `Ctrl+W` | Close current file |
 | `Home` | Go to top of document |
 | `End` | Go to bottom of document |
 | `Page Up` | Scroll up one page |

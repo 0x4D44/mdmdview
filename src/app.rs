@@ -167,6 +167,30 @@ impl MarkdownViewerApp {
                 let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!is_fullscreen));
             }
+
+            // Home - Go to top of document
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::Home) {
+                // Navigation keys work with scroll areas automatically
+                ctx.request_repaint();
+            }
+
+            // End - Go to bottom of document  
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::End) {
+                // Navigation keys work with scroll areas automatically
+                ctx.request_repaint();
+            }
+
+            // Page Up - Scroll up one page
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp) {
+                // Navigation keys work with scroll areas automatically
+                ctx.request_repaint();
+            }
+
+            // Page Down - Scroll down one page
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::PageDown) {
+                // Navigation keys work with scroll areas automatically
+                ctx.request_repaint();
+            }
         });
     }
 
