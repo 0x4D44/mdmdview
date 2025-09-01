@@ -221,7 +221,8 @@ impl MarkdownRenderer {
                         RichText::new(text)
                             .size(self.font_sizes.code)
                             .family(egui::FontFamily::Monospace)
-                            .background_color(Color32::from_rgb(50, 50, 50))
+                            .background_color(Color32::from_rgb(30, 30, 30))
+                            .color(Color32::from_rgb(180, 255, 180))
                     );
                 }
                 MarkdownElement::Link { text, url } => {
@@ -248,7 +249,7 @@ impl MarkdownRenderer {
         ui.add_space(6.0);
         
         egui::Frame::none()
-            .fill(Color32::from_rgb(30, 30, 30))
+            .fill(Color32::from_rgb(15, 15, 15))
             .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
             .inner_margin(8.0)
             .show(ui, |ui| {
