@@ -23,6 +23,17 @@ pub struct MarkdownViewerApp {
     title: String,
     /// Error message to display if any
     error_message: Option<String>,
+    /// Navigation request for keyboard shortcuts
+    nav_request: Option<NavigationRequest>,
+}
+
+/// Navigation request for keyboard-triggered scrolling
+#[derive(Debug, Clone)]
+enum NavigationRequest {
+    Top,
+    Bottom, 
+    PageUp,
+    PageDown,
 }
 
 impl MarkdownViewerApp {
@@ -35,6 +46,7 @@ impl MarkdownViewerApp {
             parsed_elements: Vec::new(),
             title: "MarkdownView".to_string(),
             error_message: None,
+            nav_request: None,
         };
 
         // Load welcome content by default
@@ -49,6 +61,7 @@ impl MarkdownViewerApp {
     pub fn load_content(&mut self, content: &str, title: Option<String>) {
         self.current_content = content.to_string();
         self.error_message = None;
+        self.nav_request = None; // Reset any pending navigation
         
         match self.renderer.parse(content) {
             Ok(elements) => {
@@ -170,26 +183,22 @@ impl MarkdownViewerApp {
 
             // Home - Go to top of document
             if i.consume_key(egui::Modifiers::NONE, egui::Key::Home) {
-                // Navigation keys work with scroll areas automatically
-                ctx.request_repaint();
+                self.nav_request = Some(NavigationRequest::Top);
             }
 
             // End - Go to bottom of document  
             if i.consume_key(egui::Modifiers::NONE, egui::Key::End) {
-                // Navigation keys work with scroll areas automatically
-                ctx.request_repaint();
+                self.nav_request = Some(NavigationRequest::Bottom);
             }
 
             // Page Up - Scroll up one page
             if i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp) {
-                // Navigation keys work with scroll areas automatically
-                ctx.request_repaint();
+                self.nav_request = Some(NavigationRequest::PageUp);
             }
 
             // Page Down - Scroll down one page
             if i.consume_key(egui::Modifiers::NONE, egui::Key::PageDown) {
-                // Navigation keys work with scroll areas automatically
-                ctx.request_repaint();
+                self.nav_request = Some(NavigationRequest::PageDown);
             }
         });
     }
@@ -355,31 +364,67 @@ impl eframe::App for MarkdownViewerApp {
             }
 
             // Render markdown content in a scrollable area
-            egui::ScrollArea::vertical()
+            let mut scroll_area = egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 8.0;
-                    
-                    if self.parsed_elements.is_empty() && self.error_message.is_none() {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(50.0);
-                            ui.label(
-                                RichText::new("Welcome to MarkdownView")
-                                    .size(24.0)
-                                    .strong()
-                            );
-                            ui.add_space(20.0);
-                            ui.label("Open a markdown file or select a sample to get started.");
-                            ui.add_space(20.0);
-                            
-                            if ui.button("📁 Open File").clicked() {
-                                self.open_file_dialog();
-                            }
-                        });
-                    } else {
-                        self.renderer.render_to_ui(ui, &self.parsed_elements);
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded);
+
+            // Handle navigation requests
+            if let Some(nav) = self.nav_request.take() {
+                match nav {
+                    NavigationRequest::Top => {
+                        scroll_area = scroll_area.vertical_scroll_offset(0.0);
                     }
-                });
+                    NavigationRequest::Bottom => {
+                        scroll_area = scroll_area.vertical_scroll_offset(f32::INFINITY);
+                    }
+                    NavigationRequest::PageUp => {
+                        let current_offset = ui.ctx().memory(|m| {
+                            m.data.get_temp::<f32>(egui::Id::new("scroll_offset")).unwrap_or(0.0)
+                        });
+                        let viewport_height = ui.available_height();
+                        let page_size = viewport_height * 0.8;
+                        let new_offset = (current_offset - page_size).max(0.0);
+                        scroll_area = scroll_area.vertical_scroll_offset(new_offset);
+                    }
+                    NavigationRequest::PageDown => {
+                        let current_offset = ui.ctx().memory(|m| {
+                            m.data.get_temp::<f32>(egui::Id::new("scroll_offset")).unwrap_or(0.0)
+                        });
+                        let viewport_height = ui.available_height();
+                        let page_size = viewport_height * 0.8;
+                        scroll_area = scroll_area.vertical_scroll_offset(current_offset + page_size);
+                    }
+                }
+            }
+
+            let scroll_area_response = scroll_area.show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                
+                if self.parsed_elements.is_empty() && self.error_message.is_none() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(50.0);
+                        ui.label(
+                            RichText::new("Welcome to MarkdownView")
+                                .size(24.0)
+                                .strong()
+                        );
+                        ui.add_space(20.0);
+                        ui.label("Open a markdown file or select a sample to get started.");
+                        ui.add_space(20.0);
+                        
+                        if ui.button("📁 Open File").clicked() {
+                            self.open_file_dialog();
+                        }
+                    });
+                } else {
+                    self.renderer.render_to_ui(ui, &self.parsed_elements);
+                }
+            });
+
+            // Store current scroll offset for navigation calculations
+            ui.ctx().memory_mut(|m| {
+                m.data.insert_temp(egui::Id::new("scroll_offset"), scroll_area_response.state.offset.y);
+            });
         });
     }
 
@@ -594,5 +639,63 @@ The end.
         assert!(app.current_file.is_none());
         assert!(!app.parsed_elements.is_empty()); // Should have welcome content
         assert!(app.error_message.is_none());
+    }
+
+    #[test]
+    fn test_navigation_request_enum() {
+        // Test that the enum values exist and are correct
+        let _top = NavigationRequest::Top;
+        let _bottom = NavigationRequest::Bottom;
+        let _page_up = NavigationRequest::PageUp;
+        let _page_down = NavigationRequest::PageDown;
+        
+        // Ensure it's cloneable and debuggable
+        let nav = NavigationRequest::Top;
+        let _cloned = nav.clone();
+        let _debug = format!("{:?}", nav);
+        
+        assert!(true); // Basic compilation test
+    }
+
+    #[test]
+    fn test_navigation_state_initialization() {
+        let app = MarkdownViewerApp::new();
+        // Test that nav_request is initialized to None
+        assert!(app.nav_request.is_none());
+    }
+
+    #[test]
+    fn test_navigation_state_reset_on_load() {
+        let mut app = MarkdownViewerApp::new();
+        
+        // Set a navigation request
+        app.nav_request = Some(NavigationRequest::Top);
+        assert!(app.nav_request.is_some());
+        
+        // Load content should reset navigation state
+        app.load_content("# Test Content", Some("Test".to_string()));
+        assert!(app.nav_request.is_none());
+    }
+
+    #[test]
+    fn test_page_navigation_calculations() {
+        // Test the page size calculation logic used in navigation
+        let viewport_height = 800.0f32;
+        let page_size = viewport_height * 0.8;
+        assert_eq!(page_size, 640.0);
+        
+        // Test boundary conditions for Page Up
+        let current_offset = 100.0f32;
+        let new_offset_up = (current_offset - page_size).max(0.0);
+        assert_eq!(new_offset_up, 0.0); // Should clamp to 0
+        
+        // Test Page Down calculation
+        let new_offset_down = current_offset + page_size;
+        assert_eq!(new_offset_down, 740.0);
+        
+        // Test that Page Up from near top goes to 0
+        let near_top = 300.0f32;
+        let from_near_top = (near_top - page_size).max(0.0);
+        assert_eq!(from_near_top, 0.0);
     }
 }
