@@ -11,6 +11,9 @@ A simple, standalone markdown viewer for Windows built with Rust and egui.
 - **Embedded Examples** - Built-in sample files to explore
 - **Zoom Support** - Adjustable font sizes for better readability
 - **Keyboard Shortcuts** - Quick access to common functions
+- **Command Line Support** - Open files directly: `mdmdview.exe file.md`
+- **Professional Menus** - Right-aligned keyboard shortcuts
+- **Custom Icon** - Distinctive markdown document icon
 
 ## Requirements
 
@@ -58,17 +61,30 @@ cargo run
 - Use `File → Open` or `Ctrl+O` to load a markdown file
 - Drag and drop `.md` files directly into the application
 - Use `File → Samples` to explore built-in examples
+- **Command line**: `mdmdview.exe filename.md` to open a specific file
+
+### Windows Shell Integration
+
+You can associate MarkdownView with `.md` files for easy opening:
+
+1. Right-click any `.md` file in Windows Explorer
+2. Select "Open with → Choose another app"
+3. Browse to `mdmdview.exe`
+4. Check "Always use this app to open .md files"
+
+Now double-clicking any `.md` file will open it in MarkdownView!
 
 ### Keyboard Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl+O` | Open file |
+| `Ctrl+W` | Close current file |
 | `Ctrl+Q` | Quit application |
 | `F11` | Toggle fullscreen |
-| `Ctrl+Plus` | Increase font size |
-| `Ctrl+Minus` | Decrease font size |
-| `Ctrl+0` | Reset font size |
+| `Ctrl++` | Zoom in (increase font size) |
+| `Ctrl+-` | Zoom out (decrease font size) |
+| `Ctrl+0` | Reset zoom to default size |
 
 ### Supported File Types
 
@@ -102,12 +118,29 @@ cargo test markdown_renderer
 
 ### Building for Release
 
+For distribution, build an optimized single executable:
+
 ```bash
 # Build optimized release version
 cargo build --release
 
 # The executable will be a single file with no external dependencies
 # Located at: target/release/mdmdview.exe
+# Size: ~4.8MB with embedded samples and syntax highlighting
+```
+
+### Command Line Usage
+
+```bash
+# Open MarkdownView with welcome screen
+mdmdview.exe
+
+# Open a specific markdown file
+mdmdview.exe document.md
+mdmdview.exe "C:\path\to\my document.md"
+
+# Works with relative and absolute paths
+mdmdview.exe ..\README.md
 ```
 
 ## Architecture

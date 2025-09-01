@@ -14,6 +14,14 @@ fn main() -> Result<(), eframe::Error> {
     #[cfg(debug_assertions)]
     env_logger::init();
 
+    // Parse command line arguments
+    let args: Vec<String> = std::env::args().collect();
+    let initial_file = if args.len() > 1 {
+        Some(std::path::PathBuf::from(&args[1]))
+    } else {
+        None
+    };
+
     // Set up eframe options for the native window
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -34,28 +42,84 @@ fn main() -> Result<(), eframe::Error> {
             // Configure egui styling for better markdown display
             configure_egui_style(&cc.egui_ctx);
             
-            Box::new(MarkdownViewerApp::new())
+            let mut app = MarkdownViewerApp::new();
+            
+            // Load initial file if provided via command line
+            if let Some(file_path) = initial_file {
+                if file_path.exists() && file_path.is_file() {
+                    if let Err(e) = app.load_file(file_path) {
+                        eprintln!("Failed to load file: {}", e);
+                        // Continue with default welcome screen
+                    }
+                } else {
+                    eprintln!("File not found: {}", file_path.display());
+                    // Continue with default welcome screen
+                }
+            }
+            
+            Box::new(app)
         }),
     )
 }
 
 /// Create an application icon from embedded data
 fn create_app_icon() -> egui::IconData {
-    // For simplicity, create a minimal icon
+    // Create a 32x32 markdown-style document icon
     let size = 32;
     let mut rgba_data = Vec::with_capacity(size * size * 4);
     
     for y in 0..size {
         for x in 0..size {
-            // Create a simple document-like icon
             let (r, g, b, a) = if x == 0 || x == size - 1 || y == 0 || y == size - 1 {
-                (80, 80, 80, 255) // Border
-            } else if y < 8 && x > size / 2 {
-                (60, 120, 200, 255) // Header area (blue)
-            } else if (y + x) % 4 == 0 && y > 8 {
-                (100, 100, 100, 255) // Text lines
+                // Border
+                (60, 60, 60, 255)
+            } else if x == 1 || x == size - 2 || y == 1 || y == size - 2 {
+                // Inner border for depth
+                (80, 80, 80, 255)
+            } else if y >= 4 && y <= 8 && x >= 4 && x <= 28 {
+                // Header area (title bar)
+                if x >= 6 && x <= 12 {
+                    (100, 150, 255, 255) // Blue for # header
+                } else if x >= 14 && x <= 26 {
+                    (200, 200, 200, 255) // Light text
+                } else {
+                    (250, 250, 250, 255) // Background
+                }
+            } else if y >= 11 && y <= 13 && x >= 4 && x <= 28 {
+                // Text line 1
+                if x >= 6 && x <= 8 {
+                    (150, 150, 150, 255) // Bullet point
+                } else if x >= 10 && x <= 24 {
+                    (180, 180, 180, 255) // Text
+                } else {
+                    (250, 250, 250, 255) // Background
+                }
+            } else if y >= 15 && y <= 17 && x >= 4 && x <= 28 {
+                // Text line 2
+                if x >= 6 && x <= 8 {
+                    (150, 150, 150, 255) // Bullet point
+                } else if x >= 10 && x <= 22 {
+                    (180, 180, 180, 255) // Text
+                } else {
+                    (250, 250, 250, 255) // Background
+                }
+            } else if y >= 20 && y <= 22 && x >= 6 && x <= 26 {
+                // Code block area
+                if x >= 8 && x <= 24 {
+                    (100, 255, 100, 255) // Green code text
+                } else {
+                    (40, 40, 40, 255) // Dark background
+                }
+            } else if y >= 25 && y <= 27 && x >= 4 && x <= 28 {
+                // Text line 3
+                if x >= 6 && x <= 20 {
+                    (180, 180, 180, 255) // Text
+                } else {
+                    (250, 250, 250, 255) // Background
+                }
             } else {
-                (240, 240, 240, 255) // Background
+                // Document background
+                (250, 250, 250, 255)
             };
             
             rgba_data.extend_from_slice(&[r, g, b, a]);
@@ -117,5 +181,29 @@ mod tests {
         // This is a basic smoke test
         let icon = create_app_icon();
         assert!(!icon.rgba.is_empty());
+    }
+
+    #[test]
+    fn test_command_line_parsing() {
+        // This tests the command line logic conceptually
+        let args = vec!["program".to_string(), "test.md".to_string()];
+        let initial_file = if args.len() > 1 {
+            Some(std::path::PathBuf::from(&args[1]))
+        } else {
+            None
+        };
+        
+        assert!(initial_file.is_some());
+        assert_eq!(initial_file.unwrap().to_string_lossy(), "test.md");
+        
+        // Test no arguments
+        let args = vec!["program".to_string()];
+        let initial_file = if args.len() > 1 {
+            Some(std::path::PathBuf::from(&args[1]))
+        } else {
+            None
+        };
+        
+        assert!(initial_file.is_none());
     }
 }

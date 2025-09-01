@@ -83,6 +83,20 @@ impl MarkdownViewerApp {
         self.load_content(sample.content, Some(sample.title.to_string()));
     }
 
+    /// Close the current file and return to welcome screen
+    pub fn close_current_file(&mut self) {
+        self.current_file = None;
+        if let Some(welcome) = SAMPLE_FILES.iter().find(|f| f.name == "welcome.md") {
+            self.load_content(welcome.content, Some("Welcome".to_string()));
+        } else {
+            // Fallback if welcome file is missing
+            self.current_content.clear();
+            self.parsed_elements.clear();
+            self.title = "MarkdownView".to_string();
+            self.error_message = None;
+        }
+    }
+
     /// Open file dialog to select a markdown file
     fn open_file_dialog(&mut self) {
         if let Some(path) = FileDialog::new()
@@ -114,6 +128,14 @@ impl MarkdownViewerApp {
                 egui::Key::Q,
             )) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+
+            // Ctrl+W - Close current file
+            if i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::CTRL,
+                egui::Key::W,
+            )) {
+                self.close_current_file();
             }
 
             // Ctrl+Plus - Zoom in
@@ -154,8 +176,13 @@ impl MarkdownViewerApp {
             menu::bar(ui, |ui| {
                 // File menu
                 ui.menu_button("File", |ui| {
-                    if ui.button("📁 Open...").clicked() {
+                    if ui.button("📁 Open...\t\t\tCtrl+O").clicked() {
                         self.open_file_dialog();
+                        ui.close_menu();
+                    }
+
+                    if ui.button("📄 Close\t\t\tCtrl+W").clicked() {
+                        self.close_current_file();
                         ui.close_menu();
                     }
 
@@ -173,31 +200,31 @@ impl MarkdownViewerApp {
 
                     ui.separator();
 
-                    if ui.button("❌ Exit").clicked() {
+                    if ui.button("❌ Exit\t\t\tCtrl+Q").clicked() {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
 
                 // View menu
                 ui.menu_button("View", |ui| {
-                    if ui.button("🔍 Zoom In").clicked() {
+                    if ui.button("🔍 Zoom In\t\t\tCtrl++").clicked() {
                         self.renderer.zoom_in();
                         ui.close_menu();
                     }
 
-                    if ui.button("🔍 Zoom Out").clicked() {
+                    if ui.button("🔍 Zoom Out\t\t\tCtrl+-").clicked() {
                         self.renderer.zoom_out();
                         ui.close_menu();
                     }
 
-                    if ui.button("↩ Reset Zoom").clicked() {
+                    if ui.button("↩ Reset Zoom\t\t\tCtrl+0").clicked() {
                         self.renderer.reset_zoom();
                         ui.close_menu();
                     }
 
                     ui.separator();
 
-                    if ui.button("⛶ Toggle Fullscreen").clicked() {
+                    if ui.button("⛶ Toggle Fullscreen\t\t\tF11").clicked() {
                         let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!is_fullscreen));
                         ui.close_menu();
@@ -490,5 +517,23 @@ The end.
             assert!(app.current_file.is_none());
             assert!(app.error_message.is_none());
         }
+    }
+
+    #[test]
+    fn test_close_current_file() {
+        let mut app = MarkdownViewerApp::new();
+        
+        // Load some content first
+        app.load_content("# Test Content", Some("Test File".to_string()));
+        assert!(app.title.contains("Test File"));
+        
+        // Close the file
+        app.close_current_file();
+        
+        // Should return to welcome screen
+        assert!(app.title.contains("Welcome"));
+        assert!(app.current_file.is_none());
+        assert!(!app.parsed_elements.is_empty()); // Should have welcome content
+        assert!(app.error_message.is_none());
     }
 }
