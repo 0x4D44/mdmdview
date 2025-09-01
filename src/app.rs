@@ -27,6 +27,8 @@ pub struct MarkdownViewerApp {
     nav_request: Option<NavigationRequest>,
     /// Scroll area ID for state management
     scroll_area_id: egui::Id,
+    /// Flag to request fullscreen toggle
+    toggle_fullscreen: bool,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -52,6 +54,7 @@ impl MarkdownViewerApp {
             error_message: None,
             nav_request: None,
             scroll_area_id: egui::Id::new("main_scroll_area"),
+            toggle_fullscreen: false,
         };
 
         // Load welcome content by default
@@ -180,10 +183,9 @@ impl MarkdownViewerApp {
                 self.renderer.reset_zoom();
             }
 
-            // F11 - Toggle fullscreen
+            // F11 - Toggle fullscreen (set flag to handle outside input context)
             if i.consume_key(egui::Modifiers::NONE, egui::Key::F11) {
-                let current_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!current_fullscreen));
+                self.toggle_fullscreen = true;
             }
 
             // Home - Go to top of document
@@ -363,6 +365,13 @@ impl eframe::App for MarkdownViewerApp {
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         // Handle keyboard shortcuts
         self.handle_shortcuts(ctx);
+
+        // Handle fullscreen toggle outside input context to avoid deadlocks
+        if self.toggle_fullscreen {
+            self.toggle_fullscreen = false;
+            let current_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!current_fullscreen));
+        }
 
         // Render menu bar
         self.render_menu_bar(ctx);
@@ -681,6 +690,24 @@ The end.
         let app = MarkdownViewerApp::new();
         // Test that nav_request is initialized to None
         assert!(app.nav_request.is_none());
+        // Test that fullscreen toggle flag is initialized to false
+        assert!(!app.toggle_fullscreen);
+    }
+
+    #[test]
+    fn test_fullscreen_toggle_flag() {
+        let mut app = MarkdownViewerApp::new();
+        
+        // Initially should be false
+        assert!(!app.toggle_fullscreen);
+        
+        // Simulate F11 key press (this would be set in handle_shortcuts)
+        app.toggle_fullscreen = true;
+        assert!(app.toggle_fullscreen);
+        
+        // After handling, it should be reset to false
+        app.toggle_fullscreen = false;
+        assert!(!app.toggle_fullscreen);
     }
 
     #[test]
