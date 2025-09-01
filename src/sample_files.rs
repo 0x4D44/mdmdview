@@ -84,6 +84,7 @@ You can also use `inline code` and ~~strikethrough~~ text.
 ## Lists
 
 ### Unordered Lists
+
 - First item
 - Second item
   - Nested item
@@ -91,6 +92,7 @@ You can also use `inline code` and ~~strikethrough~~ text.
 - Third item
 
 ### Ordered Lists
+
 1. First item
 2. Second item
    1. Nested numbered item
