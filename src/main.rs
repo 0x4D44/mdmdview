@@ -28,8 +28,11 @@ fn main() -> Result<(), eframe::Error> {
             .with_title("MarkdownView - A Simple Markdown Viewer")
             .with_inner_size(egui::Vec2::new(1000.0, 700.0))
             .with_min_inner_size(egui::Vec2::new(600.0, 400.0))
-            .with_icon(create_app_icon()),
-        // Enable persistence for window state
+            .with_icon(create_app_icon())
+            .with_resizable(true)
+            .with_maximize_button(true)
+            .with_minimize_button(true),
+        // Enable complete window state persistence
         persist_window: true,
         ..Default::default()
     };
