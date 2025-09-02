@@ -1,6 +1,6 @@
 use anyhow::Result;
-use egui::{RichText, Color32, Stroke};
-use pulldown_cmark::{Event, Parser, Tag, Options, LinkType};
+use egui::{Color32, RichText, Stroke};
+use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
@@ -48,12 +48,24 @@ pub enum InlineSpan {
 #[derive(Debug, Clone)]
 pub enum MarkdownElement {
     Paragraph(Vec<InlineSpan>), // Changed: paragraphs contain inline spans
-    Header { level: u8, spans: Vec<InlineSpan> }, // Headers can have inline formatting too
-    CodeBlock { language: Option<String>, text: String },
-    List { ordered: bool, items: Vec<Vec<InlineSpan>> }, // List items are also inline spans
+    Header {
+        level: u8,
+        spans: Vec<InlineSpan>,
+    }, // Headers can have inline formatting too
+    CodeBlock {
+        language: Option<String>,
+        text: String,
+    },
+    List {
+        ordered: bool,
+        items: Vec<Vec<InlineSpan>>,
+    }, // List items are also inline spans
     Quote(Vec<InlineSpan>),
     HorizontalRule,
-    Table { headers: Vec<String>, rows: Vec<Vec<String>> },
+    Table {
+        headers: Vec<String>,
+        rows: Vec<Vec<String>>,
+    },
 }
 
 /// Type alias for table parsing result to reduce complexity
@@ -98,40 +110,53 @@ impl MarkdownRenderer {
         let parser = Parser::new_ext(markdown, options);
         let mut elements = Vec::new();
         let events = parser.collect::<Vec<_>>();
-        
+
         let mut i = 0;
         while i < events.len() {
             i = self.parse_element(&events, i, &mut elements)?;
         }
-        
+
         Ok(elements)
     }
 
     /// Parse a single element from the event stream
-    fn parse_element(&self, events: &[Event], start: usize, elements: &mut Vec<MarkdownElement>) -> Result<usize, anyhow::Error> {
+    fn parse_element(
+        &self,
+        events: &[Event],
+        start: usize,
+        elements: &mut Vec<MarkdownElement>,
+    ) -> Result<usize, anyhow::Error> {
         match &events[start] {
             Event::Start(Tag::Paragraph) => {
-                let (spans, next_idx) = self.parse_inline_spans(events, start + 1, Tag::Paragraph)?;
+                let (spans, next_idx) =
+                    self.parse_inline_spans(events, start + 1, Tag::Paragraph)?;
                 if !spans.is_empty() {
                     elements.push(MarkdownElement::Paragraph(spans));
                 }
                 Ok(next_idx)
             }
             Event::Start(Tag::Heading(level, _, _)) => {
-                let (spans, next_idx) = self.parse_inline_spans(events, start + 1, Tag::Heading(*level, None, vec![]))?;
-                elements.push(MarkdownElement::Header { level: *level as u8, spans });
+                let (spans, next_idx) =
+                    self.parse_inline_spans(events, start + 1, Tag::Heading(*level, None, vec![]))?;
+                elements.push(MarkdownElement::Header {
+                    level: *level as u8,
+                    spans,
+                });
                 Ok(next_idx)
             }
             Event::Start(Tag::CodeBlock(_)) => {
                 let (code_text, language, next_idx) = self.parse_code_block(events, start)?;
-                elements.push(MarkdownElement::CodeBlock { language, text: code_text });
+                elements.push(MarkdownElement::CodeBlock {
+                    language,
+                    text: code_text,
+                });
                 Ok(next_idx)
             }
             Event::Start(Tag::List(first_item)) => {
                 let (items, next_idx) = self.parse_list(events, start + 1, *first_item)?;
-                elements.push(MarkdownElement::List { 
-                    ordered: first_item.is_some(), 
-                    items 
+                elements.push(MarkdownElement::List {
+                    ordered: first_item.is_some(),
+                    items,
                 });
                 Ok(next_idx)
             }
@@ -152,14 +177,21 @@ impl MarkdownRenderer {
     }
 
     /// Parse inline spans until reaching the end tag
-    fn parse_inline_spans(&self, events: &[Event], start: usize, end_tag: Tag) -> Result<(Vec<InlineSpan>, usize), anyhow::Error> {
+    fn parse_inline_spans(
+        &self,
+        events: &[Event],
+        start: usize,
+        end_tag: Tag,
+    ) -> Result<(Vec<InlineSpan>, usize), anyhow::Error> {
         let mut spans = Vec::new();
         let mut i = start;
         let mut text_buffer = String::new();
-        
+
         while i < events.len() {
             match &events[i] {
-                Event::End(tag) if std::mem::discriminant(tag) == std::mem::discriminant(&end_tag) => {
+                Event::End(tag)
+                    if std::mem::discriminant(tag) == std::mem::discriminant(&end_tag) =>
+                {
                     if !text_buffer.is_empty() {
                         spans.push(InlineSpan::Text(text_buffer.clone()));
                         text_buffer.clear();
@@ -183,7 +215,8 @@ impl MarkdownRenderer {
                         spans.push(InlineSpan::Text(text_buffer.clone()));
                         text_buffer.clear();
                     }
-                    let (inner_text, next_i) = self.collect_until_tag_end(events, i + 1, Tag::Strong)?;
+                    let (inner_text, next_i) =
+                        self.collect_until_tag_end(events, i + 1, Tag::Strong)?;
                     spans.push(InlineSpan::Strong(inner_text));
                     i = next_i;
                 }
@@ -192,7 +225,8 @@ impl MarkdownRenderer {
                         spans.push(InlineSpan::Text(text_buffer.clone()));
                         text_buffer.clear();
                     }
-                    let (inner_text, next_i) = self.collect_until_tag_end(events, i + 1, Tag::Emphasis)?;
+                    let (inner_text, next_i) =
+                        self.collect_until_tag_end(events, i + 1, Tag::Emphasis)?;
                     spans.push(InlineSpan::Emphasis(inner_text));
                     i = next_i;
                 }
@@ -202,8 +236,15 @@ impl MarkdownRenderer {
                         text_buffer.clear();
                     }
                     let url_str = url.to_string();
-                    let (link_text, next_i) = self.collect_until_tag_end(events, i + 1, Tag::Link(LinkType::Inline, "".into(), "".into()))?;
-                    spans.push(InlineSpan::Link { text: link_text, url: url_str });
+                    let (link_text, next_i) = self.collect_until_tag_end(
+                        events,
+                        i + 1,
+                        Tag::Link(LinkType::Inline, "".into(), "".into()),
+                    )?;
+                    spans.push(InlineSpan::Link {
+                        text: link_text,
+                        url: url_str,
+                    });
                     i = next_i;
                 }
                 _ => {
@@ -211,22 +252,29 @@ impl MarkdownRenderer {
                 }
             }
         }
-        
+
         if !text_buffer.is_empty() {
             spans.push(InlineSpan::Text(text_buffer));
         }
-        
+
         Ok((spans, i))
     }
 
     /// Collect text until a specific end tag
-    fn collect_until_tag_end(&self, events: &[Event], start: usize, end_tag: Tag) -> Result<(String, usize), anyhow::Error> {
+    fn collect_until_tag_end(
+        &self,
+        events: &[Event],
+        start: usize,
+        end_tag: Tag,
+    ) -> Result<(String, usize), anyhow::Error> {
         let mut text = String::new();
         let mut i = start;
-        
+
         while i < events.len() {
             match &events[i] {
-                Event::End(tag) if std::mem::discriminant(tag) == std::mem::discriminant(&end_tag) => {
+                Event::End(tag)
+                    if std::mem::discriminant(tag) == std::mem::discriminant(&end_tag) =>
+                {
                     return Ok((text, i + 1));
                 }
                 Event::Text(t) => {
@@ -239,16 +287,20 @@ impl MarkdownRenderer {
             }
             i += 1;
         }
-        
+
         Ok((text, i))
     }
 
     /// Parse a code block
-    fn parse_code_block(&self, events: &[Event], start: usize) -> Result<(String, Option<String>, usize), anyhow::Error> {
+    fn parse_code_block(
+        &self,
+        events: &[Event],
+        start: usize,
+    ) -> Result<(String, Option<String>, usize), anyhow::Error> {
         let mut language = None;
         let mut code_text = String::new();
         let mut i = start;
-        
+
         // Extract language from the start tag
         if let Event::Start(Tag::CodeBlock(kind)) = &events[start] {
             if let pulldown_cmark::CodeBlockKind::Fenced(lang) = kind {
@@ -258,7 +310,7 @@ impl MarkdownRenderer {
             }
             i += 1;
         }
-        
+
         while i < events.len() {
             match &events[i] {
                 Event::End(Tag::CodeBlock(_)) => {
@@ -271,15 +323,20 @@ impl MarkdownRenderer {
             }
             i += 1;
         }
-        
+
         Ok((code_text, language, i))
     }
 
     /// Parse a list
-    fn parse_list(&self, events: &[Event], start: usize, _first_item: Option<u64>) -> Result<(Vec<Vec<InlineSpan>>, usize), anyhow::Error> {
+    fn parse_list(
+        &self,
+        events: &[Event],
+        start: usize,
+        _first_item: Option<u64>,
+    ) -> Result<(Vec<Vec<InlineSpan>>, usize), anyhow::Error> {
         let mut items = Vec::new();
         let mut i = start;
-        
+
         while i < events.len() {
             match &events[i] {
                 Event::End(Tag::List(_)) => {
@@ -295,16 +352,20 @@ impl MarkdownRenderer {
                 }
             }
         }
-        
+
         Ok((items, i))
     }
 
     /// Parse a table (simplified)
-    fn parse_table(&self, events: &[Event], start: usize) -> Result<TableParseResult, anyhow::Error> {
+    fn parse_table(
+        &self,
+        events: &[Event],
+        start: usize,
+    ) -> Result<TableParseResult, anyhow::Error> {
         // Simplified table parsing - for now just collect as text
         let headers = vec!["Column 1".to_string(), "Column 2".to_string()];
         let rows = vec![];
-        
+
         // Skip to end of table
         let mut i = start;
         while i < events.len() {
@@ -313,7 +374,7 @@ impl MarkdownRenderer {
             }
             i += 1;
         }
-        
+
         Ok((headers, rows, i))
     }
 
@@ -335,7 +396,7 @@ impl MarkdownRenderer {
                         6 => self.font_sizes.h6,
                         _ => self.font_sizes.body,
                     };
-                    
+
                     ui.add_space(8.0);
                     ui.horizontal_wrapped(|ui| {
                         for span in spans {
@@ -383,7 +444,13 @@ impl MarkdownRenderer {
     }
 
     /// Render a single inline span
-    fn render_inline_span(&self, ui: &mut egui::Ui, span: &InlineSpan, font_size: Option<f32>, strong: Option<bool>) {
+    fn render_inline_span(
+        &self,
+        ui: &mut egui::Ui,
+        span: &InlineSpan,
+        font_size: Option<f32>,
+        strong: Option<bool>,
+    ) {
         let size = font_size.unwrap_or(self.font_sizes.body);
         let is_strong = strong.unwrap_or(false);
 
@@ -396,27 +463,28 @@ impl MarkdownRenderer {
                 }
                 ui.label(rich_text);
             }
-                InlineSpan::Code(code) => {
-                    // Create inline code with no extra spacing
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(code.trim())
-                                .size(self.font_sizes.code)
-                                .family(egui::FontFamily::Monospace)
-                                .background_color(Color32::from_rgb(30, 30, 30))
-                                .color(Color32::from_rgb(180, 255, 180))
-                        ).wrap(false)
-                        .selectable(false)
-                    );
-                }
+            InlineSpan::Code(code) => {
+                // Create inline code with no extra spacing
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(code.trim())
+                            .size(self.font_sizes.code)
+                            .family(egui::FontFamily::Monospace)
+                            .background_color(Color32::from_rgb(30, 30, 30))
+                            .color(Color32::from_rgb(180, 255, 180)),
+                    )
+                    .wrap(false)
+                    .selectable(false),
+                );
+            }
             InlineSpan::Strong(text) => {
                 let fixed_text = self.fix_unicode_chars(text);
                 ui.label(
                     RichText::new(fixed_text)
                         .size(size)
                         .strong()
-                        .color(Color32::from_rgb(220, 220, 220))
+                        .color(Color32::from_rgb(220, 220, 220)),
                 );
             }
             InlineSpan::Emphasis(text) => {
@@ -425,12 +493,16 @@ impl MarkdownRenderer {
                     RichText::new(fixed_text)
                         .size(size)
                         .italics()
-                        .color(Color32::from_rgb(220, 220, 220))
+                        .color(Color32::from_rgb(220, 220, 220)),
                 );
             }
             InlineSpan::Link { text, url } => {
                 let fixed_text = self.fix_unicode_chars(text);
-                let response = ui.link(RichText::new(fixed_text).color(Color32::LIGHT_BLUE).size(size));
+                let response = ui.link(
+                    RichText::new(fixed_text)
+                        .color(Color32::LIGHT_BLUE)
+                        .size(size),
+                );
                 if response.clicked() {
                     self.open_url(url);
                 }
@@ -445,7 +517,7 @@ impl MarkdownRenderer {
         }
 
         ui.add_space(4.0);
-        
+
         for (index, spans) in items.iter().enumerate() {
             ui.horizontal_wrapped(|ui| {
                 // Add bullet or number
@@ -454,27 +526,27 @@ impl MarkdownRenderer {
                 } else {
                     "•".to_string()
                 };
-                
+
                 ui.label(
                     RichText::new(marker)
                         .size(self.font_sizes.body)
-                        .color(Color32::from_rgb(180, 180, 180))
+                        .color(Color32::from_rgb(180, 180, 180)),
                 );
-                
+
                 // Render the inline spans
                 for span in spans {
                     self.render_inline_span(ui, span, None, None);
                 }
             });
         }
-        
+
         ui.add_space(4.0);
     }
 
     /// Render a code block with syntax highlighting
     fn render_code_block(&self, ui: &mut egui::Ui, language: Option<&str>, code: &str) {
         ui.add_space(8.0);
-        
+
         egui::Frame::none()
             .fill(Color32::from_rgb(25, 25, 25))
             .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
@@ -486,22 +558,24 @@ impl MarkdownRenderer {
                             RichText::new(lang)
                                 .size(self.font_sizes.code - 1.0)
                                 .color(Color32::from_rgb(150, 150, 150))
-                                .family(egui::FontFamily::Monospace)
+                                .family(egui::FontFamily::Monospace),
                         );
                         ui.add_space(2.0);
                     }
-                    
+
                     // Try syntax highlighting
                     if let Some(lang) = language {
-                        if let Some(syntax) = self.find_syntax_for_language(lang)
-                            .or_else(|| self.syntax_set.find_syntax_by_first_line(code)) {
-                            
+                        if let Some(syntax) = self
+                            .find_syntax_for_language(lang)
+                            .or_else(|| self.syntax_set.find_syntax_by_first_line(code))
+                        {
                             let theme = &self.theme_set.themes["base16-ocean.dark"];
                             let mut h = HighlightLines::new(syntax, theme);
-                            
+
                             for line in LinesWithEndings::from(code) {
-                                let ranges = h.highlight_line(line, &self.syntax_set).unwrap_or_default();
-                                
+                                let ranges =
+                                    h.highlight_line(line, &self.syntax_set).unwrap_or_default();
+
                                 ui.horizontal_wrapped(|ui| {
                                     for (style, text) in ranges {
                                         // Check if this token is pure whitespace
@@ -511,7 +585,7 @@ impl MarkdownRenderer {
                                                 RichText::new(text)
                                                     .size(self.font_sizes.code)
                                                     .color(Color32::TRANSPARENT)
-                                                    .family(egui::FontFamily::Monospace)
+                                                    .family(egui::FontFamily::Monospace),
                                             );
                                         } else {
                                             // For non-whitespace, use normal highlighting but replace spaces with transparent ones
@@ -520,7 +594,7 @@ impl MarkdownRenderer {
                                                 style.foreground.g,
                                                 style.foreground.b,
                                             );
-                                            
+
                                             // Split by spaces and handle separately
                                             let parts: Vec<&str> = text.split(' ').collect();
                                             for (i, part) in parts.iter().enumerate() {
@@ -529,24 +603,28 @@ impl MarkdownRenderer {
                                                         .size(self.font_sizes.code)
                                                         .color(color)
                                                         .family(egui::FontFamily::Monospace);
-                                                        
-                                                    if style.font_style.contains(syntect::highlighting::FontStyle::BOLD) {
+
+                                                    if style.font_style.contains(
+                                                        syntect::highlighting::FontStyle::BOLD,
+                                                    ) {
                                                         rich_text = rich_text.strong();
                                                     }
-                                                    if style.font_style.contains(syntect::highlighting::FontStyle::ITALIC) {
+                                                    if style.font_style.contains(
+                                                        syntect::highlighting::FontStyle::ITALIC,
+                                                    ) {
                                                         rich_text = rich_text.italics();
                                                     }
-                                                    
+
                                                     ui.label(rich_text);
                                                 }
-                                                
+
                                                 // Add transparent space between parts (except after last part)
                                                 if i < parts.len() - 1 {
                                                     ui.label(
                                                         RichText::new(" ")
                                                             .size(self.font_sizes.code)
                                                             .color(Color32::TRANSPARENT)
-                                                            .family(egui::FontFamily::Monospace)
+                                                            .family(egui::FontFamily::Monospace),
                                                     );
                                                 }
                                             }
@@ -557,17 +635,17 @@ impl MarkdownRenderer {
                             return; // Early return if highlighting succeeded
                         }
                     }
-                    
+
                     // Fallback: render as plain text
                     ui.label(
                         RichText::new(code)
                             .size(self.font_sizes.code)
                             .color(Color32::from_rgb(220, 220, 220))
-                            .family(egui::FontFamily::Monospace)
+                            .family(egui::FontFamily::Monospace),
                     );
                 });
             });
-        
+
         ui.add_space(8.0);
     }
 
@@ -576,7 +654,7 @@ impl MarkdownRenderer {
         if headers.is_empty() {
             return;
         }
-        
+
         ui.add_space(8.0);
         ui.label("Table rendering not fully implemented");
         ui.add_space(8.0);
@@ -594,21 +672,21 @@ impl MarkdownRenderer {
     fn find_syntax_for_language(&self, lang: &str) -> Option<&syntect::parsing::SyntaxReference> {
         // Create a mapping of common language names to their syntect equivalents
         let lang_lower = lang.to_lowercase();
-        
+
         // Try direct name match first
         if let Some(syntax) = self.syntax_set.find_syntax_by_name(&lang_lower) {
             return Some(syntax);
         }
-        
+
         // Try extension-based matching
         if let Some(syntax) = self.syntax_set.find_syntax_by_extension(&lang_lower) {
             return Some(syntax);
         }
-        
+
         // Handle common language mappings
         let mapped_lang = match lang_lower.as_str() {
             "rust" => "rs",
-            "python" => "py", 
+            "python" => "py",
             "javascript" => "js",
             "typescript" => "ts",
             "c++" | "cpp" => "cpp",
@@ -629,9 +707,10 @@ impl MarkdownRenderer {
             "toml" => "toml",
             _ => &lang_lower,
         };
-        
+
         // Try mapped extension
-        self.syntax_set.find_syntax_by_extension(mapped_lang)
+        self.syntax_set
+            .find_syntax_by_extension(mapped_lang)
             .or_else(|| self.syntax_set.find_syntax_by_name(mapped_lang))
     }
 
@@ -688,13 +767,13 @@ mod tests {
     fn test_zoom_functionality() {
         let mut renderer = MarkdownRenderer::new();
         let original_body = renderer.font_sizes.body;
-        
+
         renderer.zoom_in();
         assert!(renderer.font_sizes.body > original_body);
-        
+
         renderer.zoom_out();
         assert!(renderer.font_sizes.body < original_body * 1.1);
-        
+
         renderer.reset_zoom();
         assert_eq!(renderer.font_sizes.body, original_body);
     }
