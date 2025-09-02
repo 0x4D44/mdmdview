@@ -79,43 +79,43 @@ fn create_app_icon() -> egui::IconData {
             } else if x == 1 || x == size - 2 || y == 1 || y == size - 2 {
                 // Inner border for depth
                 (80, 80, 80, 255)
-            } else if y >= 4 && y <= 8 && x >= 4 && x <= 28 {
+            } else if (4..=8).contains(&y) && (4..=28).contains(&x) {
                 // Header area (title bar)
-                if x >= 6 && x <= 12 {
+                if (6..=12).contains(&x) {
                     (100, 150, 255, 255) // Blue for # header
-                } else if x >= 14 && x <= 26 {
+                } else if (14..=26).contains(&x) {
                     (200, 200, 200, 255) // Light text
                 } else {
                     (250, 250, 250, 255) // Background
                 }
-            } else if y >= 11 && y <= 13 && x >= 4 && x <= 28 {
+            } else if (11..=13).contains(&y) && (4..=28).contains(&x) {
                 // Text line 1
-                if x >= 6 && x <= 8 {
+                if (6..=8).contains(&x) {
                     (150, 150, 150, 255) // Bullet point
-                } else if x >= 10 && x <= 24 {
+                } else if (10..=24).contains(&x) {
                     (180, 180, 180, 255) // Text
                 } else {
                     (250, 250, 250, 255) // Background
                 }
-            } else if y >= 15 && y <= 17 && x >= 4 && x <= 28 {
+            } else if (15..=17).contains(&y) && (4..=28).contains(&x) {
                 // Text line 2
-                if x >= 6 && x <= 8 {
+                if (6..=8).contains(&x) {
                     (150, 150, 150, 255) // Bullet point
-                } else if x >= 10 && x <= 22 {
+                } else if (10..=22).contains(&x) {
                     (180, 180, 180, 255) // Text
                 } else {
                     (250, 250, 250, 255) // Background
                 }
-            } else if y >= 20 && y <= 22 && x >= 6 && x <= 26 {
+            } else if (20..=22).contains(&y) && (6..=26).contains(&x) {
                 // Code block area
-                if x >= 8 && x <= 24 {
+                if (8..=24).contains(&x) {
                     (100, 255, 100, 255) // Green code text
                 } else {
                     (40, 40, 40, 255) // Dark background
                 }
-            } else if y >= 25 && y <= 27 && x >= 4 && x <= 28 {
+            } else if (25..=27).contains(&y) && (4..=28).contains(&x) {
                 // Text line 3
-                if x >= 6 && x <= 20 {
+                if (6..=20).contains(&x) {
                     (180, 180, 180, 255) // Text
                 } else {
                     (250, 250, 250, 255) // Background

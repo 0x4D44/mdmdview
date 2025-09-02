@@ -56,6 +56,9 @@ pub enum MarkdownElement {
     Table { headers: Vec<String>, rows: Vec<Vec<String>> },
 }
 
+/// Type alias for table parsing result to reduce complexity
+type TableParseResult = (Vec<String>, Vec<Vec<String>>, usize);
+
 /// Markdown renderer with proper inline element handling
 pub struct MarkdownRenderer {
     font_sizes: FontSizes,
@@ -297,7 +300,7 @@ impl MarkdownRenderer {
     }
 
     /// Parse a table (simplified)
-    fn parse_table(&self, events: &[Event], start: usize) -> Result<(Vec<String>, Vec<Vec<String>>, usize), anyhow::Error> {
+    fn parse_table(&self, events: &[Event], start: usize) -> Result<TableParseResult, anyhow::Error> {
         // Simplified table parsing - for now just collect as text
         let headers = vec!["Column 1".to_string(), "Column 2".to_string()];
         let rows = vec![];
@@ -393,16 +396,20 @@ impl MarkdownRenderer {
                 }
                 ui.label(rich_text);
             }
-            InlineSpan::Code(code) => {
-                // Don't fix Unicode in code - preserve as-is for accuracy
-                ui.label(
-                    RichText::new(code)
-                        .size(self.font_sizes.code)
-                        .family(egui::FontFamily::Monospace)
-                        .background_color(Color32::from_rgb(30, 30, 30))
-                        .color(Color32::from_rgb(180, 255, 180))
-                );
-            }
+                InlineSpan::Code(code) => {
+                    // Create inline code with no extra spacing
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(code.trim())
+                                .size(self.font_sizes.code)
+                                .family(egui::FontFamily::Monospace)
+                                .background_color(Color32::from_rgb(30, 30, 30))
+                                .color(Color32::from_rgb(180, 255, 180))
+                        ).wrap(false)
+                        .selectable(false)
+                    );
+                }
             InlineSpan::Strong(text) => {
                 let fixed_text = self.fix_unicode_chars(text);
                 ui.label(
@@ -486,8 +493,7 @@ impl MarkdownRenderer {
                     
                     // Try syntax highlighting
                     if let Some(lang) = language {
-                        if let Some(syntax) = self.syntax_set.find_syntax_by_extension(lang)
-                            .or_else(|| self.syntax_set.find_syntax_by_name(lang))
+                        if let Some(syntax) = self.find_syntax_for_language(lang)
                             .or_else(|| self.syntax_set.find_syntax_by_first_line(code)) {
                             
                             let theme = &self.theme_set.themes["base16-ocean.dark"];
@@ -498,25 +504,53 @@ impl MarkdownRenderer {
                                 
                                 ui.horizontal_wrapped(|ui| {
                                     for (style, text) in ranges {
-                                        let color = Color32::from_rgb(
-                                            style.foreground.r,
-                                            style.foreground.g,
-                                            style.foreground.b,
-                                        );
-                                        
-                                        let mut rich_text = RichText::new(text)
-                                            .size(self.font_sizes.code)
-                                            .color(color)
-                                            .family(egui::FontFamily::Monospace);
+                                        // Check if this token is pure whitespace
+                                        if text.trim().is_empty() {
+                                            // For pure whitespace tokens, use transparent color
+                                            ui.label(
+                                                RichText::new(text)
+                                                    .size(self.font_sizes.code)
+                                                    .color(Color32::TRANSPARENT)
+                                                    .family(egui::FontFamily::Monospace)
+                                            );
+                                        } else {
+                                            // For non-whitespace, use normal highlighting but replace spaces with transparent ones
+                                            let color = Color32::from_rgb(
+                                                style.foreground.r,
+                                                style.foreground.g,
+                                                style.foreground.b,
+                                            );
                                             
-                                        if style.font_style.contains(syntect::highlighting::FontStyle::BOLD) {
-                                            rich_text = rich_text.strong();
+                                            // Split by spaces and handle separately
+                                            let parts: Vec<&str> = text.split(' ').collect();
+                                            for (i, part) in parts.iter().enumerate() {
+                                                if !part.is_empty() {
+                                                    let mut rich_text = RichText::new(*part)
+                                                        .size(self.font_sizes.code)
+                                                        .color(color)
+                                                        .family(egui::FontFamily::Monospace);
+                                                        
+                                                    if style.font_style.contains(syntect::highlighting::FontStyle::BOLD) {
+                                                        rich_text = rich_text.strong();
+                                                    }
+                                                    if style.font_style.contains(syntect::highlighting::FontStyle::ITALIC) {
+                                                        rich_text = rich_text.italics();
+                                                    }
+                                                    
+                                                    ui.label(rich_text);
+                                                }
+                                                
+                                                // Add transparent space between parts (except after last part)
+                                                if i < parts.len() - 1 {
+                                                    ui.label(
+                                                        RichText::new(" ")
+                                                            .size(self.font_sizes.code)
+                                                            .color(Color32::TRANSPARENT)
+                                                            .family(egui::FontFamily::Monospace)
+                                                    );
+                                                }
+                                            }
                                         }
-                                        if style.font_style.contains(syntect::highlighting::FontStyle::ITALIC) {
-                                            rich_text = rich_text.italics();
-                                        }
-                                        
-                                        ui.label(rich_text);
                                     }
                                 });
                             }
@@ -553,6 +587,52 @@ impl MarkdownRenderer {
         if let Err(e) = webbrowser::open(url) {
             eprintln!("Failed to open URL {}: {}", url, e);
         }
+    }
+
+    /// Find syntax definition for a given language name
+    /// Maps common language names to their syntax definitions
+    fn find_syntax_for_language(&self, lang: &str) -> Option<&syntect::parsing::SyntaxReference> {
+        // Create a mapping of common language names to their syntect equivalents
+        let lang_lower = lang.to_lowercase();
+        
+        // Try direct name match first
+        if let Some(syntax) = self.syntax_set.find_syntax_by_name(&lang_lower) {
+            return Some(syntax);
+        }
+        
+        // Try extension-based matching
+        if let Some(syntax) = self.syntax_set.find_syntax_by_extension(&lang_lower) {
+            return Some(syntax);
+        }
+        
+        // Handle common language mappings
+        let mapped_lang = match lang_lower.as_str() {
+            "rust" => "rs",
+            "python" => "py", 
+            "javascript" => "js",
+            "typescript" => "ts",
+            "c++" | "cpp" => "cpp",
+            "c#" | "csharp" => "cs",
+            "shell" | "bash" => "sh",
+            "powershell" => "ps1",
+            "yaml" => "yml",
+            "markdown" => "md",
+            "html" => "html",
+            "css" => "css",
+            "java" => "java",
+            "go" => "go",
+            "php" => "php",
+            "ruby" => "rb",
+            "xml" => "xml",
+            "json" => "json",
+            "sql" => "sql",
+            "toml" => "toml",
+            _ => &lang_lower,
+        };
+        
+        // Try mapped extension
+        self.syntax_set.find_syntax_by_extension(mapped_lang)
+            .or_else(|| self.syntax_set.find_syntax_by_name(mapped_lang))
     }
 
     /// Zoom in (increase font sizes)
