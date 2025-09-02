@@ -577,12 +577,21 @@ impl MarkdownRenderer {
                                     h.highlight_line(line, &self.syntax_set).unwrap_or_default();
 
                                 ui.horizontal_wrapped(|ui| {
+                                    // Remove spacing between tokens to avoid visual gaps
+                                    ui.spacing_mut().item_spacing.x = 0.0;
                                     for (style, text) in ranges {
-                                        // Check if this token is pure whitespace
-                                        if text.trim().is_empty() {
-                                            // For pure whitespace tokens, use transparent color
+                                        // Drop newline characters completely; they're handled by the outer line loop
+                                        let cleaned = text.replace(['\n', '\r'], "");
+
+                                        if cleaned.is_empty() {
+                                            continue;
+                                        }
+
+                                        // Check if this token is pure whitespace (spaces or tabs only)
+                                        if cleaned.chars().all(|c| c == ' ' || c == '\t') {
+                                            // Render whitespace as transparent to preserve layout without visual gaps
                                             ui.label(
-                                                RichText::new(text)
+                                                RichText::new(cleaned)
                                                     .size(self.font_sizes.code)
                                                     .color(Color32::TRANSPARENT)
                                                     .family(egui::FontFamily::Monospace),
@@ -596,7 +605,7 @@ impl MarkdownRenderer {
                                             );
 
                                             // Split by spaces and handle separately
-                                            let parts: Vec<&str> = text.split(' ').collect();
+                                            let parts: Vec<&str> = cleaned.split(' ').collect();
                                             for (i, part) in parts.iter().enumerate() {
                                                 if !part.is_empty() {
                                                     let mut rich_text = RichText::new(*part)
@@ -604,14 +613,16 @@ impl MarkdownRenderer {
                                                         .color(color)
                                                         .family(egui::FontFamily::Monospace);
 
-                                                    if style.font_style.contains(
-                                                        syntect::highlighting::FontStyle::BOLD,
-                                                    ) {
+                                                    if style
+                                                        .font_style
+                                                        .contains(syntect::highlighting::FontStyle::BOLD)
+                                                    {
                                                         rich_text = rich_text.strong();
                                                     }
-                                                    if style.font_style.contains(
-                                                        syntect::highlighting::FontStyle::ITALIC,
-                                                    ) {
+                                                    if style
+                                                        .font_style
+                                                        .contains(syntect::highlighting::FontStyle::ITALIC)
+                                                    {
                                                         rich_text = rich_text.italics();
                                                     }
 
