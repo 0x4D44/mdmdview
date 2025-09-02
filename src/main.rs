@@ -1,11 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // Hide console in release mode
 
 /// Main entry point for the MarkdownView application
-/// 
+///
 /// A simple, standalone markdown viewer for Windows built with Rust and egui.
 /// This application provides a clean interface for viewing markdown files with
 /// syntax highlighting, embedded samples, and essential viewing features.
-
 use mdmdview::MarkdownViewerApp;
 
 /// Application entry point
@@ -44,9 +43,9 @@ fn main() -> Result<(), eframe::Error> {
         Box::new(|cc| {
             // Configure egui styling for better markdown display
             configure_egui_style(&cc.egui_ctx);
-            
+
             let mut app = MarkdownViewerApp::new();
-            
+
             // Load initial file if provided via command line
             if let Some(file_path) = initial_file {
                 if file_path.exists() && file_path.is_file() {
@@ -59,7 +58,7 @@ fn main() -> Result<(), eframe::Error> {
                     // Continue with default welcome screen
                 }
             }
-            
+
             Box::new(app)
         }),
     )
@@ -70,7 +69,7 @@ fn create_app_icon() -> egui::IconData {
     // Create a 32x32 markdown-style document icon
     let size = 32;
     let mut rgba_data = Vec::with_capacity(size * size * 4);
-    
+
     for y in 0..size {
         for x in 0..size {
             let (r, g, b, a) = if x == 0 || x == size - 1 || y == 0 || y == size - 1 {
@@ -124,7 +123,7 @@ fn create_app_icon() -> egui::IconData {
                 // Document background
                 (250, 250, 250, 255)
             };
-            
+
             rgba_data.extend_from_slice(&[r, g, b, a]);
         }
     }
@@ -152,7 +151,7 @@ fn configure_egui_style(ctx: &egui::Context) {
     // Configure visuals for better contrast with black background
     style.visuals.window_rounding = egui::Rounding::same(4.0);
     style.visuals.menu_rounding = egui::Rounding::same(4.0);
-    
+
     // Set to true black background for maximum contrast
     if style.visuals.dark_mode {
         style.visuals.window_fill = egui::Color32::BLACK;
@@ -191,24 +190,16 @@ mod tests {
     #[test]
     fn test_command_line_parsing() {
         // This tests the command line logic conceptually
-        let args = vec!["program".to_string(), "test.md".to_string()];
-        let initial_file = if args.len() > 1 {
-            Some(std::path::PathBuf::from(&args[1]))
-        } else {
-            None
-        };
-        
+        let args = ["program".to_string(), "test.md".to_string()];
+        let initial_file = args.get(1).map(std::path::PathBuf::from);
+
         assert!(initial_file.is_some());
         assert_eq!(initial_file.unwrap().to_string_lossy(), "test.md");
-        
+
         // Test no arguments
-        let args = vec!["program".to_string()];
-        let initial_file = if args.len() > 1 {
-            Some(std::path::PathBuf::from(&args[1]))
-        } else {
-            None
-        };
-        
+        let args = ["program".to_string()];
+        let initial_file = args.get(1).map(std::path::PathBuf::from);
+
         assert!(initial_file.is_none());
     }
 }

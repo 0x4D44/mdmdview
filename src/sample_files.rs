@@ -1,7 +1,7 @@
-/// Sample markdown files embedded in the application
-/// 
-/// These files demonstrate the markdown viewer capabilities and provide
-/// usage instructions. They are built into the executable for easy access.
+//! Sample markdown files embedded in the application
+//!
+//! These files demonstrate the markdown viewer capabilities and provide
+//! usage instructions. They are built into the executable for easy access.
 
 /// Represents a sample markdown file with metadata
 #[derive(Debug, Clone)]
@@ -19,13 +19,13 @@ pub const SAMPLE_FILES: &[SampleFile] = &[
         content: WELCOME_CONTENT,
     },
     SampleFile {
-        name: "formatting.md", 
+        name: "formatting.md",
         title: "Formatting Examples",
         content: FORMATTING_CONTENT,
     },
     SampleFile {
         name: "code.md",
-        title: "Code Examples", 
+        title: "Code Examples",
         content: CODE_CONTENT,
     },
     SampleFile {
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn test_sample_files_exist() {
         assert_eq!(SAMPLE_FILES.len(), 4);
-        
+
         let names: Vec<&str> = SAMPLE_FILES.iter().map(|f| f.name).collect();
         assert!(names.contains(&"welcome.md"));
         assert!(names.contains(&"formatting.md"));
@@ -369,7 +369,11 @@ mod tests {
     #[test]
     fn test_sample_files_content_not_empty() {
         for file in SAMPLE_FILES {
-            assert!(!file.content.is_empty(), "File {} has empty content", file.name);
+            assert!(
+                !file.content.is_empty(),
+                "File {} has empty content",
+                file.name
+            );
             assert!(!file.title.is_empty(), "File {} has empty title", file.name);
             assert!(!file.name.is_empty(), "File has empty name");
         }
@@ -377,12 +381,16 @@ mod tests {
 
     #[test]
     fn test_sample_files_are_valid_markdown() {
-        use pulldown_cmark::{Parser, Options};
-        
+        use pulldown_cmark::{Options, Parser};
+
         for file in SAMPLE_FILES {
             let parser = Parser::new_ext(file.content, Options::all());
             let events: Vec<_> = parser.collect();
-            assert!(!events.is_empty(), "File {} produces no markdown events", file.name);
+            assert!(
+                !events.is_empty(),
+                "File {} produces no markdown events",
+                file.name
+            );
         }
     }
 

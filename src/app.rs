@@ -1,13 +1,12 @@
 /// Main application logic for the markdown viewer
-/// 
+///
 /// This module contains the primary app state, UI logic, and event handling
 /// for the markdown viewer application built with egui.
-
-use crate::{MarkdownRenderer, MarkdownElement, SampleFile, SAMPLE_FILES};
-use egui::{Context, CentralPanel, TopBottomPanel, menu, RichText, Color32};
+use crate::{MarkdownElement, MarkdownRenderer, SampleFile, SAMPLE_FILES};
+use anyhow::Result;
+use egui::{menu, CentralPanel, Color32, Context, RichText, TopBottomPanel};
 use rfd::FileDialog;
 use std::path::PathBuf;
-use anyhow::Result;
 
 /// Main application state and logic
 pub struct MarkdownViewerApp {
@@ -35,11 +34,11 @@ pub struct MarkdownViewerApp {
 #[derive(Debug, Clone)]
 enum NavigationRequest {
     Top,
-    Bottom, 
+    Bottom,
     PageUp,
     PageDown,
-    ScrollUp,    // Arrow up - fine scrolling
-    ScrollDown,  // Arrow down - fine scrolling
+    ScrollUp,   // Arrow up - fine scrolling
+    ScrollDown, // Arrow down - fine scrolling
 }
 
 impl MarkdownViewerApp {
@@ -70,7 +69,7 @@ impl MarkdownViewerApp {
         self.current_content = content.to_string();
         self.error_message = None;
         self.nav_request = None; // Reset any pending navigation
-        
+
         match self.renderer.parse(content) {
             Ok(elements) => {
                 self.parsed_elements = elements;
@@ -88,11 +87,12 @@ impl MarkdownViewerApp {
     /// Load markdown content from a file path
     pub fn load_file(&mut self, path: PathBuf) -> Result<()> {
         let content = std::fs::read_to_string(&path)?;
-        let filename = path.file_name()
+        let filename = path
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("Unknown")
             .to_string();
-        
+
         self.current_file = Some(path);
         self.load_content(&content, Some(filename));
         Ok(())
@@ -193,7 +193,7 @@ impl MarkdownViewerApp {
                 self.nav_request = Some(NavigationRequest::Top);
             }
 
-            // End - Go to bottom of document  
+            // End - Go to bottom of document
             if i.consume_key(egui::Modifiers::NONE, egui::Key::End) {
                 self.nav_request = Some(NavigationRequest::Bottom);
             }
@@ -306,8 +306,11 @@ impl MarkdownViewerApp {
 
                     ui.horizontal(|ui| {
                         if ui.button("⛶ Toggle Fullscreen").clicked() {
-                            let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!is_fullscreen));
+                            let is_fullscreen =
+                                ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
+                                !is_fullscreen,
+                            ));
                             ui.close_menu();
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -326,7 +329,8 @@ impl MarkdownViewerApp {
                     }
 
                     if ui.button("ℹ About").clicked() {
-                        if let Some(welcome) = SAMPLE_FILES.iter().find(|f| f.name == "welcome.md") {
+                        if let Some(welcome) = SAMPLE_FILES.iter().find(|f| f.name == "welcome.md")
+                        {
                             self.load_sample(welcome);
                         }
                         ui.close_menu();
@@ -353,7 +357,10 @@ impl MarkdownViewerApp {
                     // Document stats
                     let element_count = self.parsed_elements.len();
                     let char_count = self.current_content.len();
-                    ui.label(format!("Elements: {} | Characters: {}", element_count, char_count));
+                    ui.label(format!(
+                        "Elements: {} | Characters: {}",
+                        element_count, char_count
+                    ));
                 });
             });
         });
@@ -428,21 +435,17 @@ impl eframe::App for MarkdownViewerApp {
                     if scroll_delta != egui::Vec2::ZERO {
                         ui.scroll_with_delta(scroll_delta);
                     }
-                    
+
                     ui.spacing_mut().item_spacing.y = 8.0;
-                    
+
                     if self.parsed_elements.is_empty() && self.error_message.is_none() {
                         ui.vertical_centered(|ui| {
                             ui.add_space(50.0);
-                            ui.label(
-                                RichText::new("Welcome to MarkdownView")
-                                    .size(24.0)
-                                    .strong()
-                            );
+                            ui.label(RichText::new("Welcome to MarkdownView").size(24.0).strong());
                             ui.add_space(20.0);
                             ui.label("Open a markdown file or select a sample to get started.");
                             ui.add_space(20.0);
-                            
+
                             if ui.button("📁 Open File").clicked() {
                                 self.open_file_dialog();
                             }
@@ -469,8 +472,8 @@ impl Default for MarkdownViewerApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_app_creation() {
@@ -484,9 +487,9 @@ mod tests {
     fn test_load_content() {
         let mut app = MarkdownViewerApp::new();
         let content = "# Test Header\n\nThis is test content.";
-        
+
         app.load_content(content, Some("Test".to_string()));
-        
+
         assert_eq!(app.current_content, content);
         assert!(app.title.contains("Test"));
         assert!(!app.parsed_elements.is_empty());
@@ -497,9 +500,9 @@ mod tests {
     fn test_load_sample() {
         let mut app = MarkdownViewerApp::new();
         let sample = &SAMPLE_FILES[0]; // First sample file
-        
+
         app.load_sample(sample);
-        
+
         assert_eq!(app.current_content, sample.content);
         assert!(app.title.contains(sample.title));
         assert!(!app.parsed_elements.is_empty());
@@ -509,21 +512,21 @@ mod tests {
     #[test]
     fn test_load_file() -> Result<()> {
         let mut app = MarkdownViewerApp::new();
-        
+
         // Create a temporary markdown file
         let mut temp_file = NamedTempFile::new()?;
         let content = "# Temporary File\n\nThis is a test markdown file.";
         temp_file.write_all(content.as_bytes())?;
         temp_file.flush()?;
-        
+
         let path = temp_file.path().to_path_buf();
         app.load_file(path.clone())?;
-        
+
         assert_eq!(app.current_content, content);
         assert_eq!(app.current_file, Some(path));
         assert!(!app.parsed_elements.is_empty());
         assert!(app.error_message.is_none());
-        
+
         Ok(())
     }
 
@@ -533,9 +536,9 @@ mod tests {
         // Even "invalid" markdown should parse successfully with pulldown-cmark
         // as it's very permissive
         let content = "This is just plain text with some <invalid> HTML tags";
-        
+
         app.load_content(content, Some("Invalid".to_string()));
-        
+
         // Should still work - pulldown-cmark is very permissive
         assert_eq!(app.current_content, content);
         assert!(app.error_message.is_none() || app.error_message.is_some()); // Either is ok
@@ -545,7 +548,7 @@ mod tests {
     fn test_load_empty_content() {
         let mut app = MarkdownViewerApp::new();
         app.load_content("", Some("Empty".to_string()));
-        
+
         assert_eq!(app.current_content, "");
         assert!(app.title.contains("Empty"));
         assert!(app.error_message.is_none());
@@ -555,7 +558,7 @@ mod tests {
     fn test_load_nonexistent_file() {
         let mut app = MarkdownViewerApp::new();
         let fake_path = PathBuf::from("/nonexistent/file.md");
-        
+
         let result = app.load_file(fake_path);
         assert!(result.is_err());
     }
@@ -563,11 +566,11 @@ mod tests {
     #[test]
     fn test_title_updates() {
         let mut app = MarkdownViewerApp::new();
-        
+
         // Test with custom title
         app.load_content("# Test", Some("Custom Title".to_string()));
         assert!(app.title.contains("Custom Title"));
-        
+
         // Test with no title (should keep existing)
         let old_title = app.title.clone();
         app.load_content("# Another Test", None);
@@ -602,12 +605,12 @@ The end.
 "#;
 
         app.load_content(complex_content, Some("Complex".to_string()));
-        
+
         assert_eq!(app.current_content, complex_content);
         assert!(app.title.contains("Complex"));
         assert!(!app.parsed_elements.is_empty());
         assert!(app.error_message.is_none());
-        
+
         // Should have parsed various element types
         assert!(app.parsed_elements.len() > 5); // Complex document should have many elements
     }
@@ -615,10 +618,10 @@ The end.
     #[test]
     fn test_error_handling() {
         let app = MarkdownViewerApp::new();
-        
+
         // Test that app starts without errors
         assert!(app.error_message.is_none());
-        
+
         // Even with the welcome content loaded, should be error-free
         assert!(!app.parsed_elements.is_empty());
     }
@@ -626,7 +629,7 @@ The end.
     #[test]
     fn test_default_state() {
         let app = MarkdownViewerApp::default();
-        
+
         // Default should be same as new()
         assert!(!app.parsed_elements.is_empty());
         assert!(app.title.contains("MarkdownView"));
@@ -637,11 +640,11 @@ The end.
     #[test]
     fn test_sample_files_integration() {
         let mut app = MarkdownViewerApp::new();
-        
+
         // Test loading each sample file
         for sample in SAMPLE_FILES {
             app.load_sample(sample);
-            
+
             assert_eq!(app.current_content, sample.content);
             assert!(app.title.contains(sample.title));
             assert!(app.current_file.is_none());
@@ -652,14 +655,14 @@ The end.
     #[test]
     fn test_close_current_file() {
         let mut app = MarkdownViewerApp::new();
-        
+
         // Load some content first
         app.load_content("# Test Content", Some("Test File".to_string()));
         assert!(app.title.contains("Test File"));
-        
+
         // Close the file
         app.close_current_file();
-        
+
         // Should return to welcome screen
         assert!(app.title.contains("Welcome"));
         assert!(app.current_file.is_none());
@@ -676,13 +679,13 @@ The end.
         let _page_down = NavigationRequest::PageDown;
         let _scroll_up = NavigationRequest::ScrollUp;
         let _scroll_down = NavigationRequest::ScrollDown;
-        
+
         // Ensure it's cloneable and debuggable
         let nav = NavigationRequest::Top;
         let _cloned = nav.clone();
         let _debug = format!("{:?}", nav);
-        
-        assert!(true); // Basic compilation test
+
+        // Basic compilation test performed by using the enum and Debug/Clone
     }
 
     #[test]
@@ -697,14 +700,14 @@ The end.
     #[test]
     fn test_fullscreen_toggle_flag() {
         let mut app = MarkdownViewerApp::new();
-        
+
         // Initially should be false
         assert!(!app.toggle_fullscreen);
-        
+
         // Simulate F11 key press (this would be set in handle_shortcuts)
         app.toggle_fullscreen = true;
         assert!(app.toggle_fullscreen);
-        
+
         // After handling, it should be reset to false
         app.toggle_fullscreen = false;
         assert!(!app.toggle_fullscreen);
@@ -713,11 +716,11 @@ The end.
     #[test]
     fn test_navigation_state_reset_on_load() {
         let mut app = MarkdownViewerApp::new();
-        
+
         // Set a navigation request
         app.nav_request = Some(NavigationRequest::Top);
         assert!(app.nav_request.is_some());
-        
+
         // Load content should reset navigation state
         app.load_content("# Test Content", Some("Test".to_string()));
         assert!(app.nav_request.is_none());
@@ -729,16 +732,16 @@ The end.
         let viewport_height = 800.0f32;
         let page_size = viewport_height * 0.8;
         assert_eq!(page_size, 640.0);
-        
+
         // Test boundary conditions for Page Up
         let current_offset = 100.0f32;
         let new_offset_up = (current_offset - page_size).max(0.0);
         assert_eq!(new_offset_up, 0.0); // Should clamp to 0
-        
+
         // Test Page Down calculation
         let new_offset_down = current_offset + page_size;
         assert_eq!(new_offset_down, 740.0);
-        
+
         // Test that Page Up from near top goes to 0
         let near_top = 300.0f32;
         let from_near_top = (near_top - page_size).max(0.0);
