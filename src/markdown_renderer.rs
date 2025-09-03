@@ -594,17 +594,50 @@ impl MarkdownRenderer {
                 }
                 MarkdownElement::Quote { depth, lines } => {
                     ui.add_space(4.0);
-                    for line in lines {
-                        ui.horizontal_wrapped(|ui| {
-                            let bars = "| ".repeat(*depth as usize);
-                            ui.label(RichText::new(bars).color(Color32::from_rgb(120, 120, 120)));
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            ui.style_mut().visuals.override_text_color = Some(Color32::from_rgb(200, 200, 200));
-                            self.render_inline_spans(ui, line);
-                            ui.style_mut().visuals.override_text_color = None;
+                    let bar_width = 3.0;
+                    let bar_gap = 6.0;
+                    let left_pad = 10.0 + (*depth as f32) * (bar_width + bar_gap);
+                    // Substack-like styling: dark grey block with orange accent bars and white text
+                    let bg = Color32::from_rgb(24, 24, 24);
+
+                    let resp = egui::Frame::none()
+                        .fill(bg)
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(40, 40, 40)))
+                        .rounding(egui::Rounding::same(6.0))
+                        .inner_margin(egui::Margin {
+                            left: left_pad,
+                            right: 10.0,
+                            top: 8.0,
+                            bottom: 8.0,
+                        })
+                        .show(ui, |ui| {
+                            for (li, line) in lines.iter().enumerate() {
+                                // White text for quote content
+                                ui.style_mut().visuals.override_text_color =
+                                    Some(Color32::WHITE);
+                                self.render_inline_spans(ui, line);
+                                ui.style_mut().visuals.override_text_color = None;
+                                if li + 1 < lines.len() {
+                                    ui.add_space(3.0);
+                                }
+                            }
                         });
+
+                    // Draw vertical orange quote bars on the left of the frame
+                    let rect = resp.response.rect;
+                    let top = rect.top() + 6.0;
+                    let bottom = rect.bottom() - 6.0;
+                    let bar_color = Color32::from_rgb(255, 103, 25); // Substack-like orange
+                    for d in 0..*depth {
+                        let x = rect.left() + 6.0 + (d as f32) * (bar_width + bar_gap);
+                        let bar_rect = egui::Rect::from_min_max(
+                            egui::pos2(x, top),
+                            egui::pos2(x + bar_width, bottom),
+                        );
+                        ui.painter().rect_filled(bar_rect, 2.0, bar_color);
                     }
-                    ui.add_space(4.0);
+
+                    ui.add_space(6.0);
                 }
                 MarkdownElement::Header { level, spans } => {
                     let font_size = match level {
