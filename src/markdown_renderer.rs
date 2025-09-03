@@ -61,7 +61,7 @@ pub enum MarkdownElement {
         ordered: bool,
         items: Vec<Vec<InlineSpan>>,
     }, // List items are also inline spans
-    Quote(Vec<InlineSpan>),
+    Quote { depth: u8, lines: Vec<Vec<InlineSpan>> },
     HorizontalRule,
     Table {
         headers: Vec<String>,
@@ -71,6 +71,9 @@ pub enum MarkdownElement {
 
 /// Type alias for table parsing result to reduce complexity
 type TableParseResult = (Vec<String>, Vec<Vec<String>>, usize);
+
+/// Type alias for quote lines (each line is a sequence of inline spans)
+type QuoteLines = Vec<Vec<InlineSpan>>;
 
 /// Markdown renderer with proper inline element handling
 pub struct MarkdownRenderer {
@@ -165,6 +168,15 @@ impl MarkdownRenderer {
                 elements.push(MarkdownElement::HorizontalRule);
                 Ok(start + 1)
             }
+            Event::Start(Tag::BlockQuote) => {
+                let (quotes, next_idx) = self.collect_blockquotes(events, start + 1, 1)?;
+                for (depth, lines) in quotes {
+                    if !lines.is_empty() {
+                        elements.push(MarkdownElement::Quote { depth, lines });
+                    }
+                }
+                Ok(next_idx)
+            }
             Event::Start(Tag::Table(_)) => {
                 let (headers, rows, next_idx) = self.parse_table(events, start + 1)?;
                 elements.push(MarkdownElement::Table { headers, rows });
@@ -175,6 +187,71 @@ impl MarkdownRenderer {
                 Ok(start + 1)
             }
         }
+    }
+
+    /// Collect blockquotes into (depth, lines) entries; supports nesting and multi-line content
+    fn collect_blockquotes(
+        &self,
+        events: &[Event],
+        start: usize,
+        depth: u8,
+    ) -> Result<(Vec<(u8, QuoteLines)>, usize), anyhow::Error> {
+        let mut i = start;
+        let mut result: Vec<(u8, QuoteLines)> = Vec::new();
+        let mut lines: QuoteLines = Vec::new();
+        let mut current: Vec<InlineSpan> = Vec::new();
+
+        let push_line = |current: &mut Vec<InlineSpan>, lines: &mut QuoteLines| {
+            lines.push(std::mem::take(current));
+        };
+
+        while i < events.len() {
+            match &events[i] {
+                Event::Start(Tag::Paragraph) => {
+                    let (mut para, next) =
+                        self.parse_inline_spans(events, i + 1, Tag::Paragraph)?;
+                    current.append(&mut para);
+                    push_line(&mut current, &mut lines);
+                    i = next;
+                }
+                Event::SoftBreak | Event::HardBreak => {
+                    push_line(&mut current, &mut lines);
+                    i += 1;
+                }
+                Event::Start(Tag::BlockQuote) => {
+                    // flush current collected lines for this depth
+                    if !current.is_empty() {
+                        push_line(&mut current, &mut lines);
+                    }
+                    if !lines.is_empty() {
+                        result.push((depth, std::mem::take(&mut lines)));
+                    }
+                    // collect nested
+                    let (nested, next) = self.collect_blockquotes(events, i + 1, depth + 1)?;
+                    result.extend(nested);
+                    i = next;
+                }
+                Event::End(Tag::BlockQuote) => {
+                    if !current.is_empty() {
+                        push_line(&mut current, &mut lines);
+                    }
+                    if !lines.is_empty() {
+                        result.push((depth, lines));
+                    }
+                    return Ok((result, i + 1));
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+        if !current.is_empty() {
+            push_line(&mut current, &mut lines);
+        }
+        if !lines.is_empty() {
+            result.push((depth, lines));
+        }
+        Ok((result, i))
     }
 
     /// Parse inline spans until reaching the end tag
@@ -338,29 +415,51 @@ impl MarkdownRenderer {
         Ok((code_text, language, i))
     }
 
-    /// Parse a list
+    /// Parse a list with basic nested-list flattening
     fn parse_list(
         &self,
         events: &[Event],
         start: usize,
-        _first_item: Option<u64>,
+        first_item: Option<u64>,
     ) -> Result<(Vec<Vec<InlineSpan>>, usize), anyhow::Error> {
-        let mut items = Vec::new();
+        let mut items: Vec<Vec<InlineSpan>> = Vec::new();
         let mut i = start;
+        let _is_ordered = first_item.is_some();
 
         while i < events.len() {
             match &events[i] {
-                Event::End(Tag::List(_)) => {
-                    return Ok((items, i + 1));
-                }
+                Event::End(Tag::List(_)) => return Ok((items, i + 1)),
                 Event::Start(Tag::Item) => {
-                    let (spans, next_i) = self.parse_inline_spans(events, i + 1, Tag::Item)?;
-                    items.push(spans);
-                    i = next_i;
-                }
-                _ => {
                     i += 1;
+                    let mut spans: Vec<InlineSpan> = Vec::new();
+                    loop {
+                        if i >= events.len() { break; }
+                        match &events[i] {
+                            Event::End(Tag::Item) => { i += 1; break; }
+                            Event::Start(Tag::Paragraph) => {
+                                let (ps, next) = self.parse_inline_spans(events, i + 1, Tag::Paragraph)?;
+                                spans.extend(ps);
+                                i = next;
+                            }
+                            Event::Start(Tag::List(child_first)) => {
+                                let (child_items, next) = self.parse_list(events, i + 1, *child_first)?;
+                                i = next;
+                                let ordered_child = child_first.is_some();
+                                for (idx, child) in child_items.into_iter().enumerate() {
+                                    spans.push(InlineSpan::Text("\n".to_string()));
+                                    let marker = if ordered_child { format!("{}.", idx + 1) } else { "•".to_string() };
+                                    spans.push(InlineSpan::Text(format!("{} ", marker)));
+                                    spans.extend(child);
+                                }
+                            }
+                            Event::Text(t) => { spans.push(InlineSpan::Text(t.to_string())); i += 1; }
+                            Event::SoftBreak | Event::HardBreak => { spans.push(InlineSpan::Text(" ".into())); i += 1; }
+                            _ => { i += 1; }
+                        }
+                    }
+                    items.push(spans);
                 }
+                _ => i += 1,
             }
         }
 
@@ -451,6 +550,20 @@ impl MarkdownRenderer {
                     self.render_inline_spans(ui, spans);
                     ui.add_space(4.0);
                 }
+                MarkdownElement::Quote { depth, lines } => {
+                    ui.add_space(4.0);
+                    for line in lines {
+                        ui.horizontal_wrapped(|ui| {
+                            let bars = "| ".repeat(*depth as usize);
+                            ui.label(RichText::new(bars).color(Color32::from_rgb(120, 120, 120)));
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            ui.style_mut().visuals.override_text_color = Some(Color32::from_rgb(200, 200, 200));
+                            self.render_inline_spans(ui, line);
+                            ui.style_mut().visuals.override_text_color = None;
+                        });
+                    }
+                    ui.add_space(4.0);
+                }
                 MarkdownElement::Header { level, spans } => {
                     let font_size = match level {
                         1 => self.font_sizes.h1,
@@ -486,7 +599,6 @@ impl MarkdownRenderer {
                 MarkdownElement::Table { headers, rows } => {
                     self.render_table(ui, headers, rows);
                 }
-                _ => {}
             }
         }
     }
@@ -584,37 +696,50 @@ impl MarkdownRenderer {
         }
     }
 
-    /// Render a list with proper inline formatting
+    /// Render a list with proper inline formatting, including simple nested lines
     fn render_list(&self, ui: &mut egui::Ui, ordered: bool, items: &[Vec<InlineSpan>]) {
         if items.is_empty() {
             return;
         }
 
         ui.add_space(4.0);
-
+        
         for (index, spans) in items.iter().enumerate() {
-            ui.horizontal_wrapped(|ui| {
-                // Add bullet or number (with trailing space)
-                let marker = if ordered {
-                    format!("{}.", index + 1)
-                } else {
-                    "•".to_string()
-                };
-
-                ui.label(
-                    RichText::new(format!("{} ", marker))
-                        .size(self.font_sizes.body)
-                        .color(Color32::from_rgb(180, 180, 180)),
-                );
-
-                // Avoid artificial gaps between inline fragments
-                ui.spacing_mut().item_spacing.x = 0.0;
-
-                // Render the inline spans
-                for span in spans {
-                    self.render_inline_span(ui, span, None, None);
+            // Split into lines on embedded '\n'
+            let mut lines: Vec<Vec<InlineSpan>> = vec![Vec::new()];
+            for s in spans.clone() {
+                match s {
+                    InlineSpan::Text(t) if t.contains('\n') => {
+                        let parts: Vec<&str> = t.split('\n').collect();
+                        for (pi, part) in parts.iter().enumerate() {
+                            if !part.is_empty() {
+                                lines.last_mut().unwrap().push(InlineSpan::Text(part.to_string()));
+                            }
+                            if pi < parts.len() - 1 { lines.push(Vec::new()); }
+                        }
+                    }
+                    other => lines.last_mut().unwrap().push(other),
                 }
-            });
+            }
+
+            for (li, line) in lines.into_iter().enumerate() {
+                ui.horizontal_wrapped(|ui| {
+                    if li == 0 {
+                        let marker = if ordered { format!("{}.", index + 1) } else { "•".to_string() };
+                        ui.label(
+                            RichText::new(format!("{} ", marker))
+                                .size(self.font_sizes.body)
+                                .color(Color32::from_rgb(180, 180, 180)),
+                        );
+                    } else {
+                        ui.add_space(18.0);
+                    }
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for span in &line {
+                        self.render_inline_span(ui, span, None, None);
+                    }
+                });
+            }
         }
 
         ui.add_space(4.0);
