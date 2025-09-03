@@ -31,3 +31,7 @@ lto = true
 strip = true
 codegen-units = 1
 panic = "abort"
+
+[features]
+# Optional: color emoji rendering using generated textures
+color-emoji = []
