@@ -5,6 +5,7 @@
 use crate::{MarkdownElement, MarkdownRenderer, SampleFile, SAMPLE_FILES};
 use anyhow::Result;
 use egui::{menu, CentralPanel, Color32, Context, RichText, TopBottomPanel};
+use egui::{TextEdit, TextStyle};
 use rfd::FileDialog;
 use std::path::PathBuf;
 
@@ -16,6 +17,8 @@ pub struct MarkdownViewerApp {
     current_file: Option<PathBuf>,
     /// Current markdown content as string
     current_content: String,
+    /// Buffer for raw view (read-only for now)
+    raw_buffer: String,
     /// Parsed markdown elements ready for rendering
     parsed_elements: Vec<MarkdownElement>,
     /// Application title for window
@@ -28,6 +31,10 @@ pub struct MarkdownViewerApp {
     scroll_area_id: egui::Id,
     /// Flag to request fullscreen toggle
     toggle_fullscreen: bool,
+    /// Current view mode
+    view_mode: ViewMode,
+    /// Wrap long lines in raw view
+    wrap_raw: bool,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -41,6 +48,13 @@ enum NavigationRequest {
     ScrollDown, // Arrow down - fine scrolling
 }
 
+/// Which view the user is in
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewMode {
+    Rendered,
+    Raw,
+}
+
 impl MarkdownViewerApp {
     /// Create a new application instance
     pub fn new() -> Self {
@@ -48,12 +62,15 @@ impl MarkdownViewerApp {
             renderer: MarkdownRenderer::new(),
             current_file: None,
             current_content: String::new(),
+            raw_buffer: String::new(),
             parsed_elements: Vec::new(),
             title: "MarkdownView".to_string(),
             error_message: None,
             nav_request: None,
             scroll_area_id: egui::Id::new("main_scroll_area"),
             toggle_fullscreen: false,
+            view_mode: ViewMode::Rendered,
+            wrap_raw: false,
         };
 
         // Load welcome content by default
@@ -67,6 +84,7 @@ impl MarkdownViewerApp {
     /// Load markdown content from a string
     pub fn load_content(&mut self, content: &str, title: Option<String>) {
         self.current_content = content.to_string();
+        self.raw_buffer = self.current_content.clone();
         self.error_message = None;
         self.nav_request = None; // Reset any pending navigation
 
@@ -132,6 +150,14 @@ impl MarkdownViewerApp {
         }
     }
 
+    /// Toggle between Rendered and Raw view
+    fn toggle_view_mode(&mut self) {
+        self.view_mode = match self.view_mode {
+            ViewMode::Rendered => ViewMode::Raw,
+            ViewMode::Raw => ViewMode::Rendered,
+        };
+    }
+
     /// Handle keyboard shortcuts
     fn handle_shortcuts(&mut self, ctx: &Context) {
         ctx.input_mut(|i| {
@@ -181,6 +207,14 @@ impl MarkdownViewerApp {
                 egui::Key::Num0,
             )) {
                 self.renderer.reset_zoom();
+            }
+
+            // Ctrl+R - Toggle raw view
+            if i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::CTRL,
+                egui::Key::R,
+            )) {
+                self.toggle_view_mode();
             }
 
             // F11 - Toggle fullscreen (set flag to handle outside input context)
@@ -272,6 +306,28 @@ impl MarkdownViewerApp {
 
                 // View menu
                 ui.menu_button("View", |ui| {
+                    // Raw view toggle
+                    ui.horizontal(|ui| {
+                        let selected = matches!(self.view_mode, ViewMode::Raw);
+                        if ui.selectable_label(selected, "📝 Raw Markdown").clicked() {
+                            self.toggle_view_mode();
+                            ui.close_menu();
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.weak("Ctrl+R");
+                        });
+                    });
+
+                    // Wrap option for raw view
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(self.wrap_raw, "↪ Wrap Raw Lines")
+                            .clicked()
+                        {
+                            self.wrap_raw = !self.wrap_raw;
+                        }
+                    });
+
                     ui.horizontal(|ui| {
                         if ui.button("🔍 Zoom In").clicked() {
                             self.renderer.zoom_in();
@@ -357,10 +413,8 @@ impl MarkdownViewerApp {
                     // Document stats
                     let element_count = self.parsed_elements.len();
                     let char_count = self.current_content.len();
-                    ui.label(format!(
-                        "Elements: {} | Characters: {}",
-                        element_count, char_count
-                    ));
+                    let mode = match self.view_mode { ViewMode::Rendered => "Rendered", ViewMode::Raw => "Raw" };
+                    ui.label(format!("Mode: {} | Elements: {} | Characters: {}", mode, element_count, char_count));
                 });
             });
         });
@@ -451,7 +505,24 @@ impl eframe::App for MarkdownViewerApp {
                             }
                         });
                     } else {
-                        self.renderer.render_to_ui(ui, &self.parsed_elements);
+                        match self.view_mode {
+                            ViewMode::Rendered => {
+                                self.renderer.render_to_ui(ui, &self.parsed_elements);
+                            }
+                            ViewMode::Raw => {
+                                // Read-only raw markdown view
+                                let mut tmp = self.raw_buffer.clone();
+                                ui.add(
+                                    TextEdit::multiline(&mut tmp)
+                                        .font(TextStyle::Monospace)
+                                        .code_editor()
+                                        .lock_focus(false)
+                                        .interactive(false)
+                                        .desired_width(f32::INFINITY)
+                                        .desired_rows(24),
+                                );
+                            }
+                        }
                     }
                 });
         });
@@ -481,6 +552,7 @@ mod tests {
         assert!(!app.parsed_elements.is_empty()); // Should load welcome content
         assert!(app.title.contains("MarkdownView"));
         assert!(app.error_message.is_none());
+        assert!(matches!(app.view_mode, ViewMode::Rendered));
     }
 
     #[test]
@@ -491,9 +563,20 @@ mod tests {
         app.load_content(content, Some("Test".to_string()));
 
         assert_eq!(app.current_content, content);
+        assert_eq!(app.raw_buffer, content);
         assert!(app.title.contains("Test"));
         assert!(!app.parsed_elements.is_empty());
         assert!(app.error_message.is_none());
+    }
+
+    #[test]
+    fn test_toggle_view_mode() {
+        let mut app = MarkdownViewerApp::new();
+        assert!(matches!(app.view_mode, ViewMode::Rendered));
+        app.toggle_view_mode();
+        assert!(matches!(app.view_mode, ViewMode::Raw));
+        app.toggle_view_mode();
+        assert!(matches!(app.view_mode, ViewMode::Rendered));
     }
 
     #[test]
