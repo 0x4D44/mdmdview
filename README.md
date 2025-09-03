@@ -116,7 +116,8 @@ All standard markdown elements are fully supported with professional formatting:
 - **Inline code** - Properly formatted within text (e.g., use `pip install` command)
 - **Links** - Clickable URLs that open in browser
 - **Horizontal rules** - Clean section separators
-- **Quotes** - Formatted blockquotes (basic support)
+- **Blockquotes** - Polished dark block with orange bar; supports multi-line and nested quotes
+- **Emojis** - Unicode emojis render if your font supports them; shortcodes like `:smile:` are not expanded
 
 **Key Improvement**: Inline code elements like `filename.ext` now stay properly inline with surrounding text instead of breaking to new lines.
 

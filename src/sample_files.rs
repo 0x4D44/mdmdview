@@ -105,6 +105,13 @@ You can also use `inline code` and ~~strikethrough~~ text.
 
 Links are clickable and will open in your default browser.
 
+## Emojis
+
+Unicode emojis render as normal text if your font supports them.
+Examples: Thanks! 🎉  Status: ✅  Ship it 🚀
+
+Note: Shortcodes like `:smile:` are not expanded by MarkdownView.
+
 ## Blockquotes
 
 > This is a blockquote.
