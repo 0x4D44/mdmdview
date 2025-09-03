@@ -41,6 +41,7 @@ pub enum InlineSpan {
     Code(String),
     Strong(String),
     Emphasis(String),
+    Strikethrough(String),
     Link { text: String, url: String },
 }
 
@@ -230,6 +231,16 @@ impl MarkdownRenderer {
                     spans.push(InlineSpan::Emphasis(inner_text));
                     i = next_i;
                 }
+                Event::Start(Tag::Strikethrough) => {
+                    if !text_buffer.is_empty() {
+                        spans.push(InlineSpan::Text(text_buffer.clone()));
+                        text_buffer.clear();
+                    }
+                    let (inner_text, next_i) = self
+                        .collect_until_tag_end(events, i + 1, Tag::Strikethrough)?;
+                    spans.push(InlineSpan::Strikethrough(inner_text));
+                    i = next_i;
+                }
                 Event::Start(Tag::Link(_, url, _)) => {
                     if !text_buffer.is_empty() {
                         spans.push(InlineSpan::Text(text_buffer.clone()));
@@ -356,25 +367,79 @@ impl MarkdownRenderer {
         Ok((items, i))
     }
 
-    /// Parse a table (simplified)
+    /// Parse a table with headers and rows
     fn parse_table(
         &self,
         events: &[Event],
         start: usize,
     ) -> Result<TableParseResult, anyhow::Error> {
-        // Simplified table parsing - for now just collect as text
-        let headers = vec!["Column 1".to_string(), "Column 2".to_string()];
-        let rows = vec![];
-
-        // Skip to end of table
+        let mut headers: Vec<String> = Vec::new();
+        let mut rows: Vec<Vec<String>> = Vec::new();
         let mut i = start;
-        while i < events.len() {
-            if let Event::End(Tag::Table(_)) = &events[i] {
-                return Ok((headers, rows, i + 1));
+
+        fn collect_cell_text(events: &[Event], mut j: usize) -> (String, usize) {
+            let mut cell = String::new();
+            while j < events.len() {
+                match &events[j] {
+                    Event::End(Tag::TableCell) => return (cell.trim().to_string(), j + 1),
+                    Event::Text(t) | Event::Code(t) => cell.push_str(t),
+                    Event::Start(Tag::Link(_, url, _)) => {
+                        // capture link text if present
+                        let mut k = j + 1;
+                        let mut link_text = String::new();
+                        while k < events.len() {
+                            match &events[k] {
+                                Event::End(Tag::Link(_, _, _)) => break,
+                                Event::Text(t) | Event::Code(t) => link_text.push_str(t),
+                                _ => {}
+                            }
+                            k += 1;
+                        }
+                        if !link_text.is_empty() { cell.push_str(&link_text); } else { cell.push_str(url.as_ref()); }
+                        j = k;
+                    }
+                    _ => {}
+                }
+                j += 1;
             }
-            i += 1;
+            (cell.trim().to_string(), j)
         }
 
+        while i < events.len() {
+            match &events[i] {
+                Event::Start(Tag::TableHead) => {
+                    i += 1;
+                    while i < events.len() {
+                        match &events[i] {
+                            Event::Start(Tag::TableCell) => {
+                                let (text, next) = collect_cell_text(events, i + 1);
+                                headers.push(text);
+                                i = next;
+                            }
+                            Event::End(Tag::TableHead) => { i += 1; break; }
+                            _ => i += 1,
+                        }
+                    }
+                }
+                Event::Start(Tag::TableRow) => {
+                    i += 1;
+                    let mut row: Vec<String> = Vec::new();
+                    while i < events.len() {
+                        match &events[i] {
+                            Event::Start(Tag::TableCell) => {
+                                let (text, next) = collect_cell_text(events, i + 1);
+                                row.push(text);
+                                i = next;
+                            }
+                            Event::End(Tag::TableRow) => { i += 1; if !row.is_empty() { rows.push(row); } break; }
+                            _ => i += 1,
+                        }
+                    }
+                }
+                Event::End(Tag::Table(_)) => return Ok((headers, rows, i + 1)),
+                _ => i += 1,
+            }
+        }
         Ok((headers, rows, i))
     }
 
@@ -399,6 +464,8 @@ impl MarkdownRenderer {
 
                     ui.add_space(8.0);
                     ui.horizontal_wrapped(|ui| {
+                        // Avoid artificial gaps between header fragments
+                        ui.spacing_mut().item_spacing.x = 0.0;
                         for span in spans {
                             self.render_inline_span(ui, span, Some(font_size), Some(true));
                         }
@@ -427,6 +494,8 @@ impl MarkdownRenderer {
     /// Render inline spans in a wrapped horizontal layout
     fn render_inline_spans(&self, ui: &mut egui::Ui, spans: &[InlineSpan]) {
         ui.horizontal_wrapped(|ui| {
+            // Avoid adding UI spacing between inline fragments
+            ui.spacing_mut().item_spacing.x = 0.0;
             for span in spans {
                 self.render_inline_span(ui, span, None, None);
             }
@@ -496,13 +565,18 @@ impl MarkdownRenderer {
                         .color(Color32::from_rgb(220, 220, 220)),
                 );
             }
+            InlineSpan::Strikethrough(text) => {
+                let fixed_text = self.fix_unicode_chars(text);
+                ui.label(
+                    RichText::new(fixed_text)
+                        .size(size)
+                        .strikethrough()
+                        .color(Color32::from_rgb(220, 220, 220)),
+                );
+            }
             InlineSpan::Link { text, url } => {
                 let fixed_text = self.fix_unicode_chars(text);
-                let response = ui.link(
-                    RichText::new(fixed_text)
-                        .color(Color32::LIGHT_BLUE)
-                        .size(size),
-                );
+                let response = ui.link(RichText::new(fixed_text).color(Color32::LIGHT_BLUE).size(size));
                 if response.clicked() {
                     self.open_url(url);
                 }
@@ -520,7 +594,7 @@ impl MarkdownRenderer {
 
         for (index, spans) in items.iter().enumerate() {
             ui.horizontal_wrapped(|ui| {
-                // Add bullet or number
+                // Add bullet or number (with trailing space)
                 let marker = if ordered {
                     format!("{}.", index + 1)
                 } else {
@@ -528,10 +602,13 @@ impl MarkdownRenderer {
                 };
 
                 ui.label(
-                    RichText::new(marker)
+                    RichText::new(format!("{} ", marker))
                         .size(self.font_sizes.body)
                         .color(Color32::from_rgb(180, 180, 180)),
                 );
+
+                // Avoid artificial gaps between inline fragments
+                ui.spacing_mut().item_spacing.x = 0.0;
 
                 // Render the inline spans
                 for span in spans {
@@ -660,14 +737,32 @@ impl MarkdownRenderer {
         ui.add_space(8.0);
     }
 
-    /// Render a table (simplified)
-    fn render_table(&self, ui: &mut egui::Ui, headers: &[String], _rows: &[Vec<String>]) {
+    /// Render a table using an egui Grid
+    fn render_table(&self, ui: &mut egui::Ui, headers: &[String], rows: &[Vec<String>]) {
         if headers.is_empty() {
             return;
         }
 
         ui.add_space(8.0);
-        ui.label("Table rendering not fully implemented");
+        egui::Frame::none()
+            .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+            .show(ui, |ui| {
+                egui::Grid::new("md_table").striped(true).show(ui, |ui| {
+                    for h in headers {
+                        ui.label(RichText::new(h).strong());
+                    }
+                    ui.end_row();
+
+                    for row in rows {
+                        for (col, cell) in row.iter().enumerate() {
+                            if col < headers.len() {
+                                ui.label(cell);
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+            });
         ui.add_space(8.0);
     }
 
