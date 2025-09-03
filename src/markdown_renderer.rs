@@ -208,10 +208,35 @@ impl MarkdownRenderer {
         while i < events.len() {
             match &events[i] {
                 Event::Start(Tag::Paragraph) => {
-                    let (mut para, next) =
-                        self.parse_inline_spans(events, i + 1, Tag::Paragraph)?;
-                    current.append(&mut para);
-                    push_line(&mut current, &mut lines);
+                    let (mut para, next) = self.parse_inline_spans_with_breaks(
+                        events,
+                        i + 1,
+                        Tag::Paragraph,
+                        true,
+                    )?;
+                    // Split para into lines on explicit "\n"
+                    let mut line: Vec<InlineSpan> = Vec::new();
+                    while let Some(span) = para.first().cloned() {
+                        para.remove(0);
+                        match span {
+                            InlineSpan::Text(t) if t.contains('\n') => {
+                                let parts: Vec<&str> = t.split('\n').collect();
+                                for (pi, part) in parts.iter().enumerate() {
+                                    if !part.is_empty() {
+                                        line.push(InlineSpan::Text(part.to_string()));
+                                    }
+                                    if pi < parts.len() - 1 {
+                                        push_line(&mut line, &mut lines);
+                                        line = Vec::new();
+                                    }
+                                }
+                            }
+                            other => line.push(other),
+                        }
+                    }
+                    if !line.is_empty() {
+                        push_line(&mut line, &mut lines);
+                    }
                     i = next;
                 }
                 Event::SoftBreak | Event::HardBreak => {
@@ -255,11 +280,12 @@ impl MarkdownRenderer {
     }
 
     /// Parse inline spans until reaching the end tag
-    fn parse_inline_spans(
+    fn parse_inline_spans_with_breaks(
         &self,
         events: &[Event],
         start: usize,
         end_tag: Tag,
+        keep_breaks: bool,
     ) -> Result<(Vec<InlineSpan>, usize), anyhow::Error> {
         let mut spans = Vec::new();
         let mut i = start;
@@ -276,8 +302,14 @@ impl MarkdownRenderer {
                     }
                     return Ok((spans, i + 1));
                 }
-                Event::Text(text) => {
-                    text_buffer.push_str(text);
+                Event::Text(text) => { text_buffer.push_str(text); i += 1; }
+                Event::SoftBreak | Event::HardBreak => {
+                    if keep_breaks {
+                        if !text_buffer.is_empty() { spans.push(InlineSpan::Text(text_buffer.clone())); text_buffer.clear(); }
+                        spans.push(InlineSpan::Text("\n".to_string()));
+                    } else {
+                        text_buffer.push(' ');
+                    }
                     i += 1;
                 }
                 Event::Code(code) => {
@@ -346,6 +378,16 @@ impl MarkdownRenderer {
         }
 
         Ok((spans, i))
+    }
+
+    /// Default inline parsing without preserving explicit line breaks
+    fn parse_inline_spans(
+        &self,
+        events: &[Event],
+        start: usize,
+        end_tag: Tag,
+    ) -> Result<(Vec<InlineSpan>, usize), anyhow::Error> {
+        self.parse_inline_spans_with_breaks(events, start, end_tag, false)
     }
 
     /// Collect text until a specific end tag
