@@ -979,6 +979,66 @@ impl MarkdownRenderer {
         handle
     }
 
+    // Rough width measurement for inline spans without wrapping
+    fn measure_inline_spans(&self, ui: &egui::Ui, spans: &[InlineSpan]) -> f32 {
+        let mut width = 0.0f32;
+        ui.fonts(|fonts| {
+            for span in spans {
+                match span {
+                    InlineSpan::Text(t)
+                    | InlineSpan::Strong(t)
+                    | InlineSpan::Emphasis(t)
+                    | InlineSpan::Strikethrough(t)
+                    | InlineSpan::Link { text: t, .. } => {
+                        let body = egui::FontId::proportional(self.font_sizes.body);
+                        // Expand shortcodes to better estimate width and count emojis
+                        let expanded = Self::expand_shortcodes(t);
+                        let galley = fonts.layout_no_wrap(expanded.clone(), body, Color32::WHITE);
+                        width += galley.size().x;
+                        // Add a small extra width for emoji images (drawn larger than text)
+                        let emoji_extra = expanded
+                            .chars()
+                            .filter(|c| Self::is_known_emoji(*c))
+                            .count() as f32
+                            * (self.font_sizes.body * 0.2);
+                        width += emoji_extra;
+                    }
+                    InlineSpan::Code(code) => {
+                        let mono = egui::FontId::monospace(self.font_sizes.code);
+                        let galley =
+                            fonts.layout_no_wrap(code.trim().to_string(), mono, Color32::WHITE);
+                        width += galley.size().x + 6.0; // small padding for code background
+                    }
+                }
+                width += 4.0; // spacing between spans
+            }
+        });
+        width
+    }
+
+    fn is_known_emoji(c: char) -> bool {
+        matches!(
+            c,
+            '🎉' | '✅'
+                | '🚀'
+                | '🙂'
+                | '😀'
+                | '😉'
+                | '⭐'
+                | '🔥'
+                | '👍'
+                | '👎'
+                | '💡'
+                | '❓'
+                | '❗'
+                | '📝'
+                | '🧠'
+                | '🧪'
+                | '📦'
+                | '🔧'
+        )
+    }
+
     fn expand_shortcodes(s: &str) -> String {
         use crate::emoji_catalog::shortcode_map;
         if !s.contains(':') {
@@ -1232,25 +1292,94 @@ impl MarkdownRenderer {
         }
 
         ui.add_space(8.0);
-        let total_width = ui.available_width().max(300.0);
-        let col0 = (total_width * 0.34).max(140.0); // Feature
-        let col1 = (total_width * 0.16).max(90.0); // Supported
-        let col2 = (total_width - col0 - col1).max(160.0); // Notes
 
+        // 1) Measure intrinsic (natural) widths per column
+        let mut natural: Vec<f32> = vec![0.0; headers.len()];
+        // Header widths define a good minimum baseline
+        for (ci, h) in headers.iter().enumerate() {
+            natural[ci] = natural[ci].max(self.measure_inline_spans(ui, h));
+        }
+        // Include rows
+        for row in rows {
+            for (ci, cell) in row.iter().enumerate() {
+                if ci < natural.len() {
+                    natural[ci] = natural[ci].max(self.measure_inline_spans(ui, cell));
+                }
+            }
+        }
+
+        // 2) Compute target widths to fit viewport: if total natural > available, shrink with wrapping
+        let available = ui.available_width().max(100.0);
+        let total_natural: f32 = natural.iter().sum();
+        let mut widths = natural.clone();
+
+        if total_natural > available {
+            // Initial proportional shrink
+            let ratio = (available / total_natural).clamp(0.1, 1.0);
+            for w in &mut widths {
+                *w *= ratio;
+            }
+            // Enforce per-column minimums based on header widths (so headers remain readable)
+            let mins = natural.clone(); // header/natural widths are our minima
+                                        // If mins already exceed available, scale mins down proportionally
+            let sum_mins: f32 = mins.iter().sum();
+            if sum_mins > available {
+                let r = (available / sum_mins).clamp(0.1, 1.0);
+                for (w, m) in widths.iter_mut().zip(mins.iter()) {
+                    *w = (*m * r).max(40.0); // absolute hard floor
+                }
+            } else {
+                // Bring widths down but not below minima
+                for (w, m) in widths.iter_mut().zip(mins.iter()) {
+                    if *w < *m {
+                        *w = (*m).max(40.0);
+                    }
+                }
+                // If after clamping we still exceed available, shrink the slack columns
+                let mut sum_w: f32 = widths.iter().sum();
+                if sum_w > available {
+                    let slack: Vec<f32> = widths
+                        .iter()
+                        .zip(mins.iter())
+                        .map(|(w, m)| (w - m).max(0.0))
+                        .collect();
+                    let total_slack: f32 = slack.iter().sum();
+                    if total_slack > 1.0 {
+                        let excess = sum_w - available;
+                        for (i, w) in widths.iter_mut().enumerate() {
+                            if slack[i] > 0.0 {
+                                let cut = excess * (slack[i] / total_slack);
+                                *w -= cut;
+                            }
+                        }
+                        // Recompute in case of rounding
+                        sum_w = widths.iter().sum();
+                        if sum_w > available {
+                            let r2 = available / sum_w;
+                            for w in &mut widths {
+                                *w *= r2;
+                            }
+                        }
+                    } else {
+                        // No slack; scale everything
+                        let r2 = available / sum_w;
+                        for w in &mut widths {
+                            *w *= r2;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3) Render the table with per-column width constraints; content wraps as needed
         egui::Frame::none()
             .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
             .show(ui, |ui| {
-                let grid = egui::Grid::new("md_table").striped(true);
-                grid.show(ui, |ui| {
+                egui::Grid::new("md_table").striped(true).show(ui, |ui| {
                     for (ci, h) in headers.iter().enumerate() {
-                        let width = match ci {
-                            0 => col0,
-                            1 => col1,
-                            _ => col2,
-                        };
+                        let w = widths.get(ci).copied().unwrap_or(120.0);
                         ui.scope(|ui| {
-                            ui.set_min_width(width);
-                            ui.set_max_width(width);
+                            ui.set_max_width(w);
                             ui.horizontal_wrapped(|ui| {
                                 ui.spacing_mut().item_spacing.x = 0.0;
                                 for span in h {
@@ -1263,16 +1392,11 @@ impl MarkdownRenderer {
                     ui.end_row();
 
                     for row in rows {
-                        for (col, cell) in row.iter().enumerate() {
-                            if col < headers.len() {
-                                let width = match col {
-                                    0 => col0,
-                                    1 => col1,
-                                    _ => col2,
-                                };
+                        for (ci, cell) in row.iter().enumerate() {
+                            if ci < headers.len() {
+                                let w = widths.get(ci).copied().unwrap_or(120.0);
                                 ui.scope(|ui| {
-                                    ui.set_min_width(width);
-                                    ui.set_max_width(width);
+                                    ui.set_max_width(w);
                                     ui.horizontal_wrapped(|ui| {
                                         ui.spacing_mut().item_spacing.x = 0.0;
                                         for span in cell {
