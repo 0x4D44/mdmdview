@@ -175,11 +175,8 @@ impl MarkdownRenderer {
                 Ok(next_idx)
             }
             Event::Start(Tag::Heading(level, _, _)) => {
-                let (spans, next_idx) = self.parse_inline_spans(
-                    events,
-                    start + 1,
-                    Tag::Heading(*level, None, vec![]),
-                )?;
+                let (spans, next_idx) =
+                    self.parse_inline_spans(events, start + 1, Tag::Heading(*level, None, vec![]))?;
                 let title_text = Self::spans_plain_text(&spans);
                 let base = Self::slugify(&title_text);
                 let count = slug_counts.entry(base.clone()).or_insert(0);
@@ -189,7 +186,11 @@ impl MarkdownRenderer {
                     format!("{}-{}", base, *count)
                 };
                 *count += 1;
-                elements.push(MarkdownElement::Header { level: *level as u8, spans, id });
+                elements.push(MarkdownElement::Header {
+                    level: *level as u8,
+                    spans,
+                    id,
+                });
                 Ok(next_idx)
             }
             Event::Start(Tag::CodeBlock(_)) => {
@@ -769,96 +770,97 @@ impl MarkdownRenderer {
             // Wrap each element in a no-op frame to capture its rect
             let ir = egui::Frame::none().show(ui, |ui| {
                 match element {
-                MarkdownElement::Paragraph(spans) => {
-                    self.render_inline_spans(ui, spans);
-                    ui.add_space(4.0);
-                }
-                MarkdownElement::Quote { depth, lines } => {
-                    ui.add_space(4.0);
-                    let bar_width = 3.0;
-                    let bar_gap = 6.0;
-                    let left_pad = 10.0 + (*depth as f32) * (bar_width + bar_gap);
-                    // Substack-like styling: dark grey block with orange accent bars and white text
-                    let bg = Color32::from_rgb(24, 24, 24);
+                    MarkdownElement::Paragraph(spans) => {
+                        self.render_inline_spans(ui, spans);
+                        ui.add_space(4.0);
+                    }
+                    MarkdownElement::Quote { depth, lines } => {
+                        ui.add_space(4.0);
+                        let bar_width = 3.0;
+                        let bar_gap = 6.0;
+                        let left_pad = 10.0 + (*depth as f32) * (bar_width + bar_gap);
+                        // Substack-like styling: dark grey block with orange accent bars and white text
+                        let bg = Color32::from_rgb(24, 24, 24);
 
-                    let resp = egui::Frame::none()
-                        .fill(bg)
-                        .stroke(Stroke::new(1.0, Color32::from_rgb(40, 40, 40)))
-                        .rounding(egui::Rounding::same(6.0))
-                        .inner_margin(egui::Margin {
-                            left: left_pad,
-                            right: 10.0,
-                            top: 8.0,
-                            bottom: 8.0,
-                        })
-                        .show(ui, |ui| {
-                            for (li, line) in lines.iter().enumerate() {
-                                // White text for quote content
-                                ui.style_mut().visuals.override_text_color = Some(Color32::WHITE);
-                                self.render_inline_spans(ui, line);
-                                ui.style_mut().visuals.override_text_color = None;
-                                if li + 1 < lines.len() {
-                                    ui.add_space(3.0);
+                        let resp = egui::Frame::none()
+                            .fill(bg)
+                            .stroke(Stroke::new(1.0, Color32::from_rgb(40, 40, 40)))
+                            .rounding(egui::Rounding::same(6.0))
+                            .inner_margin(egui::Margin {
+                                left: left_pad,
+                                right: 10.0,
+                                top: 8.0,
+                                bottom: 8.0,
+                            })
+                            .show(ui, |ui| {
+                                for (li, line) in lines.iter().enumerate() {
+                                    // White text for quote content
+                                    ui.style_mut().visuals.override_text_color =
+                                        Some(Color32::WHITE);
+                                    self.render_inline_spans(ui, line);
+                                    ui.style_mut().visuals.override_text_color = None;
+                                    if li + 1 < lines.len() {
+                                        ui.add_space(3.0);
+                                    }
                                 }
+                            });
+
+                        // Draw vertical orange quote bars on the left of the frame
+                        let rect = resp.response.rect;
+                        let top = rect.top() + 6.0;
+                        let bottom = rect.bottom() - 6.0;
+                        let bar_color = Color32::from_rgb(255, 103, 25); // Substack-like orange
+                        for d in 0..*depth {
+                            let x = rect.left() + 6.0 + (d as f32) * (bar_width + bar_gap);
+                            let bar_rect = egui::Rect::from_min_max(
+                                egui::pos2(x, top),
+                                egui::pos2(x + bar_width, bottom),
+                            );
+                            ui.painter().rect_filled(bar_rect, 2.0, bar_color);
+                        }
+
+                        ui.add_space(6.0);
+                    }
+                    MarkdownElement::Header { level, spans, id } => {
+                        let font_size = match level {
+                            1 => self.font_sizes.h1,
+                            2 => self.font_sizes.h2,
+                            3 => self.font_sizes.h3,
+                            4 => self.font_sizes.h4,
+                            5 => self.font_sizes.h5,
+                            6 => self.font_sizes.h6,
+                            _ => self.font_sizes.body,
+                        };
+
+                        ui.add_space(8.0);
+                        let resp = ui.horizontal_wrapped(|ui| {
+                            // Avoid artificial gaps between header fragments
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            for span in spans {
+                                self.render_inline_span(ui, span, Some(font_size), Some(true));
                             }
                         });
-
-                    // Draw vertical orange quote bars on the left of the frame
-                    let rect = resp.response.rect;
-                    let top = rect.top() + 6.0;
-                    let bottom = rect.bottom() - 6.0;
-                    let bar_color = Color32::from_rgb(255, 103, 25); // Substack-like orange
-                    for d in 0..*depth {
-                        let x = rect.left() + 6.0 + (d as f32) * (bar_width + bar_gap);
-                        let bar_rect = egui::Rect::from_min_max(
-                            egui::pos2(x, top),
-                            egui::pos2(x + bar_width, bottom),
-                        );
-                        ui.painter().rect_filled(bar_rect, 2.0, bar_color);
+                        // Record the header rect for in-document navigation
+                        self.header_rects
+                            .borrow_mut()
+                            .insert(id.clone(), resp.response.rect);
+                        ui.add_space(6.0);
                     }
-
-                    ui.add_space(6.0);
+                    MarkdownElement::CodeBlock { language, text } => {
+                        self.render_code_block(ui, language.as_deref(), text);
+                    }
+                    MarkdownElement::List { ordered, items } => {
+                        self.render_list(ui, *ordered, items);
+                    }
+                    MarkdownElement::HorizontalRule => {
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+                    }
+                    MarkdownElement::Table { headers, rows } => {
+                        self.render_table(ui, headers, rows);
+                    }
                 }
-                MarkdownElement::Header { level, spans, id } => {
-                    let font_size = match level {
-                        1 => self.font_sizes.h1,
-                        2 => self.font_sizes.h2,
-                        3 => self.font_sizes.h3,
-                        4 => self.font_sizes.h4,
-                        5 => self.font_sizes.h5,
-                        6 => self.font_sizes.h6,
-                        _ => self.font_sizes.body,
-                    };
-
-                    ui.add_space(8.0);
-                    let resp = ui.horizontal_wrapped(|ui| {
-                        // Avoid artificial gaps between header fragments
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        for span in spans {
-                            self.render_inline_span(ui, span, Some(font_size), Some(true));
-                        }
-                    });
-                    // Record the header rect for in-document navigation
-                    self.header_rects
-                        .borrow_mut()
-                        .insert(id.clone(), resp.response.rect);
-                    ui.add_space(6.0);
-                }
-                MarkdownElement::CodeBlock { language, text } => {
-                    self.render_code_block(ui, language.as_deref(), text);
-                }
-                MarkdownElement::List { ordered, items } => {
-                    self.render_list(ui, *ordered, items);
-                }
-                MarkdownElement::HorizontalRule => {
-                    ui.add_space(8.0);
-                    ui.separator();
-                    ui.add_space(8.0);
-                }
-                MarkdownElement::Table { headers, rows } => {
-                    self.render_table(ui, headers, rows);
-                }
-            }
             });
             self.element_rects.borrow_mut().push(ir.response.rect);
         }
@@ -967,11 +969,7 @@ impl MarkdownRenderer {
                 let mut counter = self.link_counter.borrow_mut();
                 let id = egui::Id::new(format!("link:{}:{}", *counter, url));
                 *counter += 1;
-                let r = ui.interact(
-                    group.response.rect,
-                    id,
-                    egui::Sense::click(),
-                );
+                let r = ui.interact(group.response.rect, id, egui::Sense::click());
                 if r.hovered() {
                     ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
                 }
@@ -1054,10 +1052,18 @@ impl MarkdownRenderer {
                                 let pre = &expanded[start..abs];
                                 if !pre.is_empty() {
                                     let mut rich = RichText::new(pre).size(size);
-                                    if style.strong { rich = rich.strong(); }
-                                    if style.italics { rich = rich.italics(); }
-                                    if style.strike { rich = rich.strikethrough(); }
-                                    if let Some(color) = style.color { rich = rich.color(color); }
+                                    if style.strong {
+                                        rich = rich.strong();
+                                    }
+                                    if style.italics {
+                                        rich = rich.italics();
+                                    }
+                                    if style.strike {
+                                        rich = rich.strikethrough();
+                                    }
+                                    if let Some(color) = style.color {
+                                        rich = rich.color(color);
+                                    }
                                     ui.label(rich);
                                 }
                             }
@@ -1065,10 +1071,18 @@ impl MarkdownRenderer {
                             let mut rich = RichText::new(mat)
                                 .size(size)
                                 .background_color(Color32::from_rgb(80, 80, 0));
-                            if style.strong { rich = rich.strong(); }
-                            if style.italics { rich = rich.italics(); }
-                            if style.strike { rich = rich.strikethrough(); }
-                            if let Some(color) = style.color { rich = rich.color(color); }
+                            if style.strong {
+                                rich = rich.strong();
+                            }
+                            if style.italics {
+                                rich = rich.italics();
+                            }
+                            if style.strike {
+                                rich = rich.strikethrough();
+                            }
+                            if let Some(color) = style.color {
+                                rich = rich.color(color);
+                            }
                             ui.label(rich);
                             start = abs + h.len();
                         }
@@ -1076,19 +1090,35 @@ impl MarkdownRenderer {
                             let rest = &expanded[start..];
                             if !rest.is_empty() {
                                 let mut rich = RichText::new(rest).size(size);
-                                if style.strong { rich = rich.strong(); }
-                                if style.italics { rich = rich.italics(); }
-                                if style.strike { rich = rich.strikethrough(); }
-                                if let Some(color) = style.color { rich = rich.color(color); }
+                                if style.strong {
+                                    rich = rich.strong();
+                                }
+                                if style.italics {
+                                    rich = rich.italics();
+                                }
+                                if style.strike {
+                                    rich = rich.strikethrough();
+                                }
+                                if let Some(color) = style.color {
+                                    rich = rich.color(color);
+                                }
                                 ui.label(rich);
                             }
                         }
                     } else {
                         let mut rich = RichText::new(expanded).size(size);
-                        if style.strong { rich = rich.strong(); }
-                        if style.italics { rich = rich.italics(); }
-                        if style.strike { rich = rich.strikethrough(); }
-                        if let Some(color) = style.color { rich = rich.color(color); }
+                        if style.strong {
+                            rich = rich.strong();
+                        }
+                        if style.italics {
+                            rich = rich.italics();
+                        }
+                        if style.strike {
+                            rich = rich.strikethrough();
+                        }
+                        if let Some(color) = style.color {
+                            rich = rich.color(color);
+                        }
                         ui.label(rich);
                     }
                 }

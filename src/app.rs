@@ -4,9 +4,9 @@
 /// for the markdown viewer application built with egui.
 use crate::{MarkdownElement, MarkdownRenderer, SampleFile, SAMPLE_FILES};
 use anyhow::{bail, Result};
-use egui::{menu, CentralPanel, Color32, Context, RichText, TopBottomPanel};
 use egui::text::LayoutJob;
 use egui::text::TextFormat;
+use egui::{menu, CentralPanel, Color32, Context, RichText, TopBottomPanel};
 use egui::{TextEdit, TextStyle};
 use rfd::FileDialog;
 use std::path::PathBuf;
@@ -455,188 +455,235 @@ impl MarkdownViewerApp {
             let alt_pressed = ui.input(|i| i.modifiers.alt);
             menu::bar(ui, |ui| {
                 // File menu (Alt+F mnemonic visual)
-                ui.menu_button(Self::menu_text_with_mnemonic(None, "File", 'F', alt_pressed), |ui| {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(egui::Button::new(Self::menu_text_with_mnemonic(
-                                Some("📁 "),
-                                "Open...",
-                                'O',
-                                alt_pressed,
-                            )))
-                            .clicked()
-                        {
-                            self.open_file_dialog();
-                            ui.close_menu();
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.weak("Ctrl+O");
-                        });
-                    });
-
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(egui::Button::new(Self::menu_text_with_mnemonic(
-                                Some("📄 "),
-                                "Close",
-                                'C',
-                                alt_pressed,
-                            )))
-                            .clicked()
-                        {
-                            self.close_current_file();
-                            ui.close_menu();
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.weak("Ctrl+W");
-                        });
-                    });
-
-                    ui.horizontal(|ui| {
-                    let enabled = self.current_file.is_some();
-                    let button = ui.add_enabled(enabled, egui::Button::new(
-                        Self::menu_text_with_mnemonic(Some("🔄 "), "Reload", 'R', alt_pressed),
-                    ));
-                        if button.clicked() {
-                            self.request_reload();
-                            ui.close_menu();
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.weak("F5");
-                        });
-                    });
-
-                    // Find...
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(egui::Button::new(Self::menu_text_with_mnemonic(
-                                Some("🔎 "),
-                                "Find...",
-                                'F',
-                                alt_pressed,
-                            )))
-                            .clicked()
-                        {
-                            self.show_search = true;
-                            self.search_focus_requested = true;
-                            ui.close_menu();
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.weak("Ctrl+F");
-                        });
-                    });
-
-                    ui.separator();
-
-                    // Samples submenu
-                    ui.menu_button(
-                        Self::menu_text_with_mnemonic(Some("📚 "), "Samples", 'S', alt_pressed),
-                        |ui| {
-                            for sample in SAMPLE_FILES {
-                                if ui.button(sample.title).clicked() {
-                                    self.load_sample(sample);
-                                    ui.close_menu();
-                                }
+                ui.menu_button(
+                    Self::menu_text_with_mnemonic(None, "File", 'F', alt_pressed),
+                    |ui| {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(egui::Button::new(Self::menu_text_with_mnemonic(
+                                    Some("📁 "),
+                                    "Open...",
+                                    'O',
+                                    alt_pressed,
+                                )))
+                                .clicked()
+                            {
+                                self.open_file_dialog();
+                                ui.close_menu();
                             }
-                        },
-                    );
-
-                    ui.separator();
-
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(egui::Button::new(Self::menu_text_with_mnemonic(
-                                Some("❌ "),
-                                "Exit",
-                                'E',
-                                alt_pressed,
-                            )))
-                            .clicked()
-                        {
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.weak("Ctrl+Q");
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.weak("Ctrl+O");
+                                },
+                            );
                         });
-                    });
-                });
+
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(egui::Button::new(Self::menu_text_with_mnemonic(
+                                    Some("📄 "),
+                                    "Close",
+                                    'C',
+                                    alt_pressed,
+                                )))
+                                .clicked()
+                            {
+                                self.close_current_file();
+                                ui.close_menu();
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.weak("Ctrl+W");
+                                },
+                            );
+                        });
+
+                        ui.horizontal(|ui| {
+                            let enabled = self.current_file.is_some();
+                            let button = ui.add_enabled(
+                                enabled,
+                                egui::Button::new(Self::menu_text_with_mnemonic(
+                                    Some("🔄 "),
+                                    "Reload",
+                                    'R',
+                                    alt_pressed,
+                                )),
+                            );
+                            if button.clicked() {
+                                self.request_reload();
+                                ui.close_menu();
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.weak("F5");
+                                },
+                            );
+                        });
+
+                        // Find...
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(egui::Button::new(Self::menu_text_with_mnemonic(
+                                    Some("🔎 "),
+                                    "Find...",
+                                    'F',
+                                    alt_pressed,
+                                )))
+                                .clicked()
+                            {
+                                self.show_search = true;
+                                self.search_focus_requested = true;
+                                ui.close_menu();
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.weak("Ctrl+F");
+                                },
+                            );
+                        });
+
+                        ui.separator();
+
+                        // Samples submenu
+                        ui.menu_button(
+                            Self::menu_text_with_mnemonic(Some("📚 "), "Samples", 'S', alt_pressed),
+                            |ui| {
+                                for sample in SAMPLE_FILES {
+                                    if ui.button(sample.title).clicked() {
+                                        self.load_sample(sample);
+                                        ui.close_menu();
+                                    }
+                                }
+                            },
+                        );
+
+                        ui.separator();
+
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add(egui::Button::new(Self::menu_text_with_mnemonic(
+                                    Some("❌ "),
+                                    "Exit",
+                                    'E',
+                                    alt_pressed,
+                                )))
+                                .clicked()
+                            {
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.weak("Ctrl+Q");
+                                },
+                            );
+                        });
+                    },
+                );
 
                 // View menu
-                ui.menu_button(Self::menu_text_with_mnemonic(None, "View", 'V', alt_pressed), |ui| {
-                    // Raw view toggle
-                    ui.horizontal(|ui| {
-                        let selected = matches!(self.view_mode, ViewMode::Raw);
-                        if ui
-                            .add(egui::SelectableLabel::new(
-                                selected,
-                                Self::menu_text_with_mnemonic(Some("📝 "), "Raw Markdown", 'R', alt_pressed),
-                            ))
-                            .clicked()
-                        {
-                            self.toggle_view_mode();
-                            ui.close_menu();
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.weak("Ctrl+R");
+                ui.menu_button(
+                    Self::menu_text_with_mnemonic(None, "View", 'V', alt_pressed),
+                    |ui| {
+                        // Raw view toggle
+                        ui.horizontal(|ui| {
+                            let selected = matches!(self.view_mode, ViewMode::Raw);
+                            if ui
+                                .add(egui::SelectableLabel::new(
+                                    selected,
+                                    Self::menu_text_with_mnemonic(
+                                        Some("📝 "),
+                                        "Raw Markdown",
+                                        'R',
+                                        alt_pressed,
+                                    ),
+                                ))
+                                .clicked()
+                            {
+                                self.toggle_view_mode();
+                                ui.close_menu();
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.weak("Ctrl+R");
+                                },
+                            );
                         });
-                    });
 
-                    // Wrap option for raw view
-                    ui.horizontal(|ui| {
-                        if ui
-                            .selectable_label(self.wrap_raw, "↪ Wrap Raw Lines")
-                            .clicked()
-                        {
-                            self.wrap_raw = !self.wrap_raw;
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        if ui.button("🔍 Zoom In").clicked() {
-                            self.renderer.zoom_in();
-                            ui.close_menu();
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.weak("Ctrl++");
+                        // Wrap option for raw view
+                        ui.horizontal(|ui| {
+                            if ui
+                                .selectable_label(self.wrap_raw, "↪ Wrap Raw Lines")
+                                .clicked()
+                            {
+                                self.wrap_raw = !self.wrap_raw;
+                            }
                         });
-                    });
 
-                    ui.horizontal(|ui| {
-                        if ui.button("🔍 Zoom Out").clicked() {
-                            self.renderer.zoom_out();
-                            ui.close_menu();
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.weak("Ctrl+-");
+                        ui.horizontal(|ui| {
+                            if ui.button("🔍 Zoom In").clicked() {
+                                self.renderer.zoom_in();
+                                ui.close_menu();
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.weak("Ctrl++");
+                                },
+                            );
                         });
-                    });
 
-                    ui.horizontal(|ui| {
-                        if ui.button("↩ Reset Zoom").clicked() {
-                            self.renderer.reset_zoom();
-                            ui.close_menu();
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.weak("Ctrl+0");
+                        ui.horizontal(|ui| {
+                            if ui.button("🔍 Zoom Out").clicked() {
+                                self.renderer.zoom_out();
+                                ui.close_menu();
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.weak("Ctrl+-");
+                                },
+                            );
                         });
-                    });
 
-                    ui.separator();
-
-                    ui.horizontal(|ui| {
-                        if ui.button("⛶ Toggle Fullscreen").clicked() {
-                            let is_fullscreen =
-                                ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-                            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
-                                !is_fullscreen,
-                            ));
-                            ui.close_menu();
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.weak("F11");
+                        ui.horizontal(|ui| {
+                            if ui.button("↩ Reset Zoom").clicked() {
+                                self.renderer.reset_zoom();
+                                ui.close_menu();
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.weak("Ctrl+0");
+                                },
+                            );
                         });
-                    });
-                });
+
+                        ui.separator();
+
+                        ui.horizontal(|ui| {
+                            if ui.button("⛶ Toggle Fullscreen").clicked() {
+                                let is_fullscreen =
+                                    ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
+                                    !is_fullscreen,
+                                ));
+                                ui.close_menu();
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.weak("F11");
+                                },
+                            );
+                        });
+                    },
+                );
 
                 // Help menu
                 ui.menu_button("Help", |ui| {
@@ -801,11 +848,9 @@ impl eframe::App for MarkdownViewerApp {
                             ViewMode::Rendered => {
                                 // Update highlight phrase: prefer live input, else last executed
                                 if self.show_search && !self.search_query.is_empty() {
-                                    self.renderer
-                                        .set_highlight_phrase(Some(&self.search_query));
+                                    self.renderer.set_highlight_phrase(Some(&self.search_query));
                                 } else if !self.last_query.is_empty() {
-                                    self.renderer
-                                        .set_highlight_phrase(Some(&self.last_query));
+                                    self.renderer.set_highlight_phrase(Some(&self.last_query));
                                 } else {
                                     self.renderer.set_highlight_phrase(None);
                                 }
@@ -970,7 +1015,9 @@ impl MarkdownViewerApp {
                             break;
                         }
                     }
-                    if found.is_some() { break; }
+                    if found.is_some() {
+                        break;
+                    }
                 }
                 if let Some(idx) = found {
                     self.last_match_index = Some(idx);
