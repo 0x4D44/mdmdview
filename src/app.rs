@@ -37,6 +37,14 @@ pub struct MarkdownViewerApp {
     wrap_raw: bool,
     /// Flag to request reload of current file (handled outside input context)
     reload_requested: bool,
+    /// Last known window position (for persistence)
+    last_window_pos: Option<[f32; 2]>,
+    /// Last known window size (for persistence)
+    last_window_size: Option<[f32; 2]>,
+    /// Last known maximized state
+    last_window_maximized: bool,
+    /// Throttle saving window state
+    last_persist_instant: std::time::Instant,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -74,6 +82,10 @@ impl MarkdownViewerApp {
             view_mode: ViewMode::Rendered,
             wrap_raw: false,
             reload_requested: false,
+            last_window_pos: None,
+            last_window_size: None,
+            last_window_maximized: false,
+            last_persist_instant: std::time::Instant::now(),
         };
 
         // Load welcome content by default
@@ -472,6 +484,22 @@ impl eframe::App for MarkdownViewerApp {
         // Handle keyboard shortcuts
         self.handle_shortcuts(ctx);
 
+        // Track window position/size for persistence
+        ctx.input(|i| {
+            let vp = i.viewport();
+            if let Some(rect) = vp.outer_rect {
+                self.last_window_pos = Some([rect.left(), rect.top()]);
+                self.last_window_size = Some([rect.width(), rect.height()]);
+            }
+            self.last_window_maximized = vp.maximized.unwrap_or(false);
+        });
+
+        // Opportunistically persist window state if it changed, throttled to once per second
+        if self.should_persist_window_state() {
+            self.persist_window_state();
+            self.last_persist_instant = std::time::Instant::now();
+        }
+
         // Handle fullscreen toggle outside input context to avoid deadlocks
         if self.toggle_fullscreen {
             self.toggle_fullscreen = false;
@@ -581,9 +609,34 @@ impl eframe::App for MarkdownViewerApp {
         });
     }
 
-    /// Set the window title
     fn auto_save_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(30)
+    }
+
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {
+        // Persist window position and size on app save/exit
+        self.persist_window_state();
+    }
+}
+
+impl MarkdownViewerApp {
+    fn persist_window_state(&self) {
+        if let (Some(pos), Some(size)) = (self.last_window_pos, self.last_window_size) {
+            let state = crate::WindowState {
+                pos,
+                size,
+                maximized: self.last_window_maximized,
+            };
+            let _ = crate::save_window_state(&state);
+        }
+    }
+
+    fn should_persist_window_state(&self) -> bool {
+        if self.last_persist_instant.elapsed() < std::time::Duration::from_secs(1) {
+            return false;
+        }
+        // Persist periodically; we could also detect deltas to reduce writes further
+        self.last_window_pos.is_some() && self.last_window_size.is_some()
     }
 }
 

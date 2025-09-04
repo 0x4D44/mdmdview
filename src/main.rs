@@ -5,7 +5,7 @@
 /// A simple, standalone markdown viewer for Windows built with Rust and egui.
 /// This application provides a clean interface for viewing markdown files with
 /// syntax highlighting, embedded samples, and essential viewing features.
-use mdmdview::MarkdownViewerApp;
+use mdmdview::{load_window_state, sanitize_window_state, MarkdownViewerApp};
 
 /// Application entry point
 fn main() -> Result<(), eframe::Error> {
@@ -22,16 +22,28 @@ fn main() -> Result<(), eframe::Error> {
     };
 
     // Set up eframe options for the native window
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("MarkdownView - A Simple Markdown Viewer")
+        .with_inner_size(egui::Vec2::new(1000.0, 700.0))
+        .with_min_inner_size(egui::Vec2::new(600.0, 400.0))
+        .with_icon(create_app_icon())
+        .with_resizable(true)
+        .with_maximize_button(true)
+        .with_minimize_button(true);
+
+    // Restore previous window position/size if available
+    if let Some(ws) = load_window_state() {
+        if let Some(ws) = sanitize_window_state(ws) {
+            viewport = viewport
+                .with_inner_size(egui::Vec2::new(ws.size[0], ws.size[1]))
+                .with_position(egui::pos2(ws.pos[0], ws.pos[1]))
+                .with_maximized(ws.maximized);
+        }
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("MarkdownView - A Simple Markdown Viewer")
-            .with_inner_size(egui::Vec2::new(1000.0, 700.0))
-            .with_min_inner_size(egui::Vec2::new(600.0, 400.0))
-            .with_icon(create_app_icon())
-            .with_resizable(true)
-            .with_maximize_button(true)
-            .with_minimize_button(true),
-        // Enable complete window state persistence
+        viewport,
+        // Keep native persist as well; our explicit file handles cross‑platform dirs
         persist_window: true,
         ..Default::default()
     };

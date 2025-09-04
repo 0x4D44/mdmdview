@@ -76,6 +76,12 @@ You can associate MarkdownView with `.md` files for easy opening:
 
 Now double-clicking any `.md` file will open it in MarkdownView!
 
+### Window State Persistence
+
+- The app saves window position and size on exit and restores them on startup.
+- On Windows, the state file is stored under `%APPDATA%\MarkdownView\window_state.txt`.
+- On Linux/macOS, it is stored under the user config directory (e.g., `~/.config/mdmdview/window_state.txt` or `~/Library/Application Support/MarkdownView/window_state.txt`).
+
 ### File Properties and Icon
 
 The executable includes complete Windows metadata:
