@@ -5,6 +5,8 @@
 use crate::{MarkdownElement, MarkdownRenderer, SampleFile, SAMPLE_FILES};
 use anyhow::{bail, Result};
 use egui::{menu, CentralPanel, Color32, Context, RichText, TopBottomPanel};
+use egui::text::LayoutJob;
+use egui::text::TextFormat;
 use egui::{TextEdit, TextStyle};
 use rfd::FileDialog;
 use std::path::PathBuf;
@@ -45,6 +47,13 @@ pub struct MarkdownViewerApp {
     last_window_maximized: bool,
     /// Throttle saving window state
     last_persist_instant: std::time::Instant,
+    // Search state
+    show_search: bool,
+    search_query: String,
+    last_query: String,
+    last_match_index: Option<usize>,
+    pending_scroll_to_element: Option<usize>,
+    search_focus_requested: bool,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -66,6 +75,94 @@ enum ViewMode {
 }
 
 impl MarkdownViewerApp {
+    fn clear_search_state(&mut self) {
+        self.search_query.clear();
+        self.last_query.clear();
+        self.last_match_index = None;
+        self.pending_scroll_to_element = None;
+        self.renderer.set_highlight_phrase(None);
+    }
+    fn find_next(&mut self) {
+        if self.search_query.is_empty() && self.last_query.is_empty() {
+            return;
+        }
+        let needle = if !self.search_query.is_empty() {
+            self.last_query = self.search_query.clone();
+            self.search_query.to_ascii_lowercase()
+        } else {
+            self.last_query.to_ascii_lowercase()
+        };
+        if needle.is_empty() {
+            return;
+        }
+        let mut start = self.last_match_index.unwrap_or(usize::MAX);
+        if start == usize::MAX {
+            start = 0;
+        } else {
+            start = start.saturating_add(1);
+        }
+        // Wrap-around search forward
+        let total = self.parsed_elements.len();
+        for pass in 0..2 {
+            let range: Box<dyn Iterator<Item = usize>> = if pass == 0 {
+                Box::new(start..total)
+            } else {
+                Box::new(0..start.min(total))
+            };
+            for idx in range {
+                let text = crate::markdown_renderer::MarkdownRenderer::element_plain_text(
+                    &self.parsed_elements[idx],
+                )
+                .to_ascii_lowercase();
+                if text.contains(&needle) {
+                    self.last_match_index = Some(idx);
+                    self.pending_scroll_to_element = Some(idx);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn find_previous(&mut self) {
+        if self.search_query.is_empty() && self.last_query.is_empty() {
+            return;
+        }
+        let needle = if !self.search_query.is_empty() {
+            self.last_query = self.search_query.clone();
+            self.search_query.to_ascii_lowercase()
+        } else {
+            self.last_query.to_ascii_lowercase()
+        };
+        if needle.is_empty() {
+            return;
+        }
+        let total = self.parsed_elements.len();
+        let mut start = self.last_match_index.unwrap_or(0);
+        if start == 0 {
+            start = total.saturating_sub(1);
+        } else {
+            start = start.saturating_sub(1);
+        }
+        // Wrap-around search backward
+        for pass in 0..2 {
+            let range: Box<dyn Iterator<Item = usize>> = if pass == 0 {
+                Box::new((0..=start).rev())
+            } else {
+                Box::new(((start + 1)..total).rev())
+            };
+            for idx in range {
+                let text = crate::markdown_renderer::MarkdownRenderer::element_plain_text(
+                    &self.parsed_elements[idx],
+                )
+                .to_ascii_lowercase();
+                if text.contains(&needle) {
+                    self.last_match_index = Some(idx);
+                    self.pending_scroll_to_element = Some(idx);
+                    return;
+                }
+            }
+        }
+    }
     /// Create a new application instance
     pub fn new() -> Self {
         let mut app = Self {
@@ -86,6 +183,12 @@ impl MarkdownViewerApp {
             last_window_size: None,
             last_window_maximized: false,
             last_persist_instant: std::time::Instant::now(),
+            show_search: false,
+            search_query: String::new(),
+            last_query: String::new(),
+            last_match_index: None,
+            pending_scroll_to_element: None,
+            search_focus_requested: false,
         };
 
         // Load welcome content by default
@@ -203,6 +306,26 @@ impl MarkdownViewerApp {
                 self.open_file_dialog();
             }
 
+            // Alt-based accelerators for common actions (mnemonics)
+            if i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::ALT,
+                egui::Key::O,
+            )) {
+                self.open_file_dialog();
+            }
+            if i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::ALT,
+                egui::Key::W,
+            )) {
+                self.close_current_file();
+            }
+            if i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::ALT,
+                egui::Key::Q,
+            )) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+
             // Ctrl+Q - Quit application
             if i.consume_shortcut(&egui::KeyboardShortcut::new(
                 egui::Modifiers::CTRL,
@@ -217,6 +340,32 @@ impl MarkdownViewerApp {
                 egui::Key::W,
             )) {
                 self.close_current_file();
+            }
+
+            // Ctrl+F - Open search dialog
+            if i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::CTRL,
+                egui::Key::F,
+            )) {
+                self.show_search = true;
+                if self.last_match_index.is_none() {
+                    self.last_match_index = Some(0);
+                }
+                self.search_focus_requested = true;
+            }
+
+            // F3 navigation: next / previous
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::F3) {
+                self.find_next();
+            }
+            if i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::SHIFT,
+                egui::Key::F3,
+            )) || i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::ALT,
+                egui::Key::F3,
+            )) {
+                self.find_previous();
             }
 
             // Ctrl+Plus - Zoom in
@@ -250,6 +399,7 @@ impl MarkdownViewerApp {
             )) {
                 self.toggle_view_mode();
             }
+            // Note: No global Alt+R to avoid conflict (File→Reload vs View→Raw)
 
             // F11 - Toggle fullscreen (set flag to handle outside input context)
             if i.consume_key(egui::Modifiers::NONE, egui::Key::F11) {
@@ -259,6 +409,12 @@ impl MarkdownViewerApp {
             // F5 - Reload current file (set flag; actual IO handled outside input context)
             if i.consume_key(egui::Modifiers::NONE, egui::Key::F5) {
                 self.request_reload();
+            }
+
+            // Esc - dismiss search dialog if visible
+            if self.show_search && i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                self.clear_search_state();
+                self.show_search = false;
             }
 
             // Home - Go to top of document
@@ -296,11 +452,20 @@ impl MarkdownViewerApp {
     /// Render the menu bar
     fn render_menu_bar(&mut self, ctx: &Context) {
         TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            let alt_pressed = ui.input(|i| i.modifiers.alt);
             menu::bar(ui, |ui| {
-                // File menu
-                ui.menu_button("File", |ui| {
+                // File menu (Alt+F mnemonic visual)
+                ui.menu_button(Self::menu_text_with_mnemonic(None, "File", 'F', alt_pressed), |ui| {
                     ui.horizontal(|ui| {
-                        if ui.button("📁 Open...").clicked() {
+                        if ui
+                            .add(egui::Button::new(Self::menu_text_with_mnemonic(
+                                Some("📁 "),
+                                "Open...",
+                                'O',
+                                alt_pressed,
+                            )))
+                            .clicked()
+                        {
                             self.open_file_dialog();
                             ui.close_menu();
                         }
@@ -310,7 +475,15 @@ impl MarkdownViewerApp {
                     });
 
                     ui.horizontal(|ui| {
-                        if ui.button("📄 Close").clicked() {
+                        if ui
+                            .add(egui::Button::new(Self::menu_text_with_mnemonic(
+                                Some("📄 "),
+                                "Close",
+                                'C',
+                                alt_pressed,
+                            )))
+                            .clicked()
+                        {
                             self.close_current_file();
                             ui.close_menu();
                         }
@@ -320,8 +493,10 @@ impl MarkdownViewerApp {
                     });
 
                     ui.horizontal(|ui| {
-                        let enabled = self.current_file.is_some();
-                        let button = ui.add_enabled(enabled, egui::Button::new("🔄 Reload"));
+                    let enabled = self.current_file.is_some();
+                    let button = ui.add_enabled(enabled, egui::Button::new(
+                        Self::menu_text_with_mnemonic(Some("🔄 "), "Reload", 'R', alt_pressed),
+                    ));
                         if button.clicked() {
                             self.request_reload();
                             ui.close_menu();
@@ -331,22 +506,53 @@ impl MarkdownViewerApp {
                         });
                     });
 
-                    ui.separator();
-
-                    // Samples submenu
-                    ui.menu_button("📚 Samples", |ui| {
-                        for sample in SAMPLE_FILES {
-                            if ui.button(sample.title).clicked() {
-                                self.load_sample(sample);
-                                ui.close_menu();
-                            }
+                    // Find...
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(egui::Button::new(Self::menu_text_with_mnemonic(
+                                Some("🔎 "),
+                                "Find...",
+                                'F',
+                                alt_pressed,
+                            )))
+                            .clicked()
+                        {
+                            self.show_search = true;
+                            self.search_focus_requested = true;
+                            ui.close_menu();
                         }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.weak("Ctrl+F");
+                        });
                     });
 
                     ui.separator();
 
+                    // Samples submenu
+                    ui.menu_button(
+                        Self::menu_text_with_mnemonic(Some("📚 "), "Samples", 'S', alt_pressed),
+                        |ui| {
+                            for sample in SAMPLE_FILES {
+                                if ui.button(sample.title).clicked() {
+                                    self.load_sample(sample);
+                                    ui.close_menu();
+                                }
+                            }
+                        },
+                    );
+
+                    ui.separator();
+
                     ui.horizontal(|ui| {
-                        if ui.button("❌ Exit").clicked() {
+                        if ui
+                            .add(egui::Button::new(Self::menu_text_with_mnemonic(
+                                Some("❌ "),
+                                "Exit",
+                                'E',
+                                alt_pressed,
+                            )))
+                            .clicked()
+                        {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -356,11 +562,17 @@ impl MarkdownViewerApp {
                 });
 
                 // View menu
-                ui.menu_button("View", |ui| {
+                ui.menu_button(Self::menu_text_with_mnemonic(None, "View", 'V', alt_pressed), |ui| {
                     // Raw view toggle
                     ui.horizontal(|ui| {
                         let selected = matches!(self.view_mode, ViewMode::Raw);
-                        if ui.selectable_label(selected, "📝 Raw Markdown").clicked() {
+                        if ui
+                            .add(egui::SelectableLabel::new(
+                                selected,
+                                Self::menu_text_with_mnemonic(Some("📝 "), "Raw Markdown", 'R', alt_pressed),
+                            ))
+                            .clicked()
+                        {
                             self.toggle_view_mode();
                             ui.close_menu();
                         }
@@ -445,6 +657,8 @@ impl MarkdownViewerApp {
                 });
             });
         });
+
+        // No programmatic overlay menus; rely on pointer to open egui menus.
     }
 
     /// Render the status bar
@@ -518,9 +732,6 @@ impl eframe::App for MarkdownViewerApp {
         // Render menu bar
         self.render_menu_bar(ctx);
 
-        // Render status bar
-        self.render_status_bar(ctx);
-
         // Main content area
         CentralPanel::default().show(ctx, |ui| {
             // Show error message if any
@@ -588,11 +799,28 @@ impl eframe::App for MarkdownViewerApp {
                     } else {
                         match self.view_mode {
                             ViewMode::Rendered => {
+                                // Update highlight phrase: prefer live input, else last executed
+                                if self.show_search && !self.search_query.is_empty() {
+                                    self.renderer
+                                        .set_highlight_phrase(Some(&self.search_query));
+                                } else if !self.last_query.is_empty() {
+                                    self.renderer
+                                        .set_highlight_phrase(Some(&self.last_query));
+                                } else {
+                                    self.renderer.set_highlight_phrase(None);
+                                }
+
                                 self.renderer.render_to_ui(ui, &self.parsed_elements);
                                 // If a header anchor was clicked, scroll to it
                                 if let Some(anchor) = self.renderer.take_pending_anchor() {
                                     if let Some(rect) = self.renderer.header_rect_for(&anchor) {
                                         // Align target header to the top of the visible area
+                                        ui.scroll_to_rect(rect, Some(egui::Align::Min));
+                                    }
+                                }
+                                // If a search requested a scroll, align to top of visible area
+                                if let Some(idx) = self.pending_scroll_to_element.take() {
+                                    if let Some(rect) = self.renderer.element_rect_at(idx) {
                                         ui.scroll_to_rect(rect, Some(egui::Align::Min));
                                     }
                                 }
@@ -614,6 +842,12 @@ impl eframe::App for MarkdownViewerApp {
                     }
                 });
         });
+
+        // Render floating search dialog (non-modal, always on top)
+        self.render_search_dialog(ctx);
+
+        // Render status bar
+        self.render_status_bar(ctx);
     }
 
     fn auto_save_interval(&self) -> std::time::Duration {
@@ -627,6 +861,32 @@ impl eframe::App for MarkdownViewerApp {
 }
 
 impl MarkdownViewerApp {
+    // Build a rich-text label with only the mnemonic character underlined (visual cue only).
+    fn menu_text_with_mnemonic(
+        prefix: Option<&str>,
+        label: &str,
+        mnemonic: char,
+        underline: bool,
+    ) -> LayoutJob {
+        let mut job = LayoutJob::default();
+        let default_fmt = TextFormat::default();
+        if let Some(p) = prefix {
+            job.append(p, 0.0, default_fmt.clone());
+        }
+        let m = mnemonic.to_ascii_lowercase();
+        let mut applied = false;
+        for c in label.chars() {
+            let mut fmt = default_fmt.clone();
+            if underline && !applied && c.to_ascii_lowercase() == m {
+                // Use a subtle underline color; white works well on dark theme
+                fmt.underline = egui::Stroke::new(1.0, Color32::WHITE);
+                applied = true;
+            }
+            let s = c.to_string();
+            job.append(&s, 0.0, fmt);
+        }
+        job
+    }
     fn persist_window_state(&self) {
         if let (Some(pos), Some(size)) = (self.last_window_pos, self.last_window_size) {
             let state = crate::WindowState {
@@ -645,6 +905,87 @@ impl MarkdownViewerApp {
         // Persist periodically; we could also detect deltas to reduce writes further
         self.last_window_pos.is_some() && self.last_window_size.is_some()
     }
+
+    /// Render the floating non-modal search dialog
+    fn render_search_dialog(&mut self, ctx: &Context) {
+        if !self.show_search {
+            return;
+        }
+        let prev_open = self.show_search;
+        let mut open = self.show_search;
+        let prev_query = self.search_query.clone();
+        egui::Window::new("Find")
+            .collapsible(false)
+            .resizable(false)
+            .default_pos(egui::pos2(80.0, 80.0))
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let mut submitted_next = false;
+                ui.horizontal(|ui| {
+                    let text_edit = egui::TextEdit::singleline(&mut self.search_query)
+                        .hint_text("Search text...")
+                        .desired_width(240.0);
+                    let resp = ui.add(text_edit);
+                    if self.search_focus_requested {
+                        resp.request_focus();
+                        self.search_focus_requested = false;
+                    }
+                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        submitted_next = true;
+                    }
+                    if ui.button("Next (F3)").clicked() || submitted_next {
+                        self.find_next();
+                    }
+                    if ui.button("Prev (Shift+F3)").clicked() {
+                        self.find_previous();
+                    }
+                });
+            });
+        // Dynamic search: scroll to first match from anchor whenever the input changes
+        if self.search_query != prev_query {
+            if self.search_query.is_empty() {
+                self.last_query.clear();
+                self.renderer.set_highlight_phrase(None);
+            } else {
+                self.last_query = self.search_query.clone();
+                // Use current last match as baseline if set, else start of doc
+                let baseline = self.last_match_index.unwrap_or(0);
+                // Search forward from baseline
+                let needle = self.search_query.to_ascii_lowercase();
+                let total = self.parsed_elements.len();
+                let mut found: Option<usize> = None;
+                for pass in 0..2 {
+                    let range: Box<dyn Iterator<Item = usize>> = if pass == 0 {
+                        Box::new(baseline..total)
+                    } else {
+                        Box::new(0..baseline.min(total))
+                    };
+                    for idx in range {
+                        let text = crate::markdown_renderer::MarkdownRenderer::element_plain_text(
+                            &self.parsed_elements[idx],
+                        )
+                        .to_ascii_lowercase();
+                        if text.contains(&needle) {
+                            found = Some(idx);
+                            break;
+                        }
+                    }
+                    if found.is_some() { break; }
+                }
+                if let Some(idx) = found {
+                    self.last_match_index = Some(idx);
+                    self.pending_scroll_to_element = Some(idx);
+                }
+            }
+        }
+        // If dialog closed via close button, clear before hiding
+        if prev_open && !open {
+            self.clear_search_state();
+        }
+        self.show_search = open;
+    }
+
+    // No overlay menu helpers; we only render egui's built-in menus.
 }
 
 impl Default for MarkdownViewerApp {

@@ -102,6 +102,10 @@ pub struct MarkdownRenderer {
     pending_anchor: RefCell<Option<String>>,
     // Unique counter to avoid egui Id collisions for repeated links
     link_counter: RefCell<u64>,
+    // Per-frame rect for each top-level element in render order
+    element_rects: RefCell<Vec<egui::Rect>>,
+    // Optional highlight phrase (lowercased) for in-text highlighting
+    highlight_phrase: RefCell<Option<String>>,
 }
 
 impl Default for MarkdownRenderer {
@@ -121,6 +125,8 @@ impl MarkdownRenderer {
             header_rects: RefCell::new(HashMap::new()),
             pending_anchor: RefCell::new(None),
             link_counter: RefCell::new(0),
+            element_rects: RefCell::new(Vec::new()),
+            highlight_phrase: RefCell::new(None),
         }
     }
 
@@ -757,8 +763,12 @@ impl MarkdownRenderer {
         self.header_rects.borrow_mut().clear();
         // Reset per-frame link counter to ensure link IDs are stable across frames
         *self.link_counter.borrow_mut() = 0;
+        // Reset per-frame element rects
+        self.element_rects.borrow_mut().clear();
         for element in elements {
-            match element {
+            // Wrap each element in a no-op frame to capture its rect
+            let ir = egui::Frame::none().show(ui, |ui| {
+                match element {
                 MarkdownElement::Paragraph(spans) => {
                     self.render_inline_spans(ui, spans);
                     ui.add_space(4.0);
@@ -849,6 +859,8 @@ impl MarkdownRenderer {
                     self.render_table(ui, headers, rows);
                 }
             }
+            });
+            self.element_rects.borrow_mut().push(ir.response.rect);
         }
     }
 
@@ -938,9 +950,15 @@ impl MarkdownRenderer {
                 let fixed_text = self.fix_unicode_chars(text);
                 let group = ui.horizontal_wrapped(|ui| {
                     // Render link-like styled text with emoji expansion
+                    let color = if Self::is_external_url(url) {
+                        // Slightly different color to indicate external website links
+                        Color32::from_rgb(120, 190, 255)
+                    } else {
+                        Color32::LIGHT_BLUE
+                    };
                     let style = InlineStyle {
                         strong: is_strong,
-                        color: Some(Color32::LIGHT_BLUE),
+                        color: Some(color),
                         ..Default::default()
                     };
                     self.render_text_with_emojis(ui, &fixed_text, size, style);
@@ -954,6 +972,9 @@ impl MarkdownRenderer {
                     id,
                     egui::Sense::click(),
                 );
+                if r.hovered() {
+                    ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+                }
                 if r.clicked() {
                     if let Some(fragment) = Self::extract_fragment(url) {
                         // Store pending anchor for the app to handle scroll
@@ -972,6 +993,14 @@ impl MarkdownRenderer {
             return Some(stripped.to_ascii_lowercase());
         }
         None
+    }
+
+    fn is_external_url(url: &str) -> bool {
+        let lower = url.to_ascii_lowercase();
+        lower.starts_with("http://")
+            || lower.starts_with("https://")
+            || lower.starts_with("mailto:")
+            || lower.starts_with("www.")
     }
 
     fn render_text_with_emojis(
@@ -1016,20 +1045,52 @@ impl MarkdownRenderer {
                 if start < i {
                     let segment: String = chars[start..i].iter().collect();
                     let expanded = Self::expand_shortcodes(&segment);
-                    let mut rich = RichText::new(expanded).size(size);
-                    if style.strong {
-                        rich = rich.strong();
+                    if let Some(h) = self.highlight_phrase.borrow().as_ref() {
+                        let lower = expanded.to_ascii_lowercase();
+                        let mut start = 0usize;
+                        while let Some(pos) = lower[start..].find(h) {
+                            let abs = start + pos;
+                            if abs > start {
+                                let pre = &expanded[start..abs];
+                                if !pre.is_empty() {
+                                    let mut rich = RichText::new(pre).size(size);
+                                    if style.strong { rich = rich.strong(); }
+                                    if style.italics { rich = rich.italics(); }
+                                    if style.strike { rich = rich.strikethrough(); }
+                                    if let Some(color) = style.color { rich = rich.color(color); }
+                                    ui.label(rich);
+                                }
+                            }
+                            let mat = &expanded[abs..abs + h.len()];
+                            let mut rich = RichText::new(mat)
+                                .size(size)
+                                .background_color(Color32::from_rgb(80, 80, 0));
+                            if style.strong { rich = rich.strong(); }
+                            if style.italics { rich = rich.italics(); }
+                            if style.strike { rich = rich.strikethrough(); }
+                            if let Some(color) = style.color { rich = rich.color(color); }
+                            ui.label(rich);
+                            start = abs + h.len();
+                        }
+                        if start < expanded.len() {
+                            let rest = &expanded[start..];
+                            if !rest.is_empty() {
+                                let mut rich = RichText::new(rest).size(size);
+                                if style.strong { rich = rich.strong(); }
+                                if style.italics { rich = rich.italics(); }
+                                if style.strike { rich = rich.strikethrough(); }
+                                if let Some(color) = style.color { rich = rich.color(color); }
+                                ui.label(rich);
+                            }
+                        }
+                    } else {
+                        let mut rich = RichText::new(expanded).size(size);
+                        if style.strong { rich = rich.strong(); }
+                        if style.italics { rich = rich.italics(); }
+                        if style.strike { rich = rich.strikethrough(); }
+                        if let Some(color) = style.color { rich = rich.color(color); }
+                        ui.label(rich);
                     }
-                    if style.italics {
-                        rich = rich.italics();
-                    }
-                    if style.strike {
-                        rich = rich.strikethrough();
-                    }
-                    if let Some(color) = style.color {
-                        rich = rich.color(color);
-                    }
-                    ui.label(rich);
                 }
             }
         }
@@ -1515,6 +1576,68 @@ impl MarkdownRenderer {
     /// Lookup a header rect by its id (slug)
     pub fn header_rect_for(&self, id: &str) -> Option<egui::Rect> {
         self.header_rects.borrow().get(id).copied()
+    }
+
+    /// Lookup the rect for the n-th top-level element rendered in the last frame
+    pub fn element_rect_at(&self, index: usize) -> Option<egui::Rect> {
+        self.element_rects.borrow().get(index).copied()
+    }
+
+    /// Set or clear the highlight phrase (case-insensitive)
+    pub fn set_highlight_phrase(&self, phrase: Option<&str>) {
+        if let Some(p) = phrase {
+            self.highlight_phrase
+                .borrow_mut()
+                .replace(p.to_ascii_lowercase());
+        } else {
+            self.highlight_phrase.borrow_mut().take();
+        }
+    }
+
+    /// Get a plain-text representation of a markdown element (for search)
+    pub fn element_plain_text(element: &MarkdownElement) -> String {
+        match element {
+            MarkdownElement::Paragraph(spans) => Self::spans_plain_text(spans),
+            MarkdownElement::Header { spans, .. } => Self::spans_plain_text(spans),
+            MarkdownElement::CodeBlock { text, .. } => text.clone(),
+            MarkdownElement::List { items, .. } => {
+                let mut out = String::new();
+                for item in items {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(&Self::spans_plain_text(item));
+                }
+                out
+            }
+            MarkdownElement::Quote { lines, .. } => {
+                let mut out = String::new();
+                for line in lines {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(&Self::spans_plain_text(line));
+                }
+                out
+            }
+            MarkdownElement::HorizontalRule => String::from("---"),
+            MarkdownElement::Table { headers, rows } => {
+                let mut out = String::new();
+                for h in headers {
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
+                    out.push_str(&Self::spans_plain_text(h));
+                }
+                for row in rows {
+                    for cell in row {
+                        out.push(' ');
+                        out.push_str(&Self::spans_plain_text(cell));
+                    }
+                }
+                out
+            }
+        }
     }
 
     /// Find syntax definition for a given language name
