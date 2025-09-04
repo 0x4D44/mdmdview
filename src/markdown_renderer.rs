@@ -894,10 +894,10 @@ impl MarkdownRenderer {
         size: f32,
         style: InlineStyle,
     ) {
-        // Emojis to detect (single-codepoint for starter set)
-        const EMOJIS: [&str; 18] = [
+        // Emojis to detect (starter set). Include heart with/without VS16.
+        const EMOJIS: [&str; 20] = [
             "🎉", "✅", "🚀", "🙂", "😀", "😉", "⭐", "🔥", "👍", "👎", "💡", "❓", "❗", "📝",
-            "🧠", "🧪", "📦", "🔧",
+            "🧠", "🧪", "📦", "🔧", "❤️", "❤",
         ];
 
         let mut i = 0;
