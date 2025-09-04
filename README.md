@@ -131,6 +131,16 @@ All standard markdown elements are fully supported with professional formatting:
 
 ## Development
 
+### Tagged Releases
+
+- Push a semver tag to trigger a release build and publish assets:
+  - Create tag: `git tag v1.0.0 && git push origin v1.0.0`
+  - Or use GitHub UI: Releases → Draft a new release → Tag `vX.Y.Z` → Publish
+- The `Release` workflow builds on Windows and Linux, then attaches:
+  - `mdmdview-vX.Y.Z-windows-x86_64.zip`
+  - `mdmdview-vX.Y.Z-linux-x86_64.tar.gz`
+- You can also run the workflow manually (Actions → Release → Run workflow) and choose a `toolchain` (default `stable`).
+
 ### Running Tests
 
 ```bash
