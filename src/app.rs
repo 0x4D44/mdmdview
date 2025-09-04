@@ -3,7 +3,7 @@
 /// This module contains the primary app state, UI logic, and event handling
 /// for the markdown viewer application built with egui.
 use crate::{MarkdownElement, MarkdownRenderer, SampleFile, SAMPLE_FILES};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use egui::{menu, CentralPanel, Color32, Context, RichText, TopBottomPanel};
 use egui::{TextEdit, TextStyle};
 use rfd::FileDialog;
@@ -35,6 +35,8 @@ pub struct MarkdownViewerApp {
     view_mode: ViewMode,
     /// Wrap long lines in raw view
     wrap_raw: bool,
+    /// Flag to request reload of current file (handled outside input context)
+    reload_requested: bool,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -71,6 +73,7 @@ impl MarkdownViewerApp {
             toggle_fullscreen: false,
             view_mode: ViewMode::Rendered,
             wrap_raw: false,
+            reload_requested: false,
         };
 
         // Load welcome content by default
@@ -114,6 +117,25 @@ impl MarkdownViewerApp {
         self.current_file = Some(path);
         self.load_content(&content, Some(filename));
         Ok(())
+    }
+
+    /// Request a reload of the current file (processed outside of input context)
+    fn request_reload(&mut self) {
+        if self.current_file.is_some() {
+            self.reload_requested = true;
+        } else {
+            self.error_message = Some("No file loaded to reload".to_string());
+        }
+    }
+
+    /// Reload the currently opened file from disk
+    pub fn reload_current_file(&mut self) -> Result<()> {
+        let path = if let Some(p) = self.current_file.clone() {
+            p
+        } else {
+            bail!("No file loaded to reload");
+        };
+        self.load_file(path)
     }
 
     /// Load a sample file by name
@@ -222,6 +244,11 @@ impl MarkdownViewerApp {
                 self.toggle_fullscreen = true;
             }
 
+            // F5 - Reload current file (set flag; actual IO handled outside input context)
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::F5) {
+                self.request_reload();
+            }
+
             // Home - Go to top of document
             if i.consume_key(egui::Modifiers::NONE, egui::Key::Home) {
                 self.nav_request = Some(NavigationRequest::Top);
@@ -277,6 +304,18 @@ impl MarkdownViewerApp {
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             ui.weak("Ctrl+W");
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        let enabled = self.current_file.is_some();
+                        let button = ui.add_enabled(enabled, egui::Button::new("🔄 Reload"));
+                        if button.clicked() {
+                            self.request_reload();
+                            ui.close_menu();
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.weak("F5");
                         });
                     });
 
@@ -432,6 +471,14 @@ impl eframe::App for MarkdownViewerApp {
             self.toggle_fullscreen = false;
             let current_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!current_fullscreen));
+        }
+
+        // Handle reload request outside input context to avoid blocking within input handling
+        if self.reload_requested {
+            self.reload_requested = false;
+            if let Err(e) = self.reload_current_file() {
+                self.error_message = Some(format!("Failed to reload file: {}", e));
+            }
         }
 
         // Render menu bar
@@ -643,6 +690,40 @@ mod tests {
         let fake_path = PathBuf::from("/nonexistent/file.md");
 
         let result = app.load_file(fake_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reload_current_file() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+
+        // Create a temporary markdown file
+        let mut temp_file = NamedTempFile::new()?;
+        let content1 = "# Title\n\nVersion 1";
+        temp_file.write_all(content1.as_bytes())?;
+        temp_file.flush()?;
+
+        let path = temp_file.path().to_path_buf();
+        app.load_file(path.clone())?;
+        assert!(app.current_content.contains("Version 1"));
+
+        // Update file content
+        let content2 = "# Title\n\nVersion 2";
+        temp_file.as_file_mut().set_len(0)?; // clear
+        temp_file.write_all(content2.as_bytes())?;
+        temp_file.flush()?;
+
+        // Reload and verify
+        app.reload_current_file()?;
+        assert!(app.current_content.contains("Version 2"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_reload_without_file() {
+        let mut app = MarkdownViewerApp::new();
+        assert!(app.current_file.is_none());
+        let result = app.reload_current_file();
         assert!(result.is_err());
     }
 
