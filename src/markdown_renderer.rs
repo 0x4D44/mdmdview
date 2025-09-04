@@ -1,13 +1,13 @@
+use crate::{emoji_assets, emoji_catalog};
 use anyhow::Result;
 use egui::{Color32, RichText, Stroke};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
-use crate::{emoji_assets, emoji_catalog};
-use std::collections::HashMap;
-use std::cell::RefCell;
 
 /// Font size configuration
 #[derive(Debug, Clone)]
@@ -64,7 +64,10 @@ pub enum MarkdownElement {
         ordered: bool,
         items: Vec<Vec<InlineSpan>>,
     }, // List items are also inline spans
-    Quote { depth: u8, lines: Vec<Vec<InlineSpan>> },
+    Quote {
+        depth: u8,
+        lines: Vec<Vec<InlineSpan>>,
+    },
     HorizontalRule,
     Table {
         headers: Vec<String>,
@@ -213,12 +216,8 @@ impl MarkdownRenderer {
         while i < events.len() {
             match &events[i] {
                 Event::Start(Tag::Paragraph) => {
-                    let (mut para, next) = self.parse_inline_spans_with_breaks(
-                        events,
-                        i + 1,
-                        Tag::Paragraph,
-                        true,
-                    )?;
+                    let (mut para, next) =
+                        self.parse_inline_spans_with_breaks(events, i + 1, Tag::Paragraph, true)?;
                     // Split para into lines on explicit "\n"
                     let mut line: Vec<InlineSpan> = Vec::new();
                     while let Some(span) = para.first().cloned() {
@@ -307,10 +306,16 @@ impl MarkdownRenderer {
                     }
                     return Ok((spans, i + 1));
                 }
-                Event::Text(text) => { text_buffer.push_str(text); i += 1; }
+                Event::Text(text) => {
+                    text_buffer.push_str(text);
+                    i += 1;
+                }
                 Event::SoftBreak | Event::HardBreak => {
                     if keep_breaks {
-                        if !text_buffer.is_empty() { spans.push(InlineSpan::Text(text_buffer.clone())); text_buffer.clear(); }
+                        if !text_buffer.is_empty() {
+                            spans.push(InlineSpan::Text(text_buffer.clone()));
+                            text_buffer.clear();
+                        }
                         spans.push(InlineSpan::Text("\n".to_string()));
                     } else {
                         text_buffer.push(' ');
@@ -350,8 +355,8 @@ impl MarkdownRenderer {
                         spans.push(InlineSpan::Text(text_buffer.clone()));
                         text_buffer.clear();
                     }
-                    let (inner_text, next_i) = self
-                        .collect_until_tag_end(events, i + 1, Tag::Strikethrough)?;
+                    let (inner_text, next_i) =
+                        self.collect_until_tag_end(events, i + 1, Tag::Strikethrough)?;
                     spans.push(InlineSpan::Strikethrough(inner_text));
                     i = next_i;
                 }
@@ -480,28 +485,47 @@ impl MarkdownRenderer {
                     i += 1;
                     let mut spans: Vec<InlineSpan> = Vec::new();
                     loop {
-                        if i >= events.len() { break; }
+                        if i >= events.len() {
+                            break;
+                        }
                         match &events[i] {
-                            Event::End(Tag::Item) => { i += 1; break; }
+                            Event::End(Tag::Item) => {
+                                i += 1;
+                                break;
+                            }
                             Event::Start(Tag::Paragraph) => {
-                                let (ps, next) = self.parse_inline_spans(events, i + 1, Tag::Paragraph)?;
+                                let (ps, next) =
+                                    self.parse_inline_spans(events, i + 1, Tag::Paragraph)?;
                                 spans.extend(ps);
                                 i = next;
                             }
                             Event::Start(Tag::List(child_first)) => {
-                                let (child_items, next) = self.parse_list(events, i + 1, *child_first)?;
+                                let (child_items, next) =
+                                    self.parse_list(events, i + 1, *child_first)?;
                                 i = next;
                                 let ordered_child = child_first.is_some();
                                 for (idx, child) in child_items.into_iter().enumerate() {
                                     spans.push(InlineSpan::Text("\n".to_string()));
-                                    let marker = if ordered_child { format!("{}.", idx + 1) } else { "•".to_string() };
+                                    let marker = if ordered_child {
+                                        format!("{}.", idx + 1)
+                                    } else {
+                                        "•".to_string()
+                                    };
                                     spans.push(InlineSpan::Text(format!("{} ", marker)));
                                     spans.extend(child);
                                 }
                             }
-                            Event::Text(t) => { spans.push(InlineSpan::Text(t.to_string())); i += 1; }
-                            Event::SoftBreak | Event::HardBreak => { spans.push(InlineSpan::Text(" ".into())); i += 1; }
-                            _ => { i += 1; }
+                            Event::Text(t) => {
+                                spans.push(InlineSpan::Text(t.to_string()));
+                                i += 1;
+                            }
+                            Event::SoftBreak | Event::HardBreak => {
+                                spans.push(InlineSpan::Text(" ".into()));
+                                i += 1;
+                            }
+                            _ => {
+                                i += 1;
+                            }
                         }
                     }
                     items.push(spans);
@@ -541,7 +565,11 @@ impl MarkdownRenderer {
                             }
                             k += 1;
                         }
-                        if !link_text.is_empty() { cell.push_str(&link_text); } else { cell.push_str(url.as_ref()); }
+                        if !link_text.is_empty() {
+                            cell.push_str(&link_text);
+                        } else {
+                            cell.push_str(url.as_ref());
+                        }
                         j = k;
                     }
                     _ => {}
@@ -562,7 +590,10 @@ impl MarkdownRenderer {
                                 headers.push(text);
                                 i = next;
                             }
-                            Event::End(Tag::TableHead) => { i += 1; break; }
+                            Event::End(Tag::TableHead) => {
+                                i += 1;
+                                break;
+                            }
                             _ => i += 1,
                         }
                     }
@@ -577,7 +608,13 @@ impl MarkdownRenderer {
                                 row.push(text);
                                 i = next;
                             }
-                            Event::End(Tag::TableRow) => { i += 1; if !row.is_empty() { rows.push(row); } break; }
+                            Event::End(Tag::TableRow) => {
+                                i += 1;
+                                if !row.is_empty() {
+                                    rows.push(row);
+                                }
+                                break;
+                            }
                             _ => i += 1,
                         }
                     }
@@ -618,8 +655,7 @@ impl MarkdownRenderer {
                         .show(ui, |ui| {
                             for (li, line) in lines.iter().enumerate() {
                                 // White text for quote content
-                                ui.style_mut().visuals.override_text_color =
-                                    Some(Color32::WHITE);
+                                ui.style_mut().visuals.override_text_color = Some(Color32::WHITE);
                                 self.render_inline_spans(ui, line);
                                 ui.style_mut().visuals.override_text_color = None;
                                 if li + 1 < lines.len() {
@@ -764,7 +800,11 @@ impl MarkdownRenderer {
             }
             InlineSpan::Link { text, url } => {
                 let fixed_text = self.fix_unicode_chars(text);
-                let response = ui.link(RichText::new(fixed_text).color(Color32::LIGHT_BLUE).size(size));
+                let response = ui.link(
+                    RichText::new(fixed_text)
+                        .color(Color32::LIGHT_BLUE)
+                        .size(size),
+                );
                 if response.clicked() {
                     self.open_url(url);
                 }
@@ -772,10 +812,11 @@ impl MarkdownRenderer {
         }
     }
 
-        fn render_text_with_emojis(&self, ui: &mut egui::Ui, text: &str, size: f32, is_strong: bool) {
+    fn render_text_with_emojis(&self, ui: &mut egui::Ui, text: &str, size: f32, is_strong: bool) {
         // Emojis to detect (single-codepoint for starter set)
         const EMOJIS: [&str; 18] = [
-            "🎉", "✅", "🚀", "🙂", "😀", "😉", "⭐", "🔥", "👍", "👎", "💡", "❓", "❗", "📝", "🧠", "🧪", "📦", "🔧",
+            "🎉", "✅", "🚀", "🙂", "😀", "😉", "⭐", "🔥", "👍", "👎", "💡", "❓", "❗", "📝",
+            "🧠", "🧪", "📦", "🔧",
         ];
 
         let mut i = 0;
@@ -799,21 +840,25 @@ impl MarkdownRenderer {
                 let start = i;
                 while i < chars.len() {
                     let c = chars[i];
-                    if EMOJIS.iter().any(|e| e.chars().next().unwrap() == c) { break; }
+                    if EMOJIS.iter().any(|e| e.chars().next().unwrap() == c) {
+                        break;
+                    }
                     i += 1;
                 }
                 if start < i {
                     let segment: String = chars[start..i].iter().collect();
                     let expanded = Self::expand_shortcodes(&segment);
                     let mut rich = RichText::new(expanded).size(size);
-                    if is_strong { rich = rich.strong(); }
+                    if is_strong {
+                        rich = rich.strong();
+                    }
                     ui.label(rich);
                 }
             }
         }
     }
 
-        fn get_or_make_emoji_texture(&self, ui: &mut egui::Ui, emoji: &str) -> egui::TextureHandle {
+    fn get_or_make_emoji_texture(&self, ui: &mut egui::Ui, emoji: &str) -> egui::TextureHandle {
         if let Some(tex) = self.emoji_textures.borrow().get(emoji) {
             return tex.clone();
         }
@@ -826,27 +871,37 @@ impl MarkdownRenderer {
                     let pixels = rgba.into_vec();
                     egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &pixels)
                 }
-                Err(_) => emoji_assets::make_image(emoji, 64).unwrap_or_else(|| self.generate_emoji_image(emoji, 64)),
+                Err(_) => emoji_assets::make_image(emoji, 64)
+                    .unwrap_or_else(|| self.generate_emoji_image(emoji, 64)),
             }
         } else {
-            emoji_assets::make_image(emoji, 64).unwrap_or_else(|| self.generate_emoji_image(emoji, 64))
+            emoji_assets::make_image(emoji, 64)
+                .unwrap_or_else(|| self.generate_emoji_image(emoji, 64))
         };
-        let handle = ui.ctx().load_texture(format!("emoji:{}", emoji), img, egui::TextureOptions::LINEAR);
-        self.emoji_textures.borrow_mut().insert(emoji.to_string(), handle.clone());
+        let handle = ui.ctx().load_texture(
+            format!("emoji:{}", emoji),
+            img,
+            egui::TextureOptions::LINEAR,
+        );
+        self.emoji_textures
+            .borrow_mut()
+            .insert(emoji.to_string(), handle.clone());
         handle
     }
 
-        fn expand_shortcodes(s: &str) -> String {
+    fn expand_shortcodes(s: &str) -> String {
         use crate::emoji_catalog::shortcode_map;
-        if !s.contains(':') { return s.to_string(); }
+        if !s.contains(':') {
+            return s.to_string();
+        }
         let mut out = String::new();
         let map = shortcode_map();
         let mut i = 0;
         let bytes = s.as_bytes();
         while i < bytes.len() {
             if bytes[i] == b':' {
-                if let Some(end) = bytes[i+1..].iter().position(|&b| b == b':') {
-                    let code = &s[i..i+2+end];
+                if let Some(end) = bytes[i + 1..].iter().position(|&b| b == b':') {
+                    let code = &s[i..i + 2 + end];
                     if let Some(&e) = map.get(code) {
                         out.push_str(e);
                         i += end + 2;
@@ -860,12 +915,14 @@ impl MarkdownRenderer {
         out
     }
 
-        fn generate_emoji_image(&self, emoji: &str, size: usize) -> egui::ColorImage {
+    fn generate_emoji_image(&self, emoji: &str, size: usize) -> egui::ColorImage {
         // Simple procedural placeholder icons to keep binary small and avoid external assets
         // Each emoji gets a colored circle and a simple accent
         use egui::Color32 as C;
         let mut img = egui::ColorImage::new([size, size], C::TRANSPARENT);
-        let cx = (size as i32)/2; let cy = cx; let r = (size as i32)/2 - 2;
+        let cx = (size as i32) / 2;
+        let cy = cx;
+        let r = (size as i32) / 2 - 2;
 
         let (base, accent) = match emoji {
             "🎉" => (C::from_rgb(255, 215, 0), C::from_rgb(255, 80, 80)),
@@ -880,15 +937,19 @@ impl MarkdownRenderer {
         // draw filled circle
         for y in 0..size as i32 {
             for x in 0..size as i32 {
-                let dx = x - cx; let dy = y - cy;
-                if dx*dx + dy*dy <= r*r { img[(x as usize, y as usize)] = base; }
+                let dx = x - cx;
+                let dy = y - cy;
+                if dx * dx + dy * dy <= r * r {
+                    img[(x as usize, y as usize)] = base;
+                }
             }
         }
 
         // add a simple accent (diagonal highlight)
         for t in 0..size {
-            let x = t as i32; let y = (t as i32)/2;
-            let xx = (x/2 + 6).clamp(0, size as i32 - 1) as usize;
+            let x = t as i32;
+            let y = (t as i32) / 2;
+            let xx = (x / 2 + 6).clamp(0, size as i32 - 1) as usize;
             let yy = (y + 6).clamp(0, size as i32 - 1) as usize;
             img[(xx, yy)] = accent;
         }
@@ -903,7 +964,7 @@ impl MarkdownRenderer {
         }
 
         ui.add_space(4.0);
-        
+
         for (index, spans) in items.iter().enumerate() {
             // Split into lines on embedded '\n'
             let mut lines: Vec<Vec<InlineSpan>> = vec![Vec::new()];
@@ -913,9 +974,14 @@ impl MarkdownRenderer {
                         let parts: Vec<&str> = t.split('\n').collect();
                         for (pi, part) in parts.iter().enumerate() {
                             if !part.is_empty() {
-                                lines.last_mut().unwrap().push(InlineSpan::Text(part.to_string()));
+                                lines
+                                    .last_mut()
+                                    .unwrap()
+                                    .push(InlineSpan::Text(part.to_string()));
                             }
-                            if pi < parts.len() - 1 { lines.push(Vec::new()); }
+                            if pi < parts.len() - 1 {
+                                lines.push(Vec::new());
+                            }
                         }
                     }
                     other => lines.last_mut().unwrap().push(other),
@@ -925,7 +991,11 @@ impl MarkdownRenderer {
             for (li, line) in lines.into_iter().enumerate() {
                 ui.horizontal_wrapped(|ui| {
                     if li == 0 {
-                        let marker = if ordered { format!("{}.", index + 1) } else { "•".to_string() };
+                        let marker = if ordered {
+                            format!("{}.", index + 1)
+                        } else {
+                            "•".to_string()
+                        };
                         ui.label(
                             RichText::new(format!("{} ", marker))
                                 .size(self.font_sizes.body)
@@ -1015,16 +1085,14 @@ impl MarkdownRenderer {
                                                         .color(color)
                                                         .family(egui::FontFamily::Monospace);
 
-                                                    if style
-                                                        .font_style
-                                                        .contains(syntect::highlighting::FontStyle::BOLD)
-                                                    {
+                                                    if style.font_style.contains(
+                                                        syntect::highlighting::FontStyle::BOLD,
+                                                    ) {
                                                         rich_text = rich_text.strong();
                                                     }
-                                                    if style
-                                                        .font_style
-                                                        .contains(syntect::highlighting::FontStyle::ITALIC)
-                                                    {
+                                                    if style.font_style.contains(
+                                                        syntect::highlighting::FontStyle::ITALIC,
+                                                    ) {
                                                         rich_text = rich_text.italics();
                                                     }
 
