@@ -452,8 +452,14 @@ impl MarkdownViewerApp {
                     // Document stats
                     let element_count = self.parsed_elements.len();
                     let char_count = self.current_content.len();
-                    let mode = match self.view_mode { ViewMode::Rendered => "Rendered", ViewMode::Raw => "Raw" };
-                    ui.label(format!("Mode: {} | Elements: {} | Characters: {}", mode, element_count, char_count));
+                    let mode = match self.view_mode {
+                        ViewMode::Rendered => "Rendered",
+                        ViewMode::Raw => "Raw",
+                    };
+                    ui.label(format!(
+                        "Mode: {} | Elements: {} | Characters: {}",
+                        mode, element_count, char_count
+                    ));
                 });
             });
         });

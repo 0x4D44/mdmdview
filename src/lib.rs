@@ -1,12 +1,12 @@
 pub mod app;
+pub mod emoji_assets;
+pub mod emoji_catalog;
 /// A simple markdown viewer built with egui
 ///
 /// This library provides markdown parsing and rendering functionality
 /// that can be embedded in GUI applications.
 pub mod markdown_renderer;
 pub mod sample_files;
-pub mod emoji_assets;
-pub mod emoji_catalog;
 
 pub use app::MarkdownViewerApp;
 pub use markdown_renderer::{MarkdownElement, MarkdownRenderer};

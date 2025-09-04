@@ -15,7 +15,12 @@ pub fn make_image(emoji: &str, size: usize) -> Option<egui::ColorImage> {
         }
         "🚀" => {
             draw_circle(&mut img, size, C::from_rgb(60, 60, 170));
-            rocket(&mut img, size, C::from_rgb(230, 230, 230), C::from_rgb(255, 110, 60));
+            rocket(
+                &mut img,
+                size,
+                C::from_rgb(230, 230, 230),
+                C::from_rgb(255, 110, 60),
+            );
             Some(img)
         }
         "❤️" | "❤" => {
@@ -68,12 +73,19 @@ fn draw_check(img: &mut egui::ColorImage, size: usize, color: C) {
 }
 
 fn confetti(img: &mut egui::ColorImage, size: usize) {
-    let dots = [C::from_rgb(255, 80, 80), C::from_rgb(80, 180, 255), C::from_rgb(120, 220, 120), C::from_rgb(220, 120, 220)];
+    let dots = [
+        C::from_rgb(255, 80, 80),
+        C::from_rgb(80, 180, 255),
+        C::from_rgb(120, 220, 120),
+        C::from_rgb(220, 120, 220),
+    ];
     let s = size as i32;
     for (i, col) in dots.iter().enumerate() {
         let x = (s / 4) * ((i as i32) + 1);
         let y = (s / 5) * ((i as i32) + 1);
-        if x < s && y < s { img[(x as usize, y as usize)] = *col; }
+        if x < s && y < s {
+            img[(x as usize, y as usize)] = *col;
+        }
     }
 }
 
@@ -89,40 +101,56 @@ fn rocket(img: &mut egui::ColorImage, size: usize, body: C, flame: C) {
     for i in 0..s / 6 {
         for x in s / 2 - i..=s / 2 + i {
             let y = s / 4 - i;
-            if y >= 0 { img[(x as usize, y as usize)] = body; }
+            if y >= 0 {
+                img[(x as usize, y as usize)] = body;
+            }
         }
     }
     // flame
     for i in 0..s / 6 {
         for x in s / 2 - i..=s / 2 + i {
             let y = s * 3 / 4 + i;
-            if y < s { img[(x as usize, y as usize)] = flame; }
+            if y < s {
+                img[(x as usize, y as usize)] = flame;
+            }
         }
     }
 }
 
 fn heart(img: &mut egui::ColorImage, size: usize, color: C) {
     let s = size as i32;
-    let cx1 = s / 2 - s / 6; let cx2 = s / 2 + s / 6; let cy = s / 3; let r = s / 6;
+    let cx1 = s / 2 - s / 6;
+    let cx2 = s / 2 + s / 6;
+    let cy = s / 3;
+    let r = s / 6;
     for y in 0..s {
         for x in 0..s {
             let d1 = (x - cx1) * (x - cx1) + (y - cy) * (y - cy) <= r * r;
             let d2 = (x - cx2) * (x - cx2) + (y - cy) * (y - cy) <= r * r;
-            let tri = y >= cy && (x >= s / 2 - r) && (x <= s / 2 + r) && (y - cy <= (r * 2 - (x - s / 2).abs()));
-            if d1 || d2 || tri { img[(x as usize, y as usize)] = color; }
+            let tri = y >= cy
+                && (x >= s / 2 - r)
+                && (x <= s / 2 + r)
+                && (y - cy <= (r * 2 - (x - s / 2).abs()));
+            if d1 || d2 || tri {
+                img[(x as usize, y as usize)] = color;
+            }
         }
     }
 }
 
 fn star(img: &mut egui::ColorImage, size: usize, color: C) {
     let s = size as i32;
-    let cx = s / 2; let cy = s / 2; let r = s / 2 - 2;
+    let cx = s / 2;
+    let cy = s / 2;
+    let r = s / 2 - 2;
     for t in 0..360 {
         let rad = (t as f32).to_radians();
         let rr = if t % 72 < 36 { r } else { r / 2 };
         let x = cx + (rr as f32 * rad.cos()) as i32;
         let y = cy + (rr as f32 * rad.sin()) as i32;
-        if x >= 0 && y >= 0 && x < s && y < s { img[(x as usize, y as usize)] = color; }
+        if x >= 0 && y >= 0 && x < s && y < s {
+            img[(x as usize, y as usize)] = color;
+        }
     }
 }
 
