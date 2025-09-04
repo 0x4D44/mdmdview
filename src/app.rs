@@ -589,6 +589,13 @@ impl eframe::App for MarkdownViewerApp {
                         match self.view_mode {
                             ViewMode::Rendered => {
                                 self.renderer.render_to_ui(ui, &self.parsed_elements);
+                                // If a header anchor was clicked, scroll to it
+                                if let Some(anchor) = self.renderer.take_pending_anchor() {
+                                    if let Some(rect) = self.renderer.header_rect_for(&anchor) {
+                                        // Align target header to the top of the visible area
+                                        ui.scroll_to_rect(rect, Some(egui::Align::Min));
+                                    }
+                                }
                             }
                             ViewMode::Raw => {
                                 // Read-only raw markdown view

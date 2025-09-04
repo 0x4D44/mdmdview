@@ -66,6 +66,19 @@ const FORMATTING_CONTENT: &str = r#"# Markdown Formatting Guide
 
 This document demonstrates the various formatting options supported by MarkdownView.
 
+## Table of Contents
+
+- [Text Formatting](#text-formatting)
+- [Headers](#headers)
+- [Lists](#lists)
+- [Links and Images](#links-and-images)
+- [Emojis](#emojis)
+- [Blockquotes](#blockquotes)
+- [Horizontal Rules](#horizontal-rules)
+- [Tables](#tables)
+
+Quick jump: [Go to Lists](#lists) • [Go to Tables](#tables)
+
 ## Text Formatting
 
 **Bold text** and *italic text* are supported, as well as ***bold italic***.
@@ -106,6 +119,11 @@ You can also use `inline code` and ~~strikethrough~~ text.
 
 [Visit Rust's website](https://rust-lang.org)
 
+Internal anchors let you jump within this document:
+- [Jump to Headers](#headers)
+- [Jump to Tables](#tables)
+- [Back to top](#markdown-formatting-guide)
+
 Links are clickable and will open in your default browser.
 
 ## Emojis
@@ -134,11 +152,12 @@ Shortcodes like `:rocket:` and `:tada:` are expanded to emoji images in normal t
 | Lists | ✅ | Ordered and unordered |
 | Code blocks | ✅ | With syntax highlighting |
 | Tables | ✅ | Basic table support |
-| Links | ✅ | Opens in browser |
+| Links | ✅ | Opens in browser; internal anchors scroll in‑document |
 
 ---
 
-*This covers most of the formatting features available in MarkdownView.*
+*This covers most of the formatting features available in MarkdownView.*  
+[Back to top](#markdown-formatting-guide)
 "#;
 
 /// Code examples with syntax highlighting

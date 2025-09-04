@@ -59,11 +59,12 @@ pub enum InlineSpan {
 /// Represents a rendered markdown element
 #[derive(Debug, Clone)]
 pub enum MarkdownElement {
-    Paragraph(Vec<InlineSpan>), // Changed: paragraphs contain inline spans
+    Paragraph(Vec<InlineSpan>),
     Header {
         level: u8,
         spans: Vec<InlineSpan>,
-    }, // Headers can have inline formatting too
+        id: String,
+    },
     CodeBlock {
         language: Option<String>,
         text: String,
@@ -95,6 +96,12 @@ pub struct MarkdownRenderer {
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
     emoji_textures: RefCell<HashMap<String, egui::TextureHandle>>,
+    // Mapping of header id -> last rendered rect (for in-document navigation)
+    header_rects: RefCell<HashMap<String, egui::Rect>>,
+    // Last clicked internal anchor (e.g., "getting-started") for the app to consume
+    pending_anchor: RefCell<Option<String>>,
+    // Unique counter to avoid egui Id collisions for repeated links
+    link_counter: RefCell<u64>,
 }
 
 impl Default for MarkdownRenderer {
@@ -111,6 +118,9 @@ impl MarkdownRenderer {
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
             emoji_textures: RefCell::new(HashMap::new()),
+            header_rects: RefCell::new(HashMap::new()),
+            pending_anchor: RefCell::new(None),
+            link_counter: RefCell::new(0),
         }
     }
 
@@ -132,8 +142,10 @@ impl MarkdownRenderer {
         let events = parser.collect::<Vec<_>>();
 
         let mut i = 0;
+        // Track header slug occurrences for stable de-duplication
+        let mut slug_counts: HashMap<String, usize> = HashMap::new();
         while i < events.len() {
-            i = self.parse_element(&events, i, &mut elements)?;
+            i = self.parse_element(&events, i, &mut elements, &mut slug_counts)?;
         }
 
         Ok(elements)
@@ -145,6 +157,7 @@ impl MarkdownRenderer {
         events: &[Event],
         start: usize,
         elements: &mut Vec<MarkdownElement>,
+        slug_counts: &mut HashMap<String, usize>,
     ) -> Result<usize, anyhow::Error> {
         match &events[start] {
             Event::Start(Tag::Paragraph) => {
@@ -156,12 +169,21 @@ impl MarkdownRenderer {
                 Ok(next_idx)
             }
             Event::Start(Tag::Heading(level, _, _)) => {
-                let (spans, next_idx) =
-                    self.parse_inline_spans(events, start + 1, Tag::Heading(*level, None, vec![]))?;
-                elements.push(MarkdownElement::Header {
-                    level: *level as u8,
-                    spans,
-                });
+                let (spans, next_idx) = self.parse_inline_spans(
+                    events,
+                    start + 1,
+                    Tag::Heading(*level, None, vec![]),
+                )?;
+                let title_text = Self::spans_plain_text(&spans);
+                let base = Self::slugify(&title_text);
+                let count = slug_counts.entry(base.clone()).or_insert(0);
+                let id = if *count == 0 {
+                    base.clone()
+                } else {
+                    format!("{}-{}", base, *count)
+                };
+                *count += 1;
+                elements.push(MarkdownElement::Header { level: *level as u8, spans, id });
                 Ok(next_idx)
             }
             Event::Start(Tag::CodeBlock(_)) => {
@@ -203,6 +225,46 @@ impl MarkdownRenderer {
                 Ok(start + 1)
             }
         }
+    }
+
+    // Build a slug from text similar to GitHub: lowercase, spaces->dashes, strip punctuation
+    fn slugify(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut last_dash = false;
+        for ch in text.chars() {
+            let c = ch.to_ascii_lowercase();
+            if c.is_ascii_alphanumeric() {
+                out.push(c);
+                last_dash = false;
+            } else if c.is_whitespace() || c == '-' {
+                if !last_dash && !out.is_empty() {
+                    out.push('-');
+                    last_dash = true;
+                }
+            } else {
+                // drop punctuation/symbols
+            }
+        }
+        // Trim trailing dash if any
+        if out.ends_with('-') {
+            out.pop();
+        }
+        out
+    }
+
+    fn spans_plain_text(spans: &[InlineSpan]) -> String {
+        let mut s = String::new();
+        for span in spans {
+            match span {
+                InlineSpan::Text(t)
+                | InlineSpan::Strong(t)
+                | InlineSpan::Emphasis(t)
+                | InlineSpan::Strikethrough(t) => s.push_str(t),
+                InlineSpan::Code(t) => s.push_str(t),
+                InlineSpan::Link { text, .. } => s.push_str(text),
+            }
+        }
+        s
     }
 
     /// Collect blockquotes into (depth, lines) entries; supports nesting and multi-line content
@@ -691,6 +753,10 @@ impl MarkdownRenderer {
 
     /// Render parsed markdown elements to egui UI
     pub fn render_to_ui(&self, ui: &mut egui::Ui, elements: &[MarkdownElement]) {
+        // Clear header rects before rendering a new frame
+        self.header_rects.borrow_mut().clear();
+        // Reset per-frame link counter to ensure link IDs are stable across frames
+        *self.link_counter.borrow_mut() = 0;
         for element in elements {
             match element {
                 MarkdownElement::Paragraph(spans) => {
@@ -743,7 +809,7 @@ impl MarkdownRenderer {
 
                     ui.add_space(6.0);
                 }
-                MarkdownElement::Header { level, spans } => {
+                MarkdownElement::Header { level, spans, id } => {
                     let font_size = match level {
                         1 => self.font_sizes.h1,
                         2 => self.font_sizes.h2,
@@ -755,13 +821,17 @@ impl MarkdownRenderer {
                     };
 
                     ui.add_space(8.0);
-                    ui.horizontal_wrapped(|ui| {
+                    let resp = ui.horizontal_wrapped(|ui| {
                         // Avoid artificial gaps between header fragments
                         ui.spacing_mut().item_spacing.x = 0.0;
                         for span in spans {
                             self.render_inline_span(ui, span, Some(font_size), Some(true));
                         }
                     });
+                    // Record the header rect for in-document navigation
+                    self.header_rects
+                        .borrow_mut()
+                        .insert(id.clone(), resp.response.rect);
                     ui.add_space(6.0);
                 }
                 MarkdownElement::CodeBlock { language, text } => {
@@ -875,16 +945,33 @@ impl MarkdownRenderer {
                     };
                     self.render_text_with_emojis(ui, &fixed_text, size, style);
                 });
+                // Use a unique id per link occurrence to avoid collisions when the same URL appears multiple times
+                let mut counter = self.link_counter.borrow_mut();
+                let id = egui::Id::new(format!("link:{}:{}", *counter, url));
+                *counter += 1;
                 let r = ui.interact(
                     group.response.rect,
-                    egui::Id::new(format!("link:{}", url)),
+                    id,
                     egui::Sense::click(),
                 );
                 if r.clicked() {
-                    self.open_url(url);
+                    if let Some(fragment) = Self::extract_fragment(url) {
+                        // Store pending anchor for the app to handle scroll
+                        *self.pending_anchor.borrow_mut() = Some(fragment);
+                    } else {
+                        self.open_url(url);
+                    }
                 }
             }
         }
+    }
+
+    fn extract_fragment(url: &str) -> Option<String> {
+        if let Some(stripped) = url.strip_prefix('#') {
+            // Already a fragment within current document
+            return Some(stripped.to_ascii_lowercase());
+        }
+        None
     }
 
     fn render_text_with_emojis(
@@ -1420,6 +1507,16 @@ impl MarkdownRenderer {
         }
     }
 
+    /// Consume and return the last clicked internal anchor, if any
+    pub fn take_pending_anchor(&self) -> Option<String> {
+        self.pending_anchor.borrow_mut().take()
+    }
+
+    /// Lookup a header rect by its id (slug)
+    pub fn header_rect_for(&self, id: &str) -> Option<egui::Rect> {
+        self.header_rects.borrow().get(id).copied()
+    }
+
     /// Find syntax definition for a given language name
     /// Maps common language names to their syntax definitions
     fn find_syntax_for_language(&self, lang: &str) -> Option<&syntect::parsing::SyntaxReference> {
@@ -1500,6 +1597,7 @@ impl MarkdownRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SAMPLE_FILES;
 
     #[test]
     fn test_markdown_renderer_creation() {
@@ -1571,5 +1669,58 @@ mod tests {
             MarkdownRenderer::expand_shortcodes("Hello :tada:!"),
             "Hello 🎉!"
         );
+    }
+
+    #[test]
+    fn test_parse_headers_assign_ids_and_dedupe() {
+        let renderer = MarkdownRenderer::new();
+        let md = "# Getting Started\n\n## Getting Started\n\n### API & Usage\n\n## API & Usage\n";
+        let parsed = renderer.parse(md).expect("parse ok");
+
+        let mut ids = vec![];
+        for el in parsed {
+            if let MarkdownElement::Header { id, .. } = el {
+                ids.push(id);
+            }
+        }
+        // Expect 4 headers with deduped slugs
+        assert_eq!(ids.len(), 4);
+        assert_eq!(ids[0], "getting-started");
+        assert_eq!(ids[1], "getting-started-1");
+        assert_eq!(ids[2], "api-usage");
+        assert_eq!(ids[3], "api-usage-1");
+    }
+
+    #[test]
+    fn test_formatting_sample_contains_expected_header_ids() {
+        let renderer = MarkdownRenderer::new();
+        let formatting = SAMPLE_FILES
+            .iter()
+            .find(|f| f.name == "formatting.md")
+            .expect("formatting sample present");
+        let parsed = renderer.parse(formatting.content).expect("parse ok");
+        let ids: Vec<String> = parsed
+            .into_iter()
+            .filter_map(|el| match el {
+                MarkdownElement::Header { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+
+        // Spot check key sections used by ToC
+        for expected in [
+            "markdown-formatting-guide",
+            "table-of-contents",
+            "text-formatting",
+            "headers",
+            "lists",
+            "links-and-images",
+            "emojis",
+            "blockquotes",
+            "horizontal-rules",
+            "tables",
+        ] {
+            assert!(ids.iter().any(|id| id == expected), "missing id {expected}");
+        }
     }
 }

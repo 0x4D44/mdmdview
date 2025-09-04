@@ -122,6 +122,7 @@ All standard markdown elements are fully supported with professional formatting:
 - **Code blocks** - Syntax highlighting for multiple languages
 - **Inline code** - Properly formatted within text (e.g., use `pip install` command)
 - **Links** - Clickable URLs that open in browser
+  - Internal anchors supported: `[Section](#section)` scrolls in‑document
 - **Horizontal rules** - Clean section separators
 - **Blockquotes** - Polished dark block with orange bar; supports multi-line and nested quotes
 - **Emojis** - Color emoji images embedded (Twemoji); common shortcodes (e.g., `:rocket:`, `:tada:`) expand to Unicode automatically
