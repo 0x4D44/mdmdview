@@ -289,6 +289,7 @@ const USAGE_CONTENT: &str = r#"# Usage Instructions
 |----------|--------|
 | `Ctrl+O` | Open file |
 | `Ctrl+W` | Close current file |
+| `F5` | Reload current file |
 | `Ctrl+Q` | Quit application |
 | `F11` | Toggle fullscreen |
 | `Ctrl++` | Zoom in (increase font size) |

@@ -18,6 +18,7 @@ webbrowser = "0.8"
 rfd = "0.14"
 anyhow = "1.0"
 env_logger = "0.10"
+image = "0.24"
 
 [dev-dependencies]
 tempfile = "3.8"
@@ -31,7 +32,3 @@ lto = true
 strip = true
 codegen-units = 1
 panic = "abort"
-
-[features]
-# Optional: color emoji rendering using generated textures
-color-emoji = []

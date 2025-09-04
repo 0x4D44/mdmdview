@@ -5,9 +5,8 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
-#[cfg(feature = "color-emoji")]
+use crate::{emoji_assets, emoji_catalog};
 use std::collections::HashMap;
-#[cfg(feature = "color-emoji")]
 use std::cell::RefCell;
 
 /// Font size configuration
@@ -84,7 +83,6 @@ pub struct MarkdownRenderer {
     font_sizes: FontSizes,
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
-    #[cfg(feature = "color-emoji")]
     emoji_textures: RefCell<HashMap<String, egui::TextureHandle>>,
 }
 
@@ -101,7 +99,6 @@ impl MarkdownRenderer {
             font_sizes: FontSizes::default(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
-            #[cfg(feature = "color-emoji")]
             emoji_textures: RefCell::new(HashMap::new()),
         }
     }
@@ -721,16 +718,7 @@ impl MarkdownRenderer {
         match span {
             InlineSpan::Text(text) => {
                 let fixed_text = self.fix_unicode_chars(text);
-                #[cfg(feature = "color-emoji")]
-                {
-                    self.render_text_with_emojis(ui, &fixed_text, size, is_strong);
-                }
-                #[cfg(not(feature = "color-emoji"))]
-                {
-                    let mut rich_text = RichText::new(fixed_text).size(size);
-                    if is_strong { rich_text = rich_text.strong(); }
-                    ui.label(rich_text);
-                }
+                self.render_text_with_emojis(ui, &fixed_text, size, is_strong);
             }
             InlineSpan::Code(code) => {
                 // Create inline code with no extra spacing
@@ -784,10 +772,11 @@ impl MarkdownRenderer {
         }
     }
 
-    #[cfg(feature = "color-emoji")]
-    fn render_text_with_emojis(&self, ui: &mut egui::Ui, text: &str, size: f32, is_strong: bool) {
+        fn render_text_with_emojis(&self, ui: &mut egui::Ui, text: &str, size: f32, is_strong: bool) {
         // Emojis to detect (single-codepoint for starter set)
-        const EMOJIS: [&str; 6] = ["🎉", "✅", "🚀", "🙂", "😀", "😉"];
+        const EMOJIS: [&str; 18] = [
+            "🎉", "✅", "🚀", "🙂", "😀", "😉", "⭐", "🔥", "👍", "👎", "💡", "❓", "❗", "📝", "🧠", "🧪", "📦", "🔧",
+        ];
 
         let mut i = 0;
         let chars: Vec<char> = text.chars().collect();
@@ -814,7 +803,9 @@ impl MarkdownRenderer {
                     i += 1;
                 }
                 if start < i {
-                    let mut rich = RichText::new(chars[start..i].iter().collect::<String>()).size(size);
+                    let segment: String = chars[start..i].iter().collect();
+                    let expanded = Self::expand_shortcodes(&segment);
+                    let mut rich = RichText::new(expanded).size(size);
                     if is_strong { rich = rich.strong(); }
                     ui.label(rich);
                 }
@@ -822,20 +813,54 @@ impl MarkdownRenderer {
         }
     }
 
-    #[cfg(feature = "color-emoji")]
-    fn get_or_make_emoji_texture(&self, ui: &mut egui::Ui, emoji: &str) -> egui::TextureHandle {
+        fn get_or_make_emoji_texture(&self, ui: &mut egui::Ui, emoji: &str) -> egui::TextureHandle {
         if let Some(tex) = self.emoji_textures.borrow().get(emoji) {
             return tex.clone();
         }
 
-        let img = self.generate_emoji_image(emoji, 64);
+        let img = if let Some(bytes) = emoji_catalog::image_bytes_for(emoji) {
+            match image::load_from_memory(bytes) {
+                Ok(dyn_img) => {
+                    let rgba = dyn_img.to_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    let pixels = rgba.into_vec();
+                    egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &pixels)
+                }
+                Err(_) => emoji_assets::make_image(emoji, 64).unwrap_or_else(|| self.generate_emoji_image(emoji, 64)),
+            }
+        } else {
+            emoji_assets::make_image(emoji, 64).unwrap_or_else(|| self.generate_emoji_image(emoji, 64))
+        };
         let handle = ui.ctx().load_texture(format!("emoji:{}", emoji), img, egui::TextureOptions::LINEAR);
         self.emoji_textures.borrow_mut().insert(emoji.to_string(), handle.clone());
         handle
     }
 
-    #[cfg(feature = "color-emoji")]
-    fn generate_emoji_image(&self, emoji: &str, size: usize) -> egui::ColorImage {
+        fn expand_shortcodes(s: &str) -> String {
+        use crate::emoji_catalog::shortcode_map;
+        if !s.contains(':') { return s.to_string(); }
+        let mut out = String::new();
+        let map = shortcode_map();
+        let mut i = 0;
+        let bytes = s.as_bytes();
+        while i < bytes.len() {
+            if bytes[i] == b':' {
+                if let Some(end) = bytes[i+1..].iter().position(|&b| b == b':') {
+                    let code = &s[i..i+2+end];
+                    if let Some(&e) = map.get(code) {
+                        out.push_str(e);
+                        i += end + 2;
+                        continue;
+                    }
+                }
+            }
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+        out
+    }
+
+        fn generate_emoji_image(&self, emoji: &str, size: usize) -> egui::ColorImage {
         // Simple procedural placeholder icons to keep binary small and avoid external assets
         // Each emoji gets a colored circle and a simple accent
         use egui::Color32 as C;

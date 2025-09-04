@@ -94,6 +94,7 @@ This ensures professional Windows integration with proper file properties and vi
 |----------|--------|
 | `Ctrl+O` | Open file |
 | `Ctrl+W` | Close current file |
+| `F5` | Reload current file |
 | `Ctrl+Q` | Quit application |
 | `F11` | Toggle fullscreen |
 | `Ctrl++` | Zoom in (increase font size) |
@@ -117,7 +118,7 @@ All standard markdown elements are fully supported with professional formatting:
 - **Links** - Clickable URLs that open in browser
 - **Horizontal rules** - Clean section separators
 - **Blockquotes** - Polished dark block with orange bar; supports multi-line and nested quotes
-- **Emojis** - Unicode emojis render if your font supports them; shortcodes like `:smile:` are not expanded
+- **Emojis** - Color emoji images embedded (Twemoji); common shortcodes (e.g., `:rocket:`, `:tada:`) expand to Unicode automatically
 
 **Key Improvement**: Inline code elements like `filename.ext` now stay properly inline with surrounding text instead of breaking to new lines.
 
@@ -214,4 +215,6 @@ mdmdview.exe ..\README.md
 
 ## License
 
-This project is provided as-is for demonstration purposes.
+This project is provided as‑is for demonstration purposes.
+
+Emoji graphics are © 2020 Twitter, Inc and other contributors, licensed under CC‑BY 4.0 (Twemoji). See https://github.com/twitter/twemoji for details. The images are embedded into the executable for offline use.
