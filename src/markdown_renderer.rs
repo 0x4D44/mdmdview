@@ -9,6 +9,14 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
+#[derive(Clone, Copy, Default)]
+struct InlineStyle {
+    strong: bool,
+    italics: bool,
+    strike: bool,
+    color: Option<Color32>,
+}
+
 /// Font size configuration
 #[derive(Debug, Clone)]
 pub struct FontSizes {
@@ -70,13 +78,13 @@ pub enum MarkdownElement {
     },
     HorizontalRule,
     Table {
-        headers: Vec<String>,
-        rows: Vec<Vec<String>>,
+        headers: Vec<Vec<InlineSpan>>,   // header cells as inline spans
+        rows: Vec<Vec<Vec<InlineSpan>>>, // rows -> cells -> spans
     },
 }
 
-/// Type alias for table parsing result to reduce complexity
-type TableParseResult = (Vec<String>, Vec<Vec<String>>, usize);
+/// Type alias for table parsing result
+type TableParseResult = (Vec<Vec<InlineSpan>>, Vec<Vec<Vec<InlineSpan>>>, usize);
 
 /// Type alias for quote lines (each line is a sequence of inline spans)
 type QuoteLines = Vec<Vec<InlineSpan>>;
@@ -499,6 +507,41 @@ impl MarkdownRenderer {
                                 spans.extend(ps);
                                 i = next;
                             }
+                            Event::Code(code) => {
+                                spans.push(InlineSpan::Code(code.to_string()));
+                                i += 1;
+                            }
+                            Event::Start(Tag::Emphasis) => {
+                                let (inner_text, next) =
+                                    self.collect_until_tag_end(events, i + 1, Tag::Emphasis)?;
+                                spans.push(InlineSpan::Emphasis(inner_text));
+                                i = next;
+                            }
+                            Event::Start(Tag::Strong) => {
+                                let (inner_text, next) =
+                                    self.collect_until_tag_end(events, i + 1, Tag::Strong)?;
+                                spans.push(InlineSpan::Strong(inner_text));
+                                i = next;
+                            }
+                            Event::Start(Tag::Strikethrough) => {
+                                let (inner_text, next) =
+                                    self.collect_until_tag_end(events, i + 1, Tag::Strikethrough)?;
+                                spans.push(InlineSpan::Strikethrough(inner_text));
+                                i = next;
+                            }
+                            Event::Start(Tag::Link(_, url, _)) => {
+                                let url_str = url.to_string();
+                                let (link_text, next) = self.collect_until_tag_end(
+                                    events,
+                                    i + 1,
+                                    Tag::Link(LinkType::Inline, "".into(), "".into()),
+                                )?;
+                                spans.push(InlineSpan::Link {
+                                    text: link_text,
+                                    url: url_str,
+                                });
+                                i = next;
+                            }
                             Event::Start(Tag::List(child_first)) => {
                                 let (child_items, next) =
                                     self.parse_list(events, i + 1, *child_first)?;
@@ -543,40 +586,60 @@ impl MarkdownRenderer {
         events: &[Event],
         start: usize,
     ) -> Result<TableParseResult, anyhow::Error> {
-        let mut headers: Vec<String> = Vec::new();
-        let mut rows: Vec<Vec<String>> = Vec::new();
+        let mut headers: Vec<Vec<InlineSpan>> = Vec::new();
+        let mut rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
         let mut i = start;
 
-        fn collect_cell_text(events: &[Event], mut j: usize) -> (String, usize) {
-            let mut cell = String::new();
+        // Parse inline spans within a table cell until End(TableCell)
+        fn collect_cell_spans(
+            this: &MarkdownRenderer,
+            events: &[Event],
+            mut j: usize,
+        ) -> (Vec<InlineSpan>, usize) {
+            let mut spans: Vec<InlineSpan> = Vec::new();
             while j < events.len() {
                 match &events[j] {
-                    Event::End(Tag::TableCell) => return (cell.trim().to_string(), j + 1),
-                    Event::Text(t) | Event::Code(t) => cell.push_str(t),
+                    Event::End(Tag::TableCell) => return (spans, j + 1),
+                    Event::Text(t) => spans.push(InlineSpan::Text(t.to_string())),
+                    Event::Code(t) => spans.push(InlineSpan::Code(t.to_string())),
+                    Event::Start(Tag::Emphasis) => {
+                        let (inner, next) = this
+                            .collect_until_tag_end(events, j + 1, Tag::Emphasis)
+                            .unwrap_or_default();
+                        spans.push(InlineSpan::Emphasis(inner));
+                        j = next - 1; // -1 to offset j+=1 below
+                    }
+                    Event::Start(Tag::Strong) => {
+                        let (inner, next) = this
+                            .collect_until_tag_end(events, j + 1, Tag::Strong)
+                            .unwrap_or_default();
+                        spans.push(InlineSpan::Strong(inner));
+                        j = next - 1;
+                    }
+                    Event::Start(Tag::Strikethrough) => {
+                        let (inner, next) = this
+                            .collect_until_tag_end(events, j + 1, Tag::Strikethrough)
+                            .unwrap_or_default();
+                        spans.push(InlineSpan::Strikethrough(inner));
+                        j = next - 1;
+                    }
                     Event::Start(Tag::Link(_, url, _)) => {
-                        // capture link text if present
-                        let mut k = j + 1;
-                        let mut link_text = String::new();
-                        while k < events.len() {
-                            match &events[k] {
-                                Event::End(Tag::Link(_, _, _)) => break,
-                                Event::Text(t) | Event::Code(t) => link_text.push_str(t),
-                                _ => {}
-                            }
-                            k += 1;
-                        }
-                        if !link_text.is_empty() {
-                            cell.push_str(&link_text);
-                        } else {
-                            cell.push_str(url.as_ref());
-                        }
-                        j = k;
+                        let url_str = url.to_string();
+                        let (text, next) = this
+                            .collect_until_tag_end(
+                                events,
+                                j + 1,
+                                Tag::Link(LinkType::Inline, "".into(), "".into()),
+                            )
+                            .unwrap_or_default();
+                        spans.push(InlineSpan::Link { text, url: url_str });
+                        j = next - 1;
                     }
                     _ => {}
                 }
                 j += 1;
             }
-            (cell.trim().to_string(), j)
+            (spans, j)
         }
 
         while i < events.len() {
@@ -586,8 +649,8 @@ impl MarkdownRenderer {
                     while i < events.len() {
                         match &events[i] {
                             Event::Start(Tag::TableCell) => {
-                                let (text, next) = collect_cell_text(events, i + 1);
-                                headers.push(text);
+                                let (spans, next) = collect_cell_spans(self, events, i + 1);
+                                headers.push(spans);
                                 i = next;
                             }
                             Event::End(Tag::TableHead) => {
@@ -600,12 +663,12 @@ impl MarkdownRenderer {
                 }
                 Event::Start(Tag::TableRow) => {
                     i += 1;
-                    let mut row: Vec<String> = Vec::new();
+                    let mut row: Vec<Vec<InlineSpan>> = Vec::new();
                     while i < events.len() {
                         match &events[i] {
                             Event::Start(Tag::TableCell) => {
-                                let (text, next) = collect_cell_text(events, i + 1);
-                                row.push(text);
+                                let (spans, next) = collect_cell_spans(self, events, i + 1);
+                                row.push(spans);
                                 i = next;
                             }
                             Event::End(Tag::TableRow) => {
@@ -754,7 +817,11 @@ impl MarkdownRenderer {
         match span {
             InlineSpan::Text(text) => {
                 let fixed_text = self.fix_unicode_chars(text);
-                self.render_text_with_emojis(ui, &fixed_text, size, is_strong);
+                let style = InlineStyle {
+                    strong: is_strong,
+                    ..Default::default()
+                };
+                self.render_text_with_emojis(ui, &fixed_text, size, style);
             }
             InlineSpan::Code(code) => {
                 // Create inline code with no extra spacing
@@ -773,46 +840,60 @@ impl MarkdownRenderer {
             }
             InlineSpan::Strong(text) => {
                 let fixed_text = self.fix_unicode_chars(text);
-                ui.label(
-                    RichText::new(fixed_text)
-                        .size(size)
-                        .strong()
-                        .color(Color32::from_rgb(220, 220, 220)),
-                );
+                let style = InlineStyle {
+                    strong: true,
+                    ..Default::default()
+                };
+                self.render_text_with_emojis(ui, &fixed_text, size, style);
             }
             InlineSpan::Emphasis(text) => {
                 let fixed_text = self.fix_unicode_chars(text);
-                ui.label(
-                    RichText::new(fixed_text)
-                        .size(size)
-                        .italics()
-                        .color(Color32::from_rgb(220, 220, 220)),
-                );
+                let style = InlineStyle {
+                    italics: true,
+                    strong: is_strong,
+                    ..Default::default()
+                };
+                self.render_text_with_emojis(ui, &fixed_text, size, style);
             }
             InlineSpan::Strikethrough(text) => {
                 let fixed_text = self.fix_unicode_chars(text);
-                ui.label(
-                    RichText::new(fixed_text)
-                        .size(size)
-                        .strikethrough()
-                        .color(Color32::from_rgb(220, 220, 220)),
-                );
+                let style = InlineStyle {
+                    strike: true,
+                    strong: is_strong,
+                    ..Default::default()
+                };
+                self.render_text_with_emojis(ui, &fixed_text, size, style);
             }
             InlineSpan::Link { text, url } => {
                 let fixed_text = self.fix_unicode_chars(text);
-                let response = ui.link(
-                    RichText::new(fixed_text)
-                        .color(Color32::LIGHT_BLUE)
-                        .size(size),
+                let group = ui.horizontal_wrapped(|ui| {
+                    // Render link-like styled text with emoji expansion
+                    let style = InlineStyle {
+                        strong: is_strong,
+                        color: Some(Color32::LIGHT_BLUE),
+                        ..Default::default()
+                    };
+                    self.render_text_with_emojis(ui, &fixed_text, size, style);
+                });
+                let r = ui.interact(
+                    group.response.rect,
+                    egui::Id::new(format!("link:{}", url)),
+                    egui::Sense::click(),
                 );
-                if response.clicked() {
+                if r.clicked() {
                     self.open_url(url);
                 }
             }
         }
     }
 
-    fn render_text_with_emojis(&self, ui: &mut egui::Ui, text: &str, size: f32, is_strong: bool) {
+    fn render_text_with_emojis(
+        &self,
+        ui: &mut egui::Ui,
+        text: &str,
+        size: f32,
+        style: InlineStyle,
+    ) {
         // Emojis to detect (single-codepoint for starter set)
         const EMOJIS: [&str; 18] = [
             "🎉", "✅", "🚀", "🙂", "😀", "😉", "⭐", "🔥", "👍", "👎", "💡", "❓", "❗", "📝",
@@ -849,8 +930,17 @@ impl MarkdownRenderer {
                     let segment: String = chars[start..i].iter().collect();
                     let expanded = Self::expand_shortcodes(&segment);
                     let mut rich = RichText::new(expanded).size(size);
-                    if is_strong {
+                    if style.strong {
                         rich = rich.strong();
+                    }
+                    if style.italics {
+                        rich = rich.italics();
+                    }
+                    if style.strike {
+                        rich = rich.strikethrough();
+                    }
+                    if let Some(color) = style.color {
+                        rich = rich.color(color);
                     }
                     ui.label(rich);
                 }
@@ -1131,25 +1221,65 @@ impl MarkdownRenderer {
     }
 
     /// Render a table using an egui Grid
-    fn render_table(&self, ui: &mut egui::Ui, headers: &[String], rows: &[Vec<String>]) {
+    fn render_table(
+        &self,
+        ui: &mut egui::Ui,
+        headers: &[Vec<InlineSpan>],
+        rows: &[Vec<Vec<InlineSpan>>],
+    ) {
         if headers.is_empty() {
             return;
         }
 
         ui.add_space(8.0);
+        let total_width = ui.available_width().max(300.0);
+        let col0 = (total_width * 0.34).max(140.0); // Feature
+        let col1 = (total_width * 0.16).max(90.0); // Supported
+        let col2 = (total_width - col0 - col1).max(160.0); // Notes
+
         egui::Frame::none()
             .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
             .show(ui, |ui| {
-                egui::Grid::new("md_table").striped(true).show(ui, |ui| {
-                    for h in headers {
-                        ui.label(RichText::new(h).strong());
+                let grid = egui::Grid::new("md_table").striped(true);
+                grid.show(ui, |ui| {
+                    for (ci, h) in headers.iter().enumerate() {
+                        let width = match ci {
+                            0 => col0,
+                            1 => col1,
+                            _ => col2,
+                        };
+                        ui.scope(|ui| {
+                            ui.set_min_width(width);
+                            ui.set_max_width(width);
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                for span in h {
+                                    // Emphasize header text
+                                    self.render_inline_span(ui, span, None, Some(true));
+                                }
+                            });
+                        });
                     }
                     ui.end_row();
 
                     for row in rows {
                         for (col, cell) in row.iter().enumerate() {
                             if col < headers.len() {
-                                ui.label(cell);
+                                let width = match col {
+                                    0 => col0,
+                                    1 => col1,
+                                    _ => col2,
+                                };
+                                ui.scope(|ui| {
+                                    ui.set_min_width(width);
+                                    ui.set_max_width(width);
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 0.0;
+                                        for span in cell {
+                                            self.render_inline_span(ui, span, None, None);
+                                        }
+                                    });
+                                });
                             }
                         }
                         ui.end_row();
@@ -1275,5 +1405,47 @@ mod tests {
 
         renderer.reset_zoom();
         assert_eq!(renderer.font_sizes.body, original_body);
+    }
+
+    #[test]
+    fn test_tight_list_inline_code_and_styles() {
+        let renderer = MarkdownRenderer::new();
+        let md = "- Use `code` and **bold** and *italic* and ~~strike~~\n";
+        let parsed = renderer.parse(md).expect("parse ok");
+        // Expect a single unordered list with one item
+        assert_eq!(parsed.len(), 1);
+        match &parsed[0] {
+            MarkdownElement::List { ordered, items } => {
+                assert!(!ordered);
+                assert_eq!(items.len(), 1);
+                let spans = &items[0];
+                // Presence checks for various inline spans
+                assert!(spans
+                    .iter()
+                    .any(|s| matches!(s, InlineSpan::Code(c) if c == "code")));
+                assert!(spans
+                    .iter()
+                    .any(|s| matches!(s, InlineSpan::Strong(t) if t.contains("bold"))));
+                assert!(spans
+                    .iter()
+                    .any(|s| matches!(s, InlineSpan::Emphasis(t) if t.contains("italic"))));
+                assert!(spans
+                    .iter()
+                    .any(|s| matches!(s, InlineSpan::Strikethrough(t) if t.contains("strike"))));
+            }
+            other => panic!("Expected List, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_expand_shortcodes_basic() {
+        // Direct shortcode expansion
+        assert_eq!(MarkdownRenderer::expand_shortcodes(":rocket:"), "🚀");
+        assert_eq!(MarkdownRenderer::expand_shortcodes(":tada:"), "🎉");
+        // Mixed text
+        assert_eq!(
+            MarkdownRenderer::expand_shortcodes("Hello :tada:!"),
+            "Hello 🎉!"
+        );
     }
 }

@@ -90,6 +90,9 @@ You can also use `inline code` and ~~strikethrough~~ text.
   - Nested item
   - Another nested item
 - Third item
+- Inline code in bullets works: use `--help` or `cargo run`
+- Styled + emoji in bullets: **:rocket:** launch, *:tada:* celebration, and ~~:fire:~~ warning
+- Tight list check: this item has :rocket: and `code` without blank lines between items
 
 ### Ordered Lists
 
@@ -110,7 +113,7 @@ Links are clickable and will open in your default browser.
 Unicode emojis render as normal text if your font supports them.
 Examples: Thanks! 🎉  Status: ✅  Ship it 🚀
 
-Note: Shortcodes like `:smile:` are not expanded by MarkdownView.
+Shortcodes like `:rocket:` and `:tada:` are expanded to emoji images in normal text, headers, and list items.
 
 ## Blockquotes
 
@@ -127,11 +130,11 @@ Note: Shortcodes like `:smile:` are not expanded by MarkdownView.
 
 | Feature | Supported | Notes |
 |---------|-----------|-------|
-| Headers | ✓ | All levels 1-6 |
-| Lists | ✓ | Ordered and unordered |
-| Code blocks | ✓ | With syntax highlighting |
-| Tables | ✓ | Basic table support |
-| Links | ✓ | Opens in browser |
+| Headers | ✅ | All levels 1-6 |
+| Lists | ✅ | Ordered and unordered |
+| Code blocks | ✅ | With syntax highlighting |
+| Tables | ✅ | Basic table support |
+| Links | ✅ | Opens in browser |
 
 ---
 
