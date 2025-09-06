@@ -8,6 +8,7 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
+use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone, Copy, Default)]
 struct InlineStyle {
@@ -1008,105 +1009,43 @@ impl MarkdownRenderer {
         size: f32,
         style: InlineStyle,
     ) {
-        // Emojis to detect (starter set). Include heart with/without VS16.
-        const EMOJIS: [&str; 20] = [
-            "🎉", "✅", "🚀", "🙂", "😀", "😉", "⭐", "🔥", "👍", "👎", "💡", "❓", "❗", "📝",
-            "🧠", "🧪", "📦", "🔧", "❤️", "❤",
-        ];
-
-        let mut i = 0;
-        let chars: Vec<char> = text.chars().collect();
-        while i < chars.len() {
-            let mut matched: Option<&'static str> = None;
-            for e in &EMOJIS {
-                let ec = e.chars().next().unwrap();
-                if chars[i] == ec {
-                    matched = Some(*e);
-                    break;
+        let mut buffer = String::new();
+        for g in text.graphemes(true) {
+            if let Some(key) = self.emoji_key_for_grapheme(g) {
+                // Flush buffered text first (with highlighting if active)
+                if !buffer.is_empty() {
+                    self.render_text_segment_with_optional_highlight(ui, &buffer, size, style);
+                    buffer.clear();
                 }
-            }
-            if let Some(emoji) = matched {
-                let handle = self.get_or_make_emoji_texture(ui, emoji);
+                let handle = self.get_or_make_emoji_texture(ui, &key);
                 let sz = size * 1.2;
                 ui.add(egui::Image::new(&handle).max_width(sz).max_height(sz));
-                i += 1;
             } else {
-                // Accumulate regular text until the next emoji
-                let start = i;
-                while i < chars.len() {
-                    let c = chars[i];
-                    if EMOJIS.iter().any(|e| e.chars().next().unwrap() == c) {
-                        break;
-                    }
-                    i += 1;
-                }
-                if start < i {
-                    let segment: String = chars[start..i].iter().collect();
-                    let expanded = Self::expand_shortcodes(&segment);
-                    if let Some(h) = self.highlight_phrase.borrow().as_ref() {
-                        let lower = expanded.to_ascii_lowercase();
-                        let mut start = 0usize;
-                        while let Some(pos) = lower[start..].find(h) {
-                            let abs = start + pos;
-                            if abs > start {
-                                let pre = &expanded[start..abs];
-                                if !pre.is_empty() {
-                                    let mut rich = RichText::new(pre).size(size);
-                                    if style.strong {
-                                        rich = rich.strong();
-                                    }
-                                    if style.italics {
-                                        rich = rich.italics();
-                                    }
-                                    if style.strike {
-                                        rich = rich.strikethrough();
-                                    }
-                                    if let Some(color) = style.color {
-                                        rich = rich.color(color);
-                                    }
-                                    ui.label(rich);
-                                }
-                            }
-                            let mat = &expanded[abs..abs + h.len()];
-                            let mut rich = RichText::new(mat)
-                                .size(size)
-                                .background_color(Color32::from_rgb(80, 80, 0));
-                            if style.strong {
-                                rich = rich.strong();
-                            }
-                            if style.italics {
-                                rich = rich.italics();
-                            }
-                            if style.strike {
-                                rich = rich.strikethrough();
-                            }
-                            if let Some(color) = style.color {
-                                rich = rich.color(color);
-                            }
-                            ui.label(rich);
-                            start = abs + h.len();
-                        }
-                        if start < expanded.len() {
-                            let rest = &expanded[start..];
-                            if !rest.is_empty() {
-                                let mut rich = RichText::new(rest).size(size);
-                                if style.strong {
-                                    rich = rich.strong();
-                                }
-                                if style.italics {
-                                    rich = rich.italics();
-                                }
-                                if style.strike {
-                                    rich = rich.strikethrough();
-                                }
-                                if let Some(color) = style.color {
-                                    rich = rich.color(color);
-                                }
-                                ui.label(rich);
-                            }
-                        }
-                    } else {
-                        let mut rich = RichText::new(expanded).size(size);
+                buffer.push_str(g);
+            }
+        }
+        if !buffer.is_empty() {
+            self.render_text_segment_with_optional_highlight(ui, &buffer, size, style);
+        }
+    }
+
+    fn render_text_segment_with_optional_highlight(
+        &self,
+        ui: &mut egui::Ui,
+        segment: &str,
+        size: f32,
+        style: InlineStyle,
+    ) {
+        let expanded = Self::expand_shortcodes(segment);
+        if let Some(h) = self.highlight_phrase.borrow().as_ref() {
+            let lower = expanded.to_ascii_lowercase();
+            let mut start_at = 0usize;
+            while let Some(pos) = lower[start_at..].find(h) {
+                let abs = start_at + pos;
+                if abs > start_at {
+                    let pre = &expanded[start_at..abs];
+                    if !pre.is_empty() {
+                        let mut rich = RichText::new(pre).size(size);
                         if style.strong {
                             rich = rich.strong();
                         }
@@ -1122,8 +1061,77 @@ impl MarkdownRenderer {
                         ui.label(rich);
                     }
                 }
+                let mat = &expanded[abs..abs + h.len()];
+                let mut rich =
+                    RichText::new(mat).size(size).background_color(Color32::from_rgb(80, 80, 0));
+                if style.strong {
+                    rich = rich.strong();
+                }
+                if style.italics {
+                    rich = rich.italics();
+                }
+                if style.strike {
+                    rich = rich.strikethrough();
+                }
+                if let Some(color) = style.color {
+                    rich = rich.color(color);
+                }
+                ui.label(rich);
+                start_at = abs + h.len();
             }
+            if start_at < expanded.len() {
+                let rest = &expanded[start_at..];
+                if !rest.is_empty() {
+                    let mut rich = RichText::new(rest).size(size);
+                    if style.strong {
+                        rich = rich.strong();
+                    }
+                    if style.italics {
+                        rich = rich.italics();
+                    }
+                    if style.strike {
+                        rich = rich.strikethrough();
+                    }
+                    if let Some(color) = style.color {
+                        rich = rich.color(color);
+                    }
+                    ui.label(rich);
+                }
+            }
+        } else {
+            let mut rich = RichText::new(expanded).size(size);
+            if style.strong {
+                rich = rich.strong();
+            }
+            if style.italics {
+                rich = rich.italics();
+            }
+            if style.strike {
+                rich = rich.strikethrough();
+            }
+            if let Some(color) = style.color {
+                rich = rich.color(color);
+            }
+            ui.label(rich);
         }
+    }
+
+    /// Map a grapheme cluster to an emoji image key if available.
+    fn emoji_key_for_grapheme(&self, g: &str) -> Option<String> {
+        if crate::emoji_catalog::image_bytes_for(g).is_some() {
+            return Some(g.to_string());
+        }
+        let stripped: String = g.chars().filter(|&c| c != '\u{FE0F}').collect();
+        if stripped != g && crate::emoji_catalog::image_bytes_for(&stripped).is_some() {
+            return Some(stripped);
+        }
+        // If the grapheme explicitly requests emoji presentation (contains VS16),
+        // treat it as an emoji even if we don't have a sprite; fall back to a
+        // generated placeholder via emoji_assets to avoid stray tofu.
+        if g.chars().any(|c| c == '\u{FE0F}') {
+            return Some(stripped); // prefer stripped as the texture key
+        }
+        None
     }
 
     fn get_or_make_emoji_texture(&self, ui: &mut egui::Ui, emoji: &str) -> egui::TextureHandle {
