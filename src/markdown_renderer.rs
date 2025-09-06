@@ -1062,8 +1062,9 @@ impl MarkdownRenderer {
                     }
                 }
                 let mat = &expanded[abs..abs + h.len()];
-                let mut rich =
-                    RichText::new(mat).size(size).background_color(Color32::from_rgb(80, 80, 0));
+                let mut rich = RichText::new(mat)
+                    .size(size)
+                    .background_color(Color32::from_rgb(80, 80, 0));
                 if style.strong {
                     rich = rich.strong();
                 }
