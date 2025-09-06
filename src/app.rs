@@ -37,8 +37,18 @@ pub struct MarkdownViewerApp {
     view_mode: ViewMode,
     /// Wrap long lines in raw view
     wrap_raw: bool,
+    /// Write mode: allow editing in Raw view
+    write_enabled: bool,
+    /// Remember caret position in raw editor (byte index)
+    raw_cursor: Option<usize>,
+    /// Request focus for raw editor on next render
+    raw_focus_requested: bool,
     /// Flag to request reload of current file (handled outside input context)
     reload_requested: bool,
+    /// Defer toggling view mode to outside input context
+    view_toggle_requested: bool,
+    /// Defer toggling write mode to outside input context
+    write_toggle_requested: bool,
     /// Last known window position (for persistence)
     last_window_pos: Option<[f32; 2]>,
     /// Last known window size (for persistence)
@@ -54,6 +64,8 @@ pub struct MarkdownViewerApp {
     last_match_index: Option<usize>,
     pending_scroll_to_element: Option<usize>,
     search_focus_requested: bool,
+    /// Deferred caret movement (in lines) for raw editor
+    pending_raw_cursor_line_move: Option<i32>,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -75,6 +87,80 @@ enum ViewMode {
 }
 
 impl MarkdownViewerApp {
+    fn toggle_write_mode(&mut self, ctx: &Context) {
+        if self.write_enabled {
+            // About to disable; capture current cursor if in Raw view
+            if matches!(self.view_mode, ViewMode::Raw) {
+                let editor_id = egui::Id::new("raw_editor");
+                if let Some(state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
+                    if let Some(range) = state.cursor.char_range() {
+                        self.raw_cursor = Some(range.primary.index);
+                    }
+                }
+            }
+            self.write_enabled = false;
+        } else {
+            // Enabling write mode: ensure the raw editor will gain focus
+            self.write_enabled = true;
+            if matches!(self.view_mode, ViewMode::Raw) {
+                self.raw_focus_requested = true;
+            }
+        }
+    }
+
+    fn move_raw_cursor_lines(&mut self, ctx: &Context, delta_lines: i32) {
+        if !matches!(self.view_mode, ViewMode::Raw) || !self.write_enabled {
+            return;
+        }
+        let editor_id = egui::Id::new("raw_editor");
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
+            let mut idx = state
+                .cursor
+                .char_range()
+                .map(|r| r.primary.index)
+                .unwrap_or_else(|| self.raw_cursor.unwrap_or(0))
+                .min(self.raw_buffer.len());
+
+            let s = self.raw_buffer.as_str();
+            match delta_lines.cmp(&0) {
+                std::cmp::Ordering::Less => {
+                    let mut lines = -delta_lines;
+                    // Move to start of current line
+                    idx = s[..idx].rfind('\n').map(|p| p + 1).unwrap_or(0);
+                    while lines > 0 && idx > 0 {
+                        if let Some(prev_nl) = s[..idx.saturating_sub(1)].rfind('\n') {
+                            idx = prev_nl + 1;
+                        } else {
+                            idx = 0;
+                        }
+                        lines -= 1;
+                    }
+                }
+                std::cmp::Ordering::Greater => {
+                    let mut lines = delta_lines;
+                    // Move to start of next line
+                    if let Some(nl) = s[idx..].find('\n') {
+                        idx = (idx + nl + 1).min(s.len());
+                        lines -= 1;
+                    }
+                    while lines > 0 && idx < s.len() {
+                        if let Some(nl) = s[idx..].find('\n') {
+                            idx = (idx + nl + 1).min(s.len());
+                        } else {
+                            idx = s.len();
+                        }
+                        lines -= 1;
+                    }
+                }
+                std::cmp::Ordering::Equal => {}
+            }
+            let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(idx));
+            state.cursor.set_char_range(Some(cr));
+            state.store(ctx, editor_id);
+            self.raw_cursor = Some(idx);
+            self.raw_focus_requested = true; // keep focus and make caret visible
+        }
+    }
     fn clear_search_state(&mut self) {
         self.search_query.clear();
         self.last_query.clear();
@@ -178,7 +264,12 @@ impl MarkdownViewerApp {
             toggle_fullscreen: false,
             view_mode: ViewMode::Rendered,
             wrap_raw: false,
+            write_enabled: false,
+            raw_cursor: None,
+            raw_focus_requested: false,
             reload_requested: false,
+            view_toggle_requested: false,
+            write_toggle_requested: false,
             last_window_pos: None,
             last_window_size: None,
             last_window_maximized: false,
@@ -189,6 +280,7 @@ impl MarkdownViewerApp {
             last_match_index: None,
             pending_scroll_to_element: None,
             search_focus_requested: false,
+            pending_raw_cursor_line_move: None,
         };
 
         // Load welcome content by default
@@ -288,9 +380,21 @@ impl MarkdownViewerApp {
     }
 
     /// Toggle between Rendered and Raw view
-    fn toggle_view_mode(&mut self) {
+    fn toggle_view_mode(&mut self, ctx: &Context) {
+        // If leaving Raw view while editing, capture cursor before switching
+        if matches!(self.view_mode, ViewMode::Raw) && self.write_enabled {
+            let editor_id = egui::Id::new("raw_editor");
+            if let Some(state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
+                if let Some(range) = state.cursor.char_range() {
+                    self.raw_cursor = Some(range.primary.index);
+                }
+            }
+        }
         self.view_mode = match self.view_mode {
-            ViewMode::Rendered => ViewMode::Raw,
+            ViewMode::Rendered => {
+                self.raw_focus_requested = true;
+                ViewMode::Raw
+            }
             ViewMode::Raw => ViewMode::Rendered,
         };
     }
@@ -298,6 +402,7 @@ impl MarkdownViewerApp {
     /// Handle keyboard shortcuts
     fn handle_shortcuts(&mut self, ctx: &Context) {
         ctx.input_mut(|i| {
+            let in_raw_edit = matches!(self.view_mode, ViewMode::Raw) && self.write_enabled;
             // Ctrl+O - Open file
             if i.consume_shortcut(&egui::KeyboardShortcut::new(
                 egui::Modifiers::CTRL,
@@ -397,7 +502,24 @@ impl MarkdownViewerApp {
                 egui::Modifiers::CTRL,
                 egui::Key::R,
             )) {
-                self.toggle_view_mode();
+                // Defer to avoid acting inside input context
+                self.view_toggle_requested = true;
+            }
+            // Ctrl+E - Toggle write mode (deferred)
+            if i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::CTRL,
+                egui::Key::E,
+            )) {
+                self.write_toggle_requested = true;
+            }
+            // Ctrl+S - Save document
+            if i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::CTRL,
+                egui::Key::S,
+            )) {
+                if let Err(e) = self.save_current_document() {
+                    self.error_message = Some(format!("Failed to save: {}", e));
+                }
             }
             // Note: No global Alt+R to avoid conflict (File→Reload vs View→Raw)
 
@@ -417,34 +539,44 @@ impl MarkdownViewerApp {
                 self.show_search = false;
             }
 
-            // Home - Go to top of document
-            if i.consume_key(egui::Modifiers::NONE, egui::Key::Home) {
-                self.nav_request = Some(NavigationRequest::Top);
-            }
+            // Only consume navigation keys when not editing in raw view
+            if !in_raw_edit {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp) {
+                    self.nav_request = Some(NavigationRequest::PageUp);
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::PageDown) {
+                    self.nav_request = Some(NavigationRequest::PageDown);
+                }
+                // Home - Go to top of document
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Home) {
+                    self.nav_request = Some(NavigationRequest::Top);
+                }
 
-            // End - Go to bottom of document
-            if i.consume_key(egui::Modifiers::NONE, egui::Key::End) {
-                self.nav_request = Some(NavigationRequest::Bottom);
-            }
+                // End - Go to bottom of document
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::End) {
+                    self.nav_request = Some(NavigationRequest::Bottom);
+                }
 
-            // Page Up - Scroll up one page
-            if i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp) {
-                self.nav_request = Some(NavigationRequest::PageUp);
-            }
+                // Arrow Up - Fine scroll up
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                    self.nav_request = Some(NavigationRequest::ScrollUp);
+                }
 
-            // Page Down - Scroll down one page
-            if i.consume_key(egui::Modifiers::NONE, egui::Key::PageDown) {
-                self.nav_request = Some(NavigationRequest::PageDown);
-            }
-
-            // Arrow Up - Fine scroll up
-            if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
-                self.nav_request = Some(NavigationRequest::ScrollUp);
-            }
-
-            // Arrow Down - Fine scroll down
-            if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
-                self.nav_request = Some(NavigationRequest::ScrollDown);
+                // Arrow Down - Fine scroll down
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                    self.nav_request = Some(NavigationRequest::ScrollDown);
+                }
+            } else {
+                // In raw edit mode: implement PageUp/PageDown by moving caret by ~a page of lines
+                const PAGE_LINES: i32 = 24; // match desired_rows for the editor
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp) {
+                    self.pending_raw_cursor_line_move = Some(-PAGE_LINES);
+                    self.raw_focus_requested = true;
+                }
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::PageDown) {
+                    self.pending_raw_cursor_line_move = Some(PAGE_LINES);
+                    self.raw_focus_requested = true;
+                }
             }
         });
     }
@@ -475,6 +607,32 @@ impl MarkdownViewerApp {
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     ui.weak("Ctrl+O");
+                                },
+                            );
+                        });
+
+                        // Save
+                        ui.horizontal(|ui| {
+                            let enabled = !self.current_content.is_empty();
+                            let button = ui.add_enabled(
+                                enabled,
+                                egui::Button::new(Self::menu_text_with_mnemonic(
+                                    Some("💾 "),
+                                    "Save",
+                                    'S',
+                                    alt_pressed,
+                                )),
+                            );
+                            if button.clicked() {
+                                if let Err(e) = self.save_current_document() {
+                                    self.error_message = Some(format!("Failed to save: {}", e));
+                                }
+                                ui.close_menu();
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.weak("Ctrl+S");
                                 },
                             );
                         });
@@ -604,13 +762,39 @@ impl MarkdownViewerApp {
                                 ))
                                 .clicked()
                             {
-                                self.toggle_view_mode();
-                                ui.close_menu();
-                            }
+                            self.toggle_view_mode(ctx);
+                            ui.close_menu();
+                        }
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     ui.weak("Ctrl+R");
+                                },
+                            );
+                        });
+
+                        // Write mode toggle (raw window editing)
+                        ui.horizontal(|ui| {
+                            let selected = self.write_enabled;
+                        if ui
+                            .add(egui::SelectableLabel::new(
+                                selected,
+                                Self::menu_text_with_mnemonic(
+                                    Some("✍ "),
+                                    "Write Mode",
+                                    'W',
+                                    alt_pressed,
+                                ),
+                            ))
+                            .clicked()
+                        {
+                            self.toggle_write_mode(ctx);
+                            ui.close_menu();
+                        }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.weak("Ctrl+E");
                                 },
                             );
                         });
@@ -768,6 +952,23 @@ impl eframe::App for MarkdownViewerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!current_fullscreen));
         }
 
+        // Handle deferred view toggle outside of input context
+        if self.view_toggle_requested {
+            self.view_toggle_requested = false;
+            self.toggle_view_mode(ctx);
+        }
+
+        // Handle deferred write toggle outside of input context
+        if self.write_toggle_requested {
+            self.write_toggle_requested = false;
+            self.toggle_write_mode(ctx);
+        }
+
+        // Handle deferred caret movement for raw editor
+        if let Some(delta) = self.pending_raw_cursor_line_move.take() {
+            self.move_raw_cursor_lines(ctx, delta);
+        }
+
         // Handle reload request outside input context to avoid blocking within input handling
         if self.reload_requested {
             self.reload_requested = false;
@@ -871,17 +1072,73 @@ impl eframe::App for MarkdownViewerApp {
                                 }
                             }
                             ViewMode::Raw => {
-                                // Read-only raw markdown view
-                                let mut tmp = self.raw_buffer.clone();
-                                ui.add(
-                                    TextEdit::multiline(&mut tmp)
-                                        .font(TextStyle::Monospace)
-                                        .code_editor()
-                                        .lock_focus(false)
-                                        .interactive(false)
-                                        .desired_width(f32::INFINITY)
-                                        .desired_rows(24),
-                                );
+                                // Raw markdown view; editable when write mode is enabled
+                                if self.write_enabled {
+                                    let editor_id = egui::Id::new("raw_editor");
+                                    // If we have a remembered cursor, restore it (clamped)
+                                    if let Some(mut idx) = self.raw_cursor.take() {
+                                        idx = idx.min(self.raw_buffer.len());
+                                        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id) {
+                                            let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(idx));
+                                            state.cursor.set_char_range(Some(cr));
+                                            state.store(ui.ctx(), editor_id);
+                                        } else {
+                                            let mut state = egui::text_edit::TextEditState::default();
+                                            let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(idx));
+                                            state.cursor.set_char_range(Some(cr));
+                                            state.store(ui.ctx(), editor_id);
+                                        }
+                                    }
+                                    let before = self.raw_buffer.clone();
+                                    let resp = ui.add(
+                                        TextEdit::multiline(&mut self.raw_buffer)
+                                            .font(TextStyle::Monospace)
+                                            .code_editor()
+                                            .lock_focus(false)
+                                            .interactive(true)
+                                            .desired_width(f32::INFINITY)
+                                            .desired_rows(24)
+                                            .id_source(editor_id),
+                                    );
+                                    if self.raw_focus_requested {
+                                        resp.request_focus();
+                                        self.raw_focus_requested = false;
+                                    }
+                                    // Remember cursor position for next time
+                                    if let Some(state) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id) {
+                                        if let Some(range) = state.cursor.char_range() {
+                                            let idx = range.primary.index;
+                                            self.raw_cursor = Some(idx);
+                                        }
+                                    }
+                                    if self.raw_buffer != before {
+                                        self.current_content = self.raw_buffer.clone();
+                                        match self.renderer.parse(&self.current_content) {
+                                            Ok(elements) => {
+                                                self.parsed_elements = elements;
+                                                self.error_message = None;
+                                            }
+                                            Err(e) => {
+                                                self.error_message = Some(format!(
+                                                    "Failed to parse markdown: {}",
+                                                    e
+                                                ));
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Read-only
+                                    let mut tmp = self.raw_buffer.clone();
+                                    ui.add(
+                                        TextEdit::multiline(&mut tmp)
+                                            .font(TextStyle::Monospace)
+                                            .code_editor()
+                                            .lock_focus(false)
+                                            .interactive(false)
+                                            .desired_width(f32::INFINITY)
+                                            .desired_rows(24),
+                                    );
+                                }
                             }
                         }
                     }
@@ -949,6 +1206,30 @@ impl MarkdownViewerApp {
         }
         // Persist periodically; we could also detect deltas to reduce writes further
         self.last_window_pos.is_some() && self.last_window_size.is_some()
+    }
+
+    /// Save current document. If no file is associated, prompts for a path.
+    fn save_current_document(&mut self) -> Result<()> {
+        if let Some(path) = self.current_file.clone() {
+            std::fs::write(&path, &self.current_content)?;
+            Ok(())
+        } else if let Some(path) = FileDialog::new()
+            .set_title("Save Markdown File")
+            .add_filter("Markdown files", &["md", "markdown", "mdown", "mkd"])
+            .save_file()
+        {
+            std::fs::write(&path, &self.current_content)?;
+            let filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Unknown")
+                .to_string();
+            self.current_file = Some(path);
+            self.title = format!("MarkdownView - {}", filename);
+            Ok(())
+        } else {
+            Ok(())
+        }
     }
 
     /// Render the floating non-modal search dialog
@@ -1073,10 +1354,11 @@ mod tests {
     #[test]
     fn test_toggle_view_mode() {
         let mut app = MarkdownViewerApp::new();
+        let ctx = egui::Context::default();
         assert!(matches!(app.view_mode, ViewMode::Rendered));
-        app.toggle_view_mode();
+        app.toggle_view_mode(&ctx);
         assert!(matches!(app.view_mode, ViewMode::Raw));
-        app.toggle_view_mode();
+        app.toggle_view_mode(&ctx);
         assert!(matches!(app.view_mode, ViewMode::Rendered));
     }
 
