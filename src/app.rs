@@ -762,9 +762,9 @@ impl MarkdownViewerApp {
                                 ))
                                 .clicked()
                             {
-                            self.toggle_view_mode(ctx);
-                            ui.close_menu();
-                        }
+                                self.toggle_view_mode(ctx);
+                                ui.close_menu();
+                            }
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -776,21 +776,21 @@ impl MarkdownViewerApp {
                         // Write mode toggle (raw window editing)
                         ui.horizontal(|ui| {
                             let selected = self.write_enabled;
-                        if ui
-                            .add(egui::SelectableLabel::new(
-                                selected,
-                                Self::menu_text_with_mnemonic(
-                                    Some("✍ "),
-                                    "Write Mode",
-                                    'W',
-                                    alt_pressed,
-                                ),
-                            ))
-                            .clicked()
-                        {
-                            self.toggle_write_mode(ctx);
-                            ui.close_menu();
-                        }
+                            if ui
+                                .add(egui::SelectableLabel::new(
+                                    selected,
+                                    Self::menu_text_with_mnemonic(
+                                        Some("✍ "),
+                                        "Write Mode",
+                                        'W',
+                                        alt_pressed,
+                                    ),
+                                ))
+                                .clicked()
+                            {
+                                self.toggle_write_mode(ctx);
+                                ui.close_menu();
+                            }
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
@@ -932,9 +932,17 @@ impl eframe::App for MarkdownViewerApp {
         // Track window position/size for persistence
         ctx.input(|i| {
             let vp = i.viewport();
-            if let Some(rect) = vp.outer_rect {
-                self.last_window_pos = Some([rect.left(), rect.top()]);
-                self.last_window_size = Some([rect.width(), rect.height()]);
+            // Position should use outer rect (top-left of the whole window)
+            if let Some(outer) = vp.outer_rect {
+                self.last_window_pos = Some([outer.left(), outer.top()]);
+            }
+            // Size should use inner rect (content area). Storing outer size and
+            // restoring as inner size causes the window to grow each restart.
+            // Only update if not fullscreen to avoid saving screen-sized values.
+            if !vp.fullscreen.unwrap_or(false) {
+                if let Some(inner) = vp.inner_rect {
+                    self.last_window_size = Some([inner.width(), inner.height()]);
+                }
             }
             self.last_window_maximized = vp.maximized.unwrap_or(false);
         });
@@ -1078,13 +1086,23 @@ impl eframe::App for MarkdownViewerApp {
                                     // If we have a remembered cursor, restore it (clamped)
                                     if let Some(mut idx) = self.raw_cursor.take() {
                                         idx = idx.min(self.raw_buffer.len());
-                                        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id) {
-                                            let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(idx));
+                                        if let Some(mut state) =
+                                            egui::text_edit::TextEditState::load(
+                                                ui.ctx(),
+                                                editor_id,
+                                            )
+                                        {
+                                            let cr = egui::text::CCursorRange::one(
+                                                egui::text::CCursor::new(idx),
+                                            );
                                             state.cursor.set_char_range(Some(cr));
                                             state.store(ui.ctx(), editor_id);
                                         } else {
-                                            let mut state = egui::text_edit::TextEditState::default();
-                                            let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(idx));
+                                            let mut state =
+                                                egui::text_edit::TextEditState::default();
+                                            let cr = egui::text::CCursorRange::one(
+                                                egui::text::CCursor::new(idx),
+                                            );
                                             state.cursor.set_char_range(Some(cr));
                                             state.store(ui.ctx(), editor_id);
                                         }
@@ -1105,7 +1123,9 @@ impl eframe::App for MarkdownViewerApp {
                                         self.raw_focus_requested = false;
                                     }
                                     // Remember cursor position for next time
-                                    if let Some(state) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id) {
+                                    if let Some(state) =
+                                        egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
+                                    {
                                         if let Some(range) = state.cursor.char_range() {
                                             let idx = range.primary.index;
                                             self.raw_cursor = Some(idx);
