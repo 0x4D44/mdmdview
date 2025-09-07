@@ -33,6 +33,11 @@ pub const SAMPLE_FILES: &[SampleFile] = &[
         title: "Usage Instructions",
         content: USAGE_CONTENT,
     },
+    SampleFile {
+        name: "images.md",
+        title: "Inline Images & Diagrams",
+        content: IMAGES_CONTENT,
+    },
 ];
 
 /// Welcome content with basic introduction
@@ -59,6 +64,44 @@ Enjoy reading your markdown files with this lightweight, efficient viewer!
 ---
 
 *Built with ❤️ using Rust, egui, and pulldown-cmark*
+"#;
+
+/// Images and diagrams examples
+const IMAGES_CONTENT: &str = r#"# Inline Images & Diagrams
+
+This sample demonstrates inline images and Mermaid code blocks.
+
+## PNG Image
+
+Below is a PNG image using an embedded emoji asset.
+
+![Smiley PNG](assets/emoji/1f600.png "PNG emoji sample")
+
+## SVG Image
+
+An SVG logo rendered via resvg/tiny-skia.
+
+![SVG Logo](assets/samples/logo.svg "SVG sample logo")
+
+## Mermaid Diagram (feature-gated)
+
+When the `mermaid-quickjs` feature is enabled, Mermaid code blocks are rendered as diagrams.
+Otherwise, the source is shown with an informational note.
+
+```mermaid
+graph TD;
+    A[Start] --> B{Is SVG supported?};
+    B -- Yes --> C[Rasterize via resvg];
+    B -- No  --> D[Show placeholder];
+    C --> E[Display egui texture];
+    D --> E;
+```
+
+## WEBP Note
+
+To test WEBP locally, place a small `.webp` file under `assets/samples/` and reference it
+from a file in the `examples/` folder (see the added example markdown files).
+
 "#;
 
 /// Comprehensive formatting examples
@@ -387,13 +430,14 @@ mod tests {
 
     #[test]
     fn test_sample_files_exist() {
-        assert_eq!(SAMPLE_FILES.len(), 4);
+        assert_eq!(SAMPLE_FILES.len(), 5);
 
         let names: Vec<&str> = SAMPLE_FILES.iter().map(|f| f.name).collect();
         assert!(names.contains(&"welcome.md"));
         assert!(names.contains(&"formatting.md"));
         assert!(names.contains(&"code.md"));
         assert!(names.contains(&"usage.md"));
+        assert!(names.contains(&"images.md"));
     }
 
     #[test]
