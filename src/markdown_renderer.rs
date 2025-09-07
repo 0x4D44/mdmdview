@@ -3,13 +3,27 @@ use anyhow::Result;
 use egui::{Color32, RichText, Stroke};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 use unicode_segmentation::UnicodeSegmentation;
+
+// Embedded Mermaid JS bytes are generated in build.rs into OUT_DIR.
+// Place mermaid.min.js at assets/vendor/mermaid.min.js to embed it.
+#[cfg(feature = "mermaid-quickjs")]
+mod mermaid_embed {
+    include!(concat!(env!("OUT_DIR"), "/mermaid_js.rs"));
+}
+
+#[cfg(feature = "mermaid-quickjs")]
+struct MermaidEngine {
+    #[allow(dead_code)]
+    rt: rquickjs::Runtime,
+    ctx: rquickjs::Context,
+}
 
 #[derive(Clone, Copy, Default)]
 struct InlineStyle {
@@ -117,8 +131,19 @@ pub struct MarkdownRenderer {
     element_rects: RefCell<Vec<egui::Rect>>,
     // Optional highlight phrase (lowercased) for in-text highlighting
     highlight_phrase: RefCell<Option<String>>,
+    // Cache for image/diagram textures
     // Base directory used to resolve relative image paths
     base_dir: RefCell<Option<PathBuf>>,
+    #[cfg(feature = "mermaid-quickjs")]
+    mermaid_engine: RefCell<Option<MermaidEngine>>,
+    #[cfg(feature = "mermaid-quickjs")]
+    mermaid_svg_cache: RefCell<HashMap<u64, String>>, // code_hash -> SVG string
+    #[cfg(feature = "mermaid-quickjs")]
+    mermaid_failed: RefCell<HashSet<u64>>, // hashes that failed rendering; skip reattempts
+    #[cfg(feature = "mermaid-quickjs")]
+    mermaid_init_logged: RefCell<bool>,
+    #[cfg(feature = "mermaid-quickjs")]
+    mermaid_last_error: RefCell<Option<String>>,
 }
 
 impl Default for MarkdownRenderer {
@@ -142,6 +167,16 @@ impl MarkdownRenderer {
             element_rects: RefCell::new(Vec::new()),
             highlight_phrase: RefCell::new(None),
             base_dir: RefCell::new(None),
+            #[cfg(feature = "mermaid-quickjs")]
+            mermaid_engine: RefCell::new(None),
+            #[cfg(feature = "mermaid-quickjs")]
+            mermaid_svg_cache: RefCell::new(HashMap::new()),
+            #[cfg(feature = "mermaid-quickjs")]
+            mermaid_failed: RefCell::new(HashSet::new()),
+            #[cfg(feature = "mermaid-quickjs")]
+            mermaid_init_logged: RefCell::new(false),
+            #[cfg(feature = "mermaid-quickjs")]
+            mermaid_last_error: RefCell::new(None),
         }
     }
 
@@ -1639,23 +1674,70 @@ impl MarkdownRenderer {
         // If QuickJS feature is enabled, attempt rendering to SVG then rasterize like normal SVG.
         #[cfg(feature = "mermaid-quickjs")]
         {
-            if let Some(svg) = Self::render_mermaid_to_svg_string(code) {
-                // Convert SVG string to image and draw like an inline image
-                if let Some((img, w, h)) = Self::svg_bytes_to_color_image(svg.as_bytes()) {
-                    let tex = ui.ctx().load_texture(
-                        format!("mermaid:{}", crate::markdown_renderer::hash_str(code)),
-                        img,
-                        egui::TextureOptions::LINEAR,
+            let key = Self::hash_str(code);
+            if self.mermaid_failed.borrow().contains(&key) {
+                // Previously failed; show brief diagnostics and bail
+                let bytes = mermaid_embed::MERMAID_JS.len();
+                let last = self
+                    .mermaid_last_error
+                    .borrow()
+                    .clone()
+                    .unwrap_or_default();
+                egui::Frame::none().inner_margin(4.0).show(ui, |ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "Mermaid skipped (prev fail). Bytes:{} Hash:{:016x}\n{}",
+                            bytes, key, last
+                        ))
+                        .family(egui::FontFamily::Monospace)
+                        .size(self.font_sizes.code),
                     );
-                    let available_w = ui.available_width().max(1.0);
-                    let (tw, th) = (w as f32, h as f32);
-                    let scale = (available_w / tw).clamp(0.01, 4.0);
-                    let size = egui::vec2(tw * scale, th * scale);
-                    ui.add(egui::Image::new(&tex).fit_to_exact_size(size));
-                    return true;
-                }
+                });
+                return true;
+            } else if let Some(tex) = self.get_or_load_mermaid_texture(ui, code) {
+                let size = tex.size();
+                let (tw, th) = (size[0] as f32, size[1] as f32);
+                let available_w = ui.available_width().max(1.0);
+                let base_scale = self.ui_scale();
+                let scaled_w = tw * base_scale;
+                let scale = if scaled_w > available_w {
+                    (available_w / tw).clamp(0.01, 4.0)
+                } else {
+                    base_scale
+                };
+                let size = egui::vec2((tw * scale).round(), (th * scale).round());
+                ui.add(egui::Image::new(&tex).fit_to_exact_size(size));
+                return true;
+            } else {
+                // Mark as failed to avoid repeated attempts causing jank
+                self.mermaid_failed.borrow_mut().insert(key);
+                let bytes = mermaid_embed::MERMAID_JS.len();
+                let last = self
+                    .mermaid_last_error
+                    .borrow()
+                    .clone()
+                    .unwrap_or_else(|| "unknown error".to_string());
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(25, 25, 25))
+                    .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("Mermaid render failed; showing source.")
+                                .color(Color32::from_rgb(200, 160, 80)),
+                        );
+                        ui.label(
+                            RichText::new(format!(
+                                "Embedded bytes:{}\nHash:{:016x}\nError:{}",
+                                bytes, key, last
+                            ))
+                            .family(egui::FontFamily::Monospace)
+                            .size(self.font_sizes.code)
+                            .color(Color32::from_rgb(180, 180, 180)),
+                        );
+                    });
+                // fall through to code block rendering
             }
-            // If rendering failed, fall through to placeholder
         }
 
         // Default: show an informational placeholder and the source code block
@@ -1674,31 +1756,154 @@ impl MarkdownRenderer {
     }
 
     #[cfg(feature = "mermaid-quickjs")]
-    fn render_mermaid_to_svg_string(code: &str) -> Option<String> {
-        use rquickjs::{function::Func, Context, FromJs, Runtime, Value};
-        // Mermaid JS is not bundled yet. This function sketches the runtime wiring.
-        // TODO: embed mermaid.min.js into the binary and evaluate it here.
-        let rt = Runtime::new().ok()?;
-        let ctx = Context::full(&rt).ok()?;
-        let guard = ctx.guard();
-        let svg = ctx.with(|ctx| {
-            // Minimal stub: wrap code in an SVG placeholder until mermaid.js is embedded.
-            let s = format!(
-                "<svg xmlns='http://www.w3.org/2000/svg' width='600' height='200'>\
-                   <rect width='100%' height='100%' fill='rgb(30,30,30)'/>\
-                   <text x='10' y='20' fill='rgb(200,160,80)'>Mermaid feature enabled, renderer stub</text>\
-                   <foreignObject x='10' y='40' width='580' height='150'>\
-                     <body xmlns='http://www.w3.org/1999/xhtml'>\
-                       <pre style='color:white; font: 12px monospace'>{}</pre>\
-                     </body>\
-                   </foreignObject>\
-                 </svg>",
-                htmlescape::encode_minimal(code)
-            );
-            Ok::<_, ()>(s)
-        }).ok()?;
-        drop(guard);
-        Some(svg)
+    fn render_mermaid_to_svg_string(&self, code: &str) -> Option<String> {
+        use rquickjs::{Context, Function, Runtime};
+        // Quick check
+        if mermaid_embed::MERMAID_JS.is_empty() {
+            self.mermaid_last_error
+                .borrow_mut()
+                .replace("No embedded Mermaid JS".to_string());
+            return None;
+        }
+        // Initialize engine once
+        if self.mermaid_engine.borrow().is_none() {
+            let rt = Runtime::new().ok()?;
+            let ctx = Context::full(&rt).ok()?;
+            let engine = MermaidEngine { rt, ctx };
+            // Load library and shim
+            let _ = engine.ctx.with(|ctx| {
+                let shim = r#"
+                    var window = globalThis;
+                    var document = {
+                      body: {},
+                      createElement: function(tag){
+                        return {
+                          innerHTML: '',
+                          setAttribute: function(){},
+                          getAttribute: function(){ return null; },
+                          appendChild: function(){},
+                          querySelector: function(){ return null; },
+                        };
+                      },
+                      createElementNS: function(ns, tag){ return this.createElement(tag); },
+                      getElementById: function(){ return null; },
+                      querySelector: function(){ return null; },
+                    };
+                    window.document = document;
+                    // Minimal timers and raf
+                    window.setTimeout = function(fn, ms){ fn(); return 1; };
+                    window.clearTimeout = function(id){};
+                    window.requestAnimationFrame = function(fn){ fn(0); return 1; };
+                    window.performance = { now: function(){ return 0; } };
+                "#;
+                if let Err(e) = ctx.eval::<(), _>(shim) {
+                    self.mermaid_last_error
+                        .borrow_mut()
+                        .replace(format!("Shim error: {}", e));
+                }
+                if let Ok(js) = std::str::from_utf8(mermaid_embed::MERMAID_JS) {
+                    if let Err(e) = ctx.eval::<(), _>(js) {
+                        self.mermaid_last_error
+                            .borrow_mut()
+                            .replace(format!("Mermaid eval error: {}", e));
+                    }
+                    if let Err(e) = ctx.eval::<(), _>(
+                        r#"if (window.mermaid && mermaid.mermaidAPI) {
+                               mermaid.mermaidAPI.initialize({startOnLoad: false, securityLevel: 'loose'});
+                           } else { throw new Error('Mermaid not available'); }
+                        "#,
+                    ) {
+                        self.mermaid_last_error
+                            .borrow_mut()
+                            .replace(format!("Mermaid init error: {}", e));
+                    }
+                }
+                Ok::<(), ()>(())
+            });
+            self.mermaid_engine.borrow_mut().replace(engine);
+            // One-time log for diagnostics
+            if !*self.mermaid_init_logged.borrow() {
+                eprintln!("Mermaid embedded bytes: {}", mermaid_embed::MERMAID_JS.len());
+                *self.mermaid_init_logged.borrow_mut() = true;
+            }
+        }
+
+        // Use cache if available
+        let key = Self::hash_str(code);
+        if let Some(svg) = self.mermaid_svg_cache.borrow().get(&key) {
+            return Some(svg.clone());
+        }
+
+        // Render fresh
+        let svg = self.mermaid_engine.borrow().as_ref().and_then(|engine| {
+            engine.ctx.with(|ctx| {
+                // Minimal DOM shim sufficient for mermaid.mermaidAPI.render
+                let wrapper = r#"
+                (function(id, code){
+                    var svgOut = null;
+                    mermaid.mermaidAPI.render(id, code, function(svg){ svgOut = svg; });
+                    if (typeof svgOut !== 'string' || svgOut.length === 0) {
+                        throw new Error('Mermaid render returned empty');
+                    }
+                    return svgOut;
+                })
+            "#;
+                let func: Function = match ctx.eval(wrapper) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        self.mermaid_last_error
+                            .borrow_mut()
+                            .replace(format!("Wrapper eval error: {}", e));
+                        return None;
+                    }
+                };
+                let id = format!("m{:016x}", key);
+                let svg: String = match func.call((id.as_str(), code)) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        self.mermaid_last_error
+                            .borrow_mut()
+                            .replace(format!("Mermaid call error: {}", e));
+                        return None;
+                    }
+                };
+                Some(svg)
+            })
+        });
+        if let Some(svg) = svg {
+            self.mermaid_svg_cache
+                .borrow_mut()
+                .insert(key, svg.clone());
+            self.mermaid_last_error.borrow_mut().take();
+            return Some(svg);
+        }
+        self.mermaid_last_error
+            .borrow_mut()
+            .replace("Mermaid render produced no SVG".to_string());
+        None
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    fn get_or_load_mermaid_texture(
+        &self,
+        ui: &egui::Ui,
+        code: &str,
+    ) -> Option<egui::TextureHandle> {
+        let key = Self::hash_str(code);
+        let width_bucket = (ui.available_width().ceil() as u32).saturating_sub(0) / 16 * 16;
+        let cache_key = format!("mermaid:{}:w{}", key, width_bucket);
+        if let Some(tex) = self.image_textures.borrow().get(&cache_key) {
+            return Some(tex.clone());
+        }
+        let svg = self.render_mermaid_to_svg_string(code)?;
+        let (img, _w, _h) = Self::svg_bytes_to_color_image(svg.as_bytes())?;
+        let tex = ui
+            .ctx()
+            .load_texture(cache_key.clone(), img, egui::TextureOptions::LINEAR);
+        self.image_textures
+            .borrow_mut()
+            .insert(cache_key, tex.clone());
+        Some(tex)
     }
 
     #[cfg(feature = "mermaid-quickjs")]
