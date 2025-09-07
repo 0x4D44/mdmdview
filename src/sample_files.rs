@@ -83,6 +83,12 @@ An SVG logo rendered via resvg/tiny-skia.
 
 ![SVG Logo](assets/samples/logo.svg "SVG sample logo")
 
+## WEBP Image
+
+A small WEBP sample is bundled for testing.
+
+![WEBP Sample](assets/samples/webp_sample.webp "WEBP sample")
+
 ## Mermaid Diagram (feature-gated)
 
 When the `mermaid-quickjs` feature is enabled, Mermaid code blocks are rendered as diagrams.
@@ -97,10 +103,9 @@ graph TD;
     D --> E;
 ```
 
-## WEBP Note
+## Notes
 
-To test WEBP locally, place a small `.webp` file under `assets/samples/` and reference it
-from a file in the `examples/` folder (see the added example markdown files).
+- The WEBP sample is at `assets/samples/webp_sample.webp`. See `examples/webp_test.md` for a standalone test file.
 
 "#;
 

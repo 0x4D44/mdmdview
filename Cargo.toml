@@ -42,7 +42,7 @@ codegen-units = 1
 panic = "abort"
 
 [features]
-default = []
+default = ["mermaid-quickjs"]
 # Enable JavaScript-based Mermaid rendering via QuickJS (optional; off by default)
 mermaid-quickjs = ["dep:rquickjs"]
 # Potential future: network Mermaid via Kroki, keep off and unimplemented for now
