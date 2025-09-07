@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180" viewBox="0 0 320 180">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1f6feb"/>
+      <stop offset="100%" stop-color="#39d353"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="320" height="180" fill="#121212"/>
+  <rect x="12" y="12" width="296" height="156" rx="12" ry="12" fill="url(#g)" opacity="0.15"/>
+  <circle cx="90" cy="90" r="46" fill="#f0f6fc" opacity="0.9"/>
+  <circle cx="90" cy="90" r="34" fill="#1f6feb" opacity="0.9"/>
+  <text x="160" y="82" font-size="22" font-family="Segoe UI, Roboto, Arial" fill="#f0f6fc">mdmdview</text>
+  <text x="160" y="110" font-size="12" font-family="Segoe UI, Roboto, Arial" fill="#d0d7de">SVG sample image</text>
+  <line x1="160" y1="118" x2="280" y2="118" stroke="#2f81f7" stroke-width="2" opacity="0.6"/>
+</svg>

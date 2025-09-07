@@ -18,8 +18,12 @@ webbrowser = "0.8"
 rfd = "0.14"
 anyhow = "1.0"
 env_logger = "0.10"
-image = "0.24"
+image = { version = "0.24", default-features = false, features = ["png", "jpeg", "gif", "bmp", "ico", "webp"] }
 unicode-segmentation = "1"
+usvg = { version = "0.43", default-features = false, features = ["text"] }
+resvg = "0.43"
+tiny-skia = "0.11"
+htmlescape = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
@@ -36,3 +40,13 @@ lto = true
 strip = true
 codegen-units = 1
 panic = "abort"
+
+[features]
+default = []
+# Enable JavaScript-based Mermaid rendering via QuickJS (optional; off by default)
+mermaid-quickjs = ["dep:rquickjs"]
+# Potential future: network Mermaid via Kroki, keep off and unimplemented for now
+
+[dependencies.rquickjs]
+version = "0.6"
+optional = true

@@ -297,6 +297,8 @@ impl MarkdownViewerApp {
         self.raw_buffer = self.current_content.clone();
         self.error_message = None;
         self.nav_request = None; // Reset any pending navigation
+                                 // Ensure scroll resets to top on new content
+        self.pending_scroll_to_element = Some(0);
 
         match self.renderer.parse(content) {
             Ok(elements) => {
@@ -321,6 +323,8 @@ impl MarkdownViewerApp {
             .unwrap_or("Unknown")
             .to_string();
 
+        let base = path.parent().map(|p| p.to_path_buf());
+        self.renderer.set_base_dir(base.as_deref());
         self.current_file = Some(path);
         self.load_content(&content, Some(filename));
         Ok(())
@@ -348,14 +352,20 @@ impl MarkdownViewerApp {
     /// Load a sample file by name
     pub fn load_sample(&mut self, sample: &SampleFile) {
         self.current_file = None;
+        // Samples have no file base-dir
+        self.renderer.set_base_dir(None);
         self.load_content(sample.content, Some(sample.title.to_string()));
+        // Scroll to top for new sample
+        self.pending_scroll_to_element = Some(0);
     }
 
     /// Close the current file and return to welcome screen
     pub fn close_current_file(&mut self) {
         self.current_file = None;
+        self.renderer.set_base_dir(None);
         if let Some(welcome) = SAMPLE_FILES.iter().find(|f| f.name == "welcome.md") {
             self.load_content(welcome.content, Some("Welcome".to_string()));
+            self.pending_scroll_to_element = Some(0);
         } else {
             // Fallback if welcome file is missing
             self.current_content.clear();

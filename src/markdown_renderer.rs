@@ -4,6 +4,7 @@ use egui::{Color32, RichText, Stroke};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
@@ -54,7 +55,15 @@ pub enum InlineSpan {
     Strong(String),
     Emphasis(String),
     Strikethrough(String),
-    Link { text: String, url: String },
+    Link {
+        text: String,
+        url: String,
+    },
+    Image {
+        src: String,
+        alt: String,
+        title: Option<String>,
+    },
 }
 
 /// Represents a rendered markdown element
@@ -97,6 +106,7 @@ pub struct MarkdownRenderer {
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
     emoji_textures: RefCell<HashMap<String, egui::TextureHandle>>,
+    image_textures: RefCell<HashMap<String, egui::TextureHandle>>,
     // Mapping of header id -> last rendered rect (for in-document navigation)
     header_rects: RefCell<HashMap<String, egui::Rect>>,
     // Last clicked internal anchor (e.g., "getting-started") for the app to consume
@@ -107,6 +117,8 @@ pub struct MarkdownRenderer {
     element_rects: RefCell<Vec<egui::Rect>>,
     // Optional highlight phrase (lowercased) for in-text highlighting
     highlight_phrase: RefCell<Option<String>>,
+    // Base directory used to resolve relative image paths
+    base_dir: RefCell<Option<PathBuf>>,
 }
 
 impl Default for MarkdownRenderer {
@@ -123,12 +135,21 @@ impl MarkdownRenderer {
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
             emoji_textures: RefCell::new(HashMap::new()),
+            image_textures: RefCell::new(HashMap::new()),
             header_rects: RefCell::new(HashMap::new()),
             pending_anchor: RefCell::new(None),
             link_counter: RefCell::new(0),
             element_rects: RefCell::new(Vec::new()),
             highlight_phrase: RefCell::new(None),
+            base_dir: RefCell::new(None),
         }
+    }
+
+    /// UI scale factor derived from body font size relative to default.
+    /// Used to scale non-text elements (e.g., images) consistently with zoom.
+    fn ui_scale(&self) -> f32 {
+        let default_body = FontSizes::default().body;
+        (self.font_sizes.body / default_body).clamp(0.5, 4.0)
     }
 
     /// Get current font sizes
@@ -173,6 +194,26 @@ impl MarkdownRenderer {
                 if !spans.is_empty() {
                     elements.push(MarkdownElement::Paragraph(spans));
                 }
+                Ok(next_idx)
+            }
+            // Images encountered outside paragraphs: treat as a single paragraph with an inline image
+            Event::Start(Tag::Image(_, url, title)) => {
+                let (alt, next_idx) = self.collect_until_tag_end(
+                    events,
+                    start + 1,
+                    Tag::Image(LinkType::Inline, "".into(), "".into()),
+                )?;
+                let mut spans: Vec<InlineSpan> = Vec::new();
+                spans.push(InlineSpan::Image {
+                    src: url.to_string(),
+                    alt,
+                    title: if title.is_empty() {
+                        None
+                    } else {
+                        Some(title.to_string())
+                    },
+                });
+                elements.push(MarkdownElement::Paragraph(spans));
                 Ok(next_idx)
             }
             Event::Start(Tag::Heading(level, _, _)) => {
@@ -270,6 +311,19 @@ impl MarkdownRenderer {
                 | InlineSpan::Strikethrough(t) => s.push_str(t),
                 InlineSpan::Code(t) => s.push_str(t),
                 InlineSpan::Link { text, .. } => s.push_str(text),
+                InlineSpan::Image { alt, title, .. } => {
+                    if !alt.is_empty() {
+                        s.push_str(alt);
+                    }
+                    if let Some(t) = title {
+                        if !t.is_empty() {
+                            if !s.is_empty() {
+                                s.push(' ');
+                            }
+                            s.push_str(t);
+                        }
+                    }
+                }
             }
         }
         s
@@ -455,6 +509,28 @@ impl MarkdownRenderer {
                     });
                     i = next_i;
                 }
+                Event::Start(Tag::Image(_, url, title)) => {
+                    if !text_buffer.is_empty() {
+                        spans.push(InlineSpan::Text(text_buffer.clone()));
+                        text_buffer.clear();
+                    }
+                    let url_str = url.to_string();
+                    let (alt_text, next_i) = self.collect_until_tag_end(
+                        events,
+                        i + 1,
+                        Tag::Image(LinkType::Inline, "".into(), "".into()),
+                    )?;
+                    spans.push(InlineSpan::Image {
+                        src: url_str,
+                        alt: alt_text,
+                        title: if title.is_empty() {
+                            None
+                        } else {
+                            Some(title.to_string())
+                        },
+                    });
+                    i = next_i;
+                }
                 _ => {
                     i += 1;
                 }
@@ -609,6 +685,24 @@ impl MarkdownRenderer {
                                 spans.push(InlineSpan::Link {
                                     text: link_text,
                                     url: url_str,
+                                });
+                                i = next;
+                            }
+                            Event::Start(Tag::Image(_, url, title)) => {
+                                let url_str = url.to_string();
+                                let (alt_text, next) = self.collect_until_tag_end(
+                                    events,
+                                    i + 1,
+                                    Tag::Image(LinkType::Inline, "".into(), "".into()),
+                                )?;
+                                spans.push(InlineSpan::Image {
+                                    src: url_str,
+                                    alt: alt_text,
+                                    title: if title.is_empty() {
+                                        None
+                                    } else {
+                                        Some(title.to_string())
+                                    },
                                 });
                                 i = next;
                             }
@@ -983,6 +1077,66 @@ impl MarkdownRenderer {
                     }
                 }
             }
+            InlineSpan::Image { src, alt, title } => {
+                // Resolve path
+                let resolved = self.resolve_image_path(src);
+                let available_w = ui.available_width().max(1.0);
+                // Try to get or load texture
+                if let Some((tex, w, h)) = self.get_or_load_image_texture(ui, &resolved) {
+                    let (tw, th) = (w as f32, h as f32);
+                    // Scale logic:
+                    // - Start at UI scale (e.g., 1.0 for 100%, 1.1 for 110%).
+                    // - Only downscale further if it would exceed available width.
+                    let base_scale = self.ui_scale();
+                    let scaled_w = tw * base_scale;
+                    let scale = if scaled_w > available_w {
+                        (available_w / tw).clamp(0.01, 4.0)
+                    } else {
+                        base_scale
+                    };
+                    let size = egui::vec2((tw * scale).round(), (th * scale).round());
+                    let image = egui::Image::new(&tex).fit_to_exact_size(size);
+                    let resp = ui.add(image);
+                    if let Some(t) = title {
+                        if !t.is_empty() {
+                            if resp.hovered() {
+                                resp.on_hover_text(t.clone());
+                            }
+                            // Subtle caption below image
+                            ui.add_space(2.0);
+                            ui.label(
+                                RichText::new(t.clone())
+                                    .size(self.font_sizes.body - 2.0)
+                                    .color(Color32::from_rgb(140, 140, 140)),
+                            );
+                        }
+                    }
+                    ui.add_space(6.0);
+                } else {
+                    // Placeholder with alt and error info
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(30, 30, 30))
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                        .inner_margin(8.0)
+                        .show(ui, |ui| {
+                            let msg = if src.starts_with("http://") || src.starts_with("https://") {
+                                "Remote images are disabled"
+                            } else {
+                                "Image not found or unsupported"
+                            };
+                            let label = if alt.is_empty() {
+                                src.as_str()
+                            } else {
+                                alt.as_str()
+                            };
+                            ui.label(
+                                RichText::new(format!("{}\n{}", label, msg))
+                                    .size(self.font_sizes.body),
+                            );
+                        });
+                    ui.add_space(6.0);
+                }
+            }
         }
     }
 
@@ -1196,6 +1350,11 @@ impl MarkdownRenderer {
                             fonts.layout_no_wrap(code.trim().to_string(), mono, Color32::WHITE);
                         width += galley.size().x + 6.0; // small padding for code background
                     }
+                    InlineSpan::Image { .. } => {
+                        // Approximate: image width at current scale, capped by available width
+                        // We don't have the natural width here; approximate with available width.
+                        width += ui.available_width();
+                    }
                 }
                 width += 4.0; // spacing between spans
             }
@@ -1356,6 +1515,14 @@ impl MarkdownRenderer {
     fn render_code_block(&self, ui: &mut egui::Ui, language: Option<&str>, code: &str) {
         ui.add_space(8.0);
 
+        // Special handling for Mermaid diagrams
+        if let Some(lang) = language {
+            if lang.eq_ignore_ascii_case("mermaid") && self.render_mermaid_block(ui, code) {
+                ui.add_space(8.0);
+                return;
+            }
+        }
+
         egui::Frame::none()
             .fill(Color32::from_rgb(25, 25, 25))
             .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
@@ -1465,6 +1632,82 @@ impl MarkdownRenderer {
             });
 
         ui.add_space(8.0);
+    }
+
+    /// Try to render a Mermaid diagram. Returns true if handled (rendered or placeholder drawn).
+    fn render_mermaid_block(&self, ui: &mut egui::Ui, code: &str) -> bool {
+        // If QuickJS feature is enabled, attempt rendering to SVG then rasterize like normal SVG.
+        #[cfg(feature = "mermaid-quickjs")]
+        {
+            if let Some(svg) = Self::render_mermaid_to_svg_string(code) {
+                // Convert SVG string to image and draw like an inline image
+                if let Some((img, w, h)) = Self::svg_bytes_to_color_image(svg.as_bytes()) {
+                    let tex = ui.ctx().load_texture(
+                        format!("mermaid:{}", crate::markdown_renderer::hash_str(code)),
+                        img,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    let available_w = ui.available_width().max(1.0);
+                    let (tw, th) = (w as f32, h as f32);
+                    let scale = (available_w / tw).clamp(0.01, 4.0);
+                    let size = egui::vec2(tw * scale, th * scale);
+                    ui.add(egui::Image::new(&tex).fit_to_exact_size(size));
+                    return true;
+                }
+            }
+            // If rendering failed, fall through to placeholder
+        }
+
+        // Default: show an informational placeholder and the source code block
+        egui::Frame::none()
+            .fill(Color32::from_rgb(25, 25, 25))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+            .inner_margin(8.0)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new("Mermaid rendering disabled; showing source.")
+                        .color(Color32::from_rgb(200, 160, 80)),
+                );
+            });
+        let _ = code; // keep parameter used in non-feature builds
+        false
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    fn render_mermaid_to_svg_string(code: &str) -> Option<String> {
+        use rquickjs::{function::Func, Context, FromJs, Runtime, Value};
+        // Mermaid JS is not bundled yet. This function sketches the runtime wiring.
+        // TODO: embed mermaid.min.js into the binary and evaluate it here.
+        let rt = Runtime::new().ok()?;
+        let ctx = Context::full(&rt).ok()?;
+        let guard = ctx.guard();
+        let svg = ctx.with(|ctx| {
+            // Minimal stub: wrap code in an SVG placeholder until mermaid.js is embedded.
+            let s = format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='600' height='200'>\
+                   <rect width='100%' height='100%' fill='rgb(30,30,30)'/>\
+                   <text x='10' y='20' fill='rgb(200,160,80)'>Mermaid feature enabled, renderer stub</text>\
+                   <foreignObject x='10' y='40' width='580' height='150'>\
+                     <body xmlns='http://www.w3.org/1999/xhtml'>\
+                       <pre style='color:white; font: 12px monospace'>{}</pre>\
+                     </body>\
+                   </foreignObject>\
+                 </svg>",
+                htmlescape::encode_minimal(code)
+            );
+            Ok::<_, ()>(s)
+        }).ok()?;
+        drop(guard);
+        Some(svg)
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    fn hash_str(s: &str) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        s.hash(&mut h);
+        h.finish()
     }
 
     /// Render a table using an egui Grid
@@ -1679,6 +1922,111 @@ impl MarkdownRenderer {
         }
     }
 
+    /// Set the base directory for resolving relative image paths
+    pub fn set_base_dir(&self, dir: Option<&Path>) {
+        if let Some(d) = dir {
+            self.base_dir.borrow_mut().replace(d.to_path_buf());
+        } else {
+            self.base_dir.borrow_mut().take();
+        }
+    }
+
+    fn resolve_image_path(&self, src: &str) -> String {
+        if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:") {
+            // Keep as-is; we don't fetch remote or parse data URIs yet
+            return src.to_string();
+        }
+        let p = Path::new(src);
+        if p.is_absolute() {
+            return src.to_string();
+        }
+        if let Some(base) = self.base_dir.borrow().as_ref() {
+            let joined = base.join(p);
+            return joined.to_string_lossy().into_owned();
+        }
+        src.to_string()
+    }
+
+    fn get_or_load_image_texture(
+        &self,
+        ui: &egui::Ui,
+        resolved_src: &str,
+    ) -> Option<(egui::TextureHandle, u32, u32)> {
+        // Reject remote for now
+        if resolved_src.starts_with("http://") || resolved_src.starts_with("https://") {
+            return None;
+        }
+
+        if let Some(tex) = self.image_textures.borrow().get(resolved_src) {
+            let size = tex.size();
+            return Some((tex.clone(), size[0] as u32, size[1] as u32));
+        }
+
+        // Load from disk
+        let path = Path::new(resolved_src);
+        let bytes = std::fs::read(path).ok()?;
+        let (color_image, w, h) = if Self::is_svg_path(resolved_src) {
+            match Self::svg_bytes_to_color_image(&bytes) {
+                Some((ci, w, h)) => (ci, w, h),
+                None => return None,
+            }
+        } else {
+            let img = image::load_from_memory(&bytes).ok()?;
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            let ci = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+            (ci, w, h)
+        };
+        let tex = ui.ctx().load_texture(
+            format!("img:{}", resolved_src),
+            color_image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.image_textures
+            .borrow_mut()
+            .insert(resolved_src.to_string(), tex.clone());
+        Some((tex, w, h))
+    }
+
+    fn is_svg_path(p: &str) -> bool {
+        p.rsplit('.')
+            .next()
+            .map(|e| e.eq_ignore_ascii_case("svg"))
+            .unwrap_or(false)
+    }
+
+    fn svg_bytes_to_color_image(bytes: &[u8]) -> Option<(egui::ColorImage, u32, u32)> {
+        // Parse SVG
+        let mut opt = usvg::Options::default();
+        // Load system fonts so <text> elements render via resvg
+        let mut db = usvg::fontdb::Database::new();
+        db.load_system_fonts();
+        opt.fontdb = std::sync::Arc::new(db);
+        let tree = usvg::Tree::from_data(bytes, &opt).ok()?;
+        // Determine output size in pixels
+        let sz = tree.size();
+        let pix = sz.to_int_size();
+        let (mut w, mut h) = (pix.width(), pix.height());
+        if w == 0 || h == 0 {
+            // Fallback if unspecified
+            w = 256;
+            h = 256;
+        }
+        // Clamp to a reasonable texture size
+        let max_side: u32 = 4096;
+        if w > max_side || h > max_side {
+            let scale = (max_side as f32 / w as f32).min(max_side as f32 / h as f32);
+            w = (w as f32 * scale) as u32;
+            h = (h as f32 * scale) as u32;
+        }
+        let mut pixmap = tiny_skia::Pixmap::new(w, h)?;
+        let mut pmut = pixmap.as_mut();
+        resvg::render(&tree, tiny_skia::Transform::identity(), &mut pmut);
+        let data = pixmap.data();
+        let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], data);
+        Some((img, w, h))
+    }
+
     /// Find syntax definition for a given language name
     /// Maps common language names to their syntax definitions
     fn find_syntax_for_language(&self, lang: &str) -> Option<&syntect::parsing::SyntaxReference> {
@@ -1884,5 +2232,38 @@ mod tests {
         ] {
             assert!(ids.iter().any(|id| id == expected), "missing id {expected}");
         }
+    }
+
+    #[test]
+    fn test_inline_image_parsing() {
+        let renderer = MarkdownRenderer::new();
+        let md = "Here is an image: ![Alt text](images/pic.webp \"Title\") end.";
+        let parsed = renderer.parse(md).expect("parse ok");
+        // Expect a single paragraph
+        assert_eq!(parsed.len(), 1);
+        match &parsed[0] {
+            MarkdownElement::Paragraph(spans) => {
+                // Find the image span
+                let img = spans.iter().find(|s| matches!(s, InlineSpan::Image { .. }));
+                assert!(img.is_some(), "image inline span present");
+                if let InlineSpan::Image { src, alt, title } = img.unwrap() {
+                    assert_eq!(src, "images/pic.webp");
+                    assert_eq!(alt, "Alt text");
+                    assert_eq!(title.as_deref(), Some("Title"));
+                }
+            }
+            other => panic!("Expected Paragraph, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_image_text_in_plain_text_index() {
+        let renderer = MarkdownRenderer::new();
+        let md = "![Diagram](./a.png \"Flow\")";
+        let parsed = renderer.parse(md).expect("parse ok");
+        let text = MarkdownRenderer::element_plain_text(&parsed[0]);
+        // Plain text should include alt and title
+        assert!(text.contains("Diagram"));
+        assert!(text.contains("Flow"));
     }
 }
