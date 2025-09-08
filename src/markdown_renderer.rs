@@ -4,6 +4,7 @@ use egui::{Color32, RichText, Stroke};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{Receiver, Sender};
 use std::path::{Path, PathBuf};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
@@ -134,6 +135,12 @@ pub struct MarkdownRenderer {
     // Cache for image/diagram textures
     // Base directory used to resolve relative image paths
     base_dir: RefCell<Option<PathBuf>>,
+    // Kroki (default Mermaid path) state
+    kroki_pending: RefCell<HashSet<u64>>,                 // code_hashes in flight
+    kroki_svg_cache: RefCell<HashMap<u64, Vec<u8>>>,      // code_hash -> image bytes (PNG preferred)
+    kroki_errors: RefCell<HashMap<u64, String>>,          // code_hash -> last error
+    kroki_tx: Sender<(u64, Result<Vec<u8>, String>)>,     // background -> UI thread
+    kroki_rx: Receiver<(u64, Result<Vec<u8>, String>)>,   // background -> UI thread
     #[cfg(feature = "mermaid-quickjs")]
     mermaid_engine: RefCell<Option<MermaidEngine>>,
     #[cfg(feature = "mermaid-quickjs")]
@@ -155,6 +162,7 @@ impl Default for MarkdownRenderer {
 impl MarkdownRenderer {
     /// Create a new markdown renderer
     pub fn new() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
         Self {
             font_sizes: FontSizes::default(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
@@ -167,6 +175,11 @@ impl MarkdownRenderer {
             element_rects: RefCell::new(Vec::new()),
             highlight_phrase: RefCell::new(None),
             base_dir: RefCell::new(None),
+            kroki_pending: RefCell::new(HashSet::new()),
+            kroki_svg_cache: RefCell::new(HashMap::new()),
+            kroki_errors: RefCell::new(HashMap::new()),
+            kroki_tx: tx,
+            kroki_rx: rx,
             #[cfg(feature = "mermaid-quickjs")]
             mermaid_engine: RefCell::new(None),
             #[cfg(feature = "mermaid-quickjs")]
@@ -279,7 +292,7 @@ impl MarkdownRenderer {
                 Ok(next_idx)
             }
             Event::Start(Tag::List(first_item)) => {
-                let (items, next_idx) = self.parse_list(events, start + 1, *first_item)?;
+                let (items, next_idx) = self.parse_list(events, start + 1, *first_item, 0)?;
                 elements.push(MarkdownElement::List {
                     ordered: first_item.is_some(),
                     items,
@@ -662,6 +675,7 @@ impl MarkdownRenderer {
         events: &[Event],
         start: usize,
         first_item: Option<u64>,
+        depth: usize,
     ) -> Result<(Vec<Vec<InlineSpan>>, usize), anyhow::Error> {
         let mut items: Vec<Vec<InlineSpan>> = Vec::new();
         let mut i = start;
@@ -743,17 +757,19 @@ impl MarkdownRenderer {
                             }
                             Event::Start(Tag::List(child_first)) => {
                                 let (child_items, next) =
-                                    self.parse_list(events, i + 1, *child_first)?;
+                                    self.parse_list(events, i + 1, *child_first, depth + 1)?;
                                 i = next;
                                 let ordered_child = child_first.is_some();
                                 for (idx, child) in child_items.into_iter().enumerate() {
                                     spans.push(InlineSpan::Text("\n".to_string()));
+                                    // Indentation: 4 spaces per nested level
+                                    let indent = " ".repeat(4 * (depth + 1));
                                     let marker = if ordered_child {
                                         format!("{}.", idx + 1)
                                     } else {
                                         "•".to_string()
                                     };
-                                    spans.push(InlineSpan::Text(format!("{} ", marker)));
+                                    spans.push(InlineSpan::Text(format!("{}{} ", indent, marker)));
                                     spans.extend(child);
                                 }
                             }
@@ -994,6 +1010,9 @@ impl MarkdownRenderer {
             });
             self.element_rects.borrow_mut().push(ir.response.rect);
         }
+        // Add a little extra breathing room at the end so
+        // the final line doesn't sit flush under the status bar.
+        ui.add_space(16.0);
     }
 
     /// Render inline spans in a wrapped horizontal layout
@@ -1009,12 +1028,25 @@ impl MarkdownRenderer {
 
     /// Fix Unicode characters that may not render properly in the default font
     fn fix_unicode_chars(&self, text: &str) -> String {
-        // For now, replace problematic Unicode arrows with ASCII equivalents
-        // This is a conservative approach - only replace known problematic characters
+        // Normalize a few problematic glyphs for better cross-font rendering
+        // - Replace arrows with ASCII sequences
+        // - Map non/soft-breaking hyphens to regular hyphen
+        // - Normalize Unicode minus and exotic spaces
         text.replace('→', " -> ")
             .replace('←', " <- ")
             .replace('↑', " ^ ")
             .replace('↓', " v ")
+            // hyphen family
+            .replace('\u{2011}', "-") // non‑breaking hyphen
+            .replace('\u{00AD}', "-") // soft hyphen (invisible)
+            .replace('\u{2010}', "-") // hyphen
+            .replace('\u{2212}', "-") // unicode minus → ASCII hyphen-minus
+            // dashes: keep readable by mapping to ASCII hyphen (single)
+            .replace('\u{2013}', "-") // en dash
+            .replace('\u{2014}', "-") // em dash
+            // spaces
+            .replace('\u{00A0}', " ")  // non‑breaking space → space
+            .replace('\u{202F}', " ")  // narrow no‑break space → space
     }
 
     /// Render a single inline span
@@ -1225,7 +1257,9 @@ impl MarkdownRenderer {
         size: f32,
         style: InlineStyle,
     ) {
+        // First expand emoji shortcodes, then superscript ^...^ notation
         let expanded = Self::expand_shortcodes(segment);
+        let expanded = Self::expand_superscripts(&expanded);
         if let Some(h) = self.highlight_phrase.borrow().as_ref() {
             let lower = expanded.to_ascii_lowercase();
             let mut start_at = 0usize;
@@ -1446,6 +1480,87 @@ impl MarkdownRenderer {
         out
     }
 
+    // Expand ^...^ segments into Unicode superscript characters when available.
+    // Example: "5^th^" -> "5ᵗʰ"
+    fn expand_superscripts(s: &str) -> String {
+        if !s.contains('^') {
+            return s.to_string();
+        }
+        let mut out = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '^' {
+                // Collect until next caret
+                let mut buf = String::new();
+                while let Some(&nc) = chars.peek() {
+                    chars.next();
+                    if nc == '^' {
+                        break;
+                    }
+                    buf.push(nc);
+                }
+                if !buf.is_empty() {
+                    out.push_str(&Self::to_superscript(&buf));
+                } else {
+                    // Lone caret, keep as-is
+                    out.push('^');
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn to_superscript(s: &str) -> String {
+        s.chars()
+            .map(|c| match c {
+                '0' => '⁰',
+                '1' => '¹',
+                '2' => '²',
+                '3' => '³',
+                '4' => '⁴',
+                '5' => '⁵',
+                '6' => '⁶',
+                '7' => '⁷',
+                '8' => '⁸',
+                '9' => '⁹',
+                '+' => '⁺',
+                '-' => '⁻',
+                '=' => '⁼',
+                '(' => '⁽',
+                ')' => '⁾',
+                'a' | 'A' => 'ᵃ',
+                'b' | 'B' => 'ᵇ',
+                'c' | 'C' => 'ᶜ',
+                'd' | 'D' => 'ᵈ',
+                'e' | 'E' => 'ᵉ',
+                'f' | 'F' => 'ᶠ',
+                'g' | 'G' => 'ᵍ',
+                'h' | 'H' => 'ʰ',
+                'i' | 'I' => 'ⁱ',
+                'j' | 'J' => 'ʲ',
+                'k' | 'K' => 'ᵏ',
+                'l' | 'L' => 'ˡ',
+                'm' | 'M' => 'ᵐ',
+                'n' | 'N' => 'ⁿ',
+                'o' | 'O' => 'ᵒ',
+                'p' | 'P' => 'ᵖ',
+                'q' | 'Q' => 'ᑫ', // fallback; approximate
+                'r' | 'R' => 'ʳ',
+                's' | 'S' => 'ˢ',
+                't' | 'T' => 'ᵗ',
+                'u' | 'U' => 'ᵘ',
+                'v' | 'V' => 'ᵛ',
+                'w' | 'W' => 'ʷ',
+                'x' | 'X' => 'ˣ',
+                'y' | 'Y' => 'ʸ',
+                'z' | 'Z' => 'ᶻ',
+                other => other,
+            })
+            .collect()
+    }
+
     fn generate_emoji_image(&self, emoji: &str, size: usize) -> egui::ColorImage {
         // Simple procedural placeholder icons to keep binary small and avoid external assets
         // Each emoji gets a colored circle and a simple accent
@@ -1519,7 +1634,7 @@ impl MarkdownRenderer {
                 }
             }
 
-            for (li, line) in lines.into_iter().enumerate() {
+            for (li, mut line) in lines.into_iter().enumerate() {
                 ui.horizontal_wrapped(|ui| {
                     if li == 0 {
                         let marker = if ordered {
@@ -1533,7 +1648,19 @@ impl MarkdownRenderer {
                                 .color(Color32::from_rgb(180, 180, 180)),
                         );
                     } else {
-                        ui.add_space(18.0);
+                        // Determine additional indentation from leading spaces in this line
+                        let mut leading_spaces = 0usize;
+                        if let Some(InlineSpan::Text(t0)) = line.first() {
+                            leading_spaces = t0.chars().take_while(|c| *c == ' ').count();
+                        }
+                        if leading_spaces > 0 {
+                            if let Some(InlineSpan::Text(t0)) = line.get_mut(0) {
+                                let trimmed = t0.trim_start_matches(' ').to_string();
+                                *t0 = trimmed;
+                            }
+                        }
+                        let indent_px = 18.0 + (leading_spaces as f32) * 6.0;
+                        ui.add_space(indent_px);
                     }
                     ui.spacing_mut().item_spacing.x = 0.0;
                     for span in &line {
@@ -1671,6 +1798,9 @@ impl MarkdownRenderer {
 
     /// Try to render a Mermaid diagram. Returns true if handled (rendered or placeholder drawn).
     fn render_mermaid_block(&self, ui: &mut egui::Ui, code: &str) -> bool {
+        // First, drain any completed Kroki jobs into local caches.
+        self.poll_kroki_results();
+
         // If QuickJS feature is enabled, attempt rendering to SVG then rasterize like normal SVG.
         #[cfg(feature = "mermaid-quickjs")]
         {
@@ -1740,19 +1870,100 @@ impl MarkdownRenderer {
             }
         }
 
-        // Default: show an informational placeholder and the source code block
+        // Default path: render via Kroki service (non-blocking)
+        let key = Self::hash_str(code);
+
+        // If we already have an SVG for this diagram, rasterize to a texture and draw it
+        if let Some(img_bytes) = self.kroki_svg_cache.borrow().get(&key) {
+            // Use a width-bucketed texture cache key to avoid re-rasterizing too often
+            let width_bucket = (ui.available_width().ceil() as u32) / 32 * 32;
+            let cache_key = format!("mermaid:{}:w{}", key, width_bucket);
+            if let Some(tex) = self.image_textures.borrow().get(&cache_key) {
+                let size = tex.size();
+                let (tw, th) = (size[0] as f32, size[1] as f32);
+                let available_w = ui.available_width().max(1.0);
+                let base_scale = self.ui_scale();
+                let scaled_w = tw * base_scale;
+                let scale = if scaled_w > available_w {
+                    (available_w / tw).clamp(0.01, 4.0)
+                } else {
+                    base_scale
+                };
+                let size = egui::vec2((tw * scale).round(), (th * scale).round());
+                ui.add(egui::Image::new(tex).fit_to_exact_size(size));
+                return true;
+            }
+
+            // Decode image bytes (prefer PNG). Fallback to SVG if not raster.
+            if let Some((img, w, h)) = Self::bytes_to_color_image_guess(img_bytes, Self::mermaid_bg_fill()) {
+                let tex = ui
+                    .ctx()
+                    .load_texture(cache_key.clone(), img, egui::TextureOptions::LINEAR);
+                self.image_textures
+                    .borrow_mut()
+                    .insert(cache_key, tex.clone());
+                // Draw now
+                let (tw, th) = (w as f32, h as f32);
+                let available_w = ui.available_width().max(1.0);
+                let base_scale = self.ui_scale();
+                let scaled_w = tw * base_scale;
+                let scale = if scaled_w > available_w {
+                    (available_w / tw).clamp(0.01, 4.0)
+                } else {
+                    base_scale
+                };
+                let size = egui::vec2((tw * scale).round(), (th * scale).round());
+                ui.add(egui::Image::new(&tex).fit_to_exact_size(size));
+                return true;
+            } else {
+                // Decode failed; record error and fall through to message/source
+                self.kroki_errors
+                    .borrow_mut()
+                    .insert(key, "Failed to decode diagram bytes".to_string());
+            }
+        }
+
+        // If there was a prior error, show diagnostics and let caller show source
+        if let Some(err) = self.kroki_errors.borrow().get(&key) {
+            egui::Frame::none()
+                .fill(Color32::from_rgb(25, 25, 25))
+                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "Mermaid render failed via Kroki; showing source.\n{}",
+                            err
+                        ))
+                        .color(Color32::from_rgb(200, 160, 80)),
+                    );
+                });
+            return false; // let caller render the source block
+        }
+
+        // If no job is pending, kick one off now
+        if !self.kroki_pending.borrow().contains(&key) {
+            self.spawn_kroki_job(key, code);
+            self.kroki_pending.borrow_mut().insert(key);
+            ui.ctx().request_repaint();
+        }
+
+        // Show placeholder while rendering
         egui::Frame::none()
             .fill(Color32::from_rgb(25, 25, 25))
             .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
             .inner_margin(8.0)
             .show(ui, |ui| {
+                let url = self.kroki_base_url();
                 ui.label(
-                    RichText::new("Mermaid rendering disabled; showing source.")
-                        .color(Color32::from_rgb(200, 160, 80)),
+                    RichText::new(format!(
+                        "Rendering diagram via Kroki…\n{}",
+                        url
+                    ))
+                    .color(Color32::from_rgb(160, 200, 240)),
                 );
             });
-        let _ = code; // keep parameter used in non-feature builds
-        false
+        true
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -1906,13 +2117,182 @@ impl MarkdownRenderer {
         Some(tex)
     }
 
-    #[cfg(feature = "mermaid-quickjs")]
     fn hash_str(s: &str) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut h = DefaultHasher::new();
         s.hash(&mut h);
         h.finish()
+    }
+
+    // Drain any completed Kroki jobs and cache their results
+    fn poll_kroki_results(&self) {
+        loop {
+            match self.kroki_rx.try_recv() {
+                Ok((key, Ok(svg))) => {
+                    self.kroki_svg_cache.borrow_mut().insert(key, svg);
+                    self.kroki_pending.borrow_mut().remove(&key);
+                }
+                Ok((key, Err(err))) => {
+                    self.kroki_errors.borrow_mut().insert(key, err);
+                    self.kroki_pending.borrow_mut().remove(&key);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+    }
+
+    fn kroki_base_url(&self) -> String {
+        std::env::var("MDMDVIEW_KROKI_URL").unwrap_or_else(|_| "https://kroki.io".to_string())
+    }
+
+    fn spawn_kroki_job(&self, key: u64, code: &str) {
+        let tx = self.kroki_tx.clone();
+        // Prefer PNG to avoid client-side SVG CSS/foreignObject limitations
+        let url = format!("{}/mermaid/png", self.kroki_base_url());
+        let payload = self.wrap_mermaid_theme(code);
+        std::thread::spawn(move || {
+            let result = (|| -> Result<Vec<u8>, String> {
+                // Send Mermaid code to Kroki and expect SVG in response
+                let req = ureq::post(&url).set("Content-Type", "text/plain");
+                let resp = req.send_string(&payload).map_err(|e| format!("ureq error: {}", e))?;
+                if resp.status() >= 200 && resp.status() < 300 {
+                    let mut bytes: Vec<u8> = Vec::new();
+                    let mut r = resp.into_reader();
+                    use std::io::Read as _;
+                    r.read_to_end(&mut bytes)
+                        .map_err(|e| format!("read body: {}", e))?;
+                    if bytes.is_empty() {
+                        return Err("Empty SVG from Kroki".to_string());
+                    }
+                    Ok(bytes)
+                } else {
+                    Err(format!("HTTP {} from Kroki", resp.status()))
+                }
+            })();
+            let _ = tx.send((key, result));
+        });
+    }
+
+    fn wrap_mermaid_theme(&self, code: &str) -> String {
+        // If user already provided an init block, respect it
+        if code.contains("%%{") && code.contains("}%%") && code.contains("init") {
+            return code.to_string();
+        }
+        // Pastel palette defaults (nice contrast on dark/light UIs)
+        let def_main_bkg = "#FFF8DB"; // soft warm yellow
+        let def_primary = "#D7EEFF"; // pastel blue (nodes)
+        let def_primary_border = "#9BB2C8"; // muted blue border
+        let def_primary_text = "#1C2430"; // dark slate text
+        let def_secondary = "#DFF5E1"; // pastel green
+        let def_tertiary = "#E9E2FF"; // pastel lavender
+        let def_line = "#6B7A90"; // slate lines/arrows
+        let def_text = "#1C2430"; // general text
+        let def_cluster_bkg = "#FFF1C1"; // soft yellow, slightly deeper
+        let def_cluster_border = "#E5C07B"; // golden
+        let def_default_link = def_line;
+        let def_title = def_text;
+        let def_label_bg = def_main_bkg;
+        let def_edge_label_bg = def_main_bkg;
+
+        // Allow overrides via env vars (keep defaults above if absent)
+        let theme_name = std::env::var("MDMDVIEW_MERMAID_THEME").unwrap_or_else(|_| "base".to_string());
+        let main_bkg = std::env::var("MDMDVIEW_MERMAID_MAIN_BKG").unwrap_or_else(|_| def_main_bkg.to_string());
+        let primary = std::env::var("MDMDVIEW_MERMAID_PRIMARY_COLOR").unwrap_or_else(|_| def_primary.to_string());
+        let primary_border = std::env::var("MDMDVIEW_MERMAID_PRIMARY_BORDER").unwrap_or_else(|_| def_primary_border.to_string());
+        let primary_text = std::env::var("MDMDVIEW_MERMAID_PRIMARY_TEXT").unwrap_or_else(|_| def_primary_text.to_string());
+        let secondary = std::env::var("MDMDVIEW_MERMAID_SECONDARY_COLOR").unwrap_or_else(|_| def_secondary.to_string());
+        let tertiary = std::env::var("MDMDVIEW_MERMAID_TERTIARY_COLOR").unwrap_or_else(|_| def_tertiary.to_string());
+        let line = std::env::var("MDMDVIEW_MERMAID_LINE_COLOR").unwrap_or_else(|_| def_line.to_string());
+        let text = std::env::var("MDMDVIEW_MERMAID_TEXT_COLOR").unwrap_or_else(|_| def_text.to_string());
+        let cluster_bkg = std::env::var("MDMDVIEW_MERMAID_CLUSTER_BKG").unwrap_or_else(|_| def_cluster_bkg.to_string());
+        let cluster_border = std::env::var("MDMDVIEW_MERMAID_CLUSTER_BORDER").unwrap_or_else(|_| def_cluster_border.to_string());
+        let default_link = std::env::var("MDMDVIEW_MERMAID_LINK_COLOR").unwrap_or_else(|_| def_default_link.to_string());
+        let title = std::env::var("MDMDVIEW_MERMAID_TITLE_COLOR").unwrap_or_else(|_| def_title.to_string());
+        let label_bg = std::env::var("MDMDVIEW_MERMAID_LABEL_BG").unwrap_or_else(|_| def_label_bg.to_string());
+        let edge_label_bg = std::env::var("MDMDVIEW_MERMAID_EDGE_LABEL_BG").unwrap_or_else(|_| def_edge_label_bg.to_string());
+
+        let theme = format!(
+            concat!(
+                "%%{{init: {{\"theme\": \"{}\", \"themeVariables\": {{",
+                "\"background\": \"{}\", ",
+                "\"mainBkg\": \"{}\", ",
+                "\"textColor\": \"{}\", ",
+                "\"titleColor\": \"{}\", ",
+                "\"primaryColor\": \"{}\", ",
+                "\"primaryBorderColor\": \"{}\", ",
+                "\"primaryTextColor\": \"{}\", ",
+                "\"secondaryColor\": \"{}\", ",
+                "\"tertiaryColor\": \"{}\", ",
+                "\"lineColor\": \"{}\", ",
+                "\"defaultLinkColor\": \"{}\", ",
+                "\"clusterBkg\": \"{}\", ",
+                "\"clusterBorder\": \"{}\", ",
+                "\"labelBackground\": \"{}\", ",
+                "\"edgeLabelBackground\": \"{}\"",
+                "}} }}%%\n"
+            ),
+            theme_name,
+            main_bkg,
+            main_bkg,
+            text,
+            title,
+            primary,
+            primary_border,
+            primary_text,
+            secondary,
+            tertiary,
+            line,
+            default_link,
+            cluster_bkg,
+            cluster_border,
+            label_bg,
+            edge_label_bg
+        );
+        format!("{}{}", theme, code)
+    }
+
+    // Choose background fill for Mermaid rasterization, based on env
+    fn mermaid_bg_fill() -> Option<[u8; 4]> {
+        // Preferred: explicit color
+        if let Ok(hex) = std::env::var("MDMDVIEW_MERMAID_BG_COLOR") {
+            if let Some(rgba) = Self::parse_hex_color(&hex) {
+                return Some(rgba);
+            }
+        }
+        // Mode selector; default to the theme's main background
+        let mode = std::env::var("MDMDVIEW_MERMAID_BG").unwrap_or_else(|_| "theme".to_string());
+        match mode.as_str() {
+            "transparent" => None,
+            "dark" => Some([20, 20, 20, 255]),
+            "light" => Some([255, 255, 255, 255]),
+            _ /* theme */ => {
+                let hex = std::env::var("MDMDVIEW_MERMAID_MAIN_BKG").unwrap_or_else(|_| "#FFF8DB".to_string());
+                Self::parse_hex_color(&hex).or(Some([255, 248, 219, 255]))
+            }
+        }
+    }
+
+    fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
+        let t = s.trim();
+        let hex = t.strip_prefix('#').unwrap_or(t);
+        let (r, g, b, a) = match hex.len() {
+            6 => (
+                u8::from_str_radix(&hex[0..2], 16).ok()?,
+                u8::from_str_radix(&hex[2..4], 16).ok()?,
+                u8::from_str_radix(&hex[4..6], 16).ok()?,
+                255,
+            ),
+            8 => (
+                u8::from_str_radix(&hex[0..2], 16).ok()?,
+                u8::from_str_radix(&hex[2..4], 16).ok()?,
+                u8::from_str_radix(&hex[4..6], 16).ok()?,
+                u8::from_str_radix(&hex[6..8], 16).ok()?,
+            ),
+            _ => return None,
+        };
+        Some([r, g, b, a])
     }
 
     /// Render a table using an egui Grid
@@ -2201,6 +2581,13 @@ impl MarkdownRenderer {
     }
 
     fn svg_bytes_to_color_image(bytes: &[u8]) -> Option<(egui::ColorImage, u32, u32)> {
+        Self::svg_bytes_to_color_image_with_bg(bytes, None)
+    }
+
+    fn svg_bytes_to_color_image_with_bg(
+        bytes: &[u8],
+        bg: Option<[u8; 4]>,
+    ) -> Option<(egui::ColorImage, u32, u32)> {
         // Parse SVG
         let mut opt = usvg::Options::default();
         // Load system fonts so <text> elements render via resvg
@@ -2225,11 +2612,45 @@ impl MarkdownRenderer {
             h = (h as f32 * scale) as u32;
         }
         let mut pixmap = tiny_skia::Pixmap::new(w, h)?;
+        // Optional background fill for better contrast against dark UI
+        if let Some([r, g, b, a]) = bg {
+            let color = tiny_skia::Color::from_rgba8(r, g, b, a);
+            pixmap.fill(color);
+        }
         let mut pmut = pixmap.as_mut();
         resvg::render(&tree, tiny_skia::Transform::identity(), &mut pmut);
         let data = pixmap.data();
         let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], data);
         Some((img, w, h))
+    }
+
+    // Try decode as raster image first (PNG/JPEG/WEBP). If that fails, try SVG.
+    fn bytes_to_color_image_guess(
+        bytes: &[u8],
+        bg: Option<[u8; 4]>,
+    ) -> Option<(egui::ColorImage, u32, u32)> {
+        if let Ok(img) = image::load_from_memory(bytes) {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            let mut ci = egui::ColorImage::from_rgba_unmultiplied([
+                w as usize,
+                h as usize,
+            ], &rgba);
+            if let Some([br, bgc, bb, ba]) = bg {
+                // Composite over solid bg
+                for p in ci.pixels.iter_mut() {
+                    let a = p[3] as f32 / 255.0;
+                    let inv = 1.0 - a;
+                    p[0] = (a * p[0] as f32 + inv * br as f32) as u8;
+                    p[1] = (a * p[1] as f32 + inv * bgc as f32) as u8;
+                    p[2] = (a * p[2] as f32 + inv * bb as f32) as u8;
+                    p[3] = ba; // fully opaque output
+                }
+            }
+            return Some((ci, w, h));
+        }
+        // Fallback to SVG
+        Self::svg_bytes_to_color_image_with_bg(bytes, bg)
     }
 
     /// Find syntax definition for a given language name
@@ -2310,15 +2731,23 @@ impl MarkdownRenderer {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::SAMPLE_FILES;
+    mod tests {
+        use super::*;
+        use crate::SAMPLE_FILES;
 
     #[test]
     fn test_markdown_renderer_creation() {
         let renderer = MarkdownRenderer::new();
         assert_eq!(renderer.font_sizes.body, 14.0);
         assert_eq!(renderer.font_sizes.h1, 28.0);
+    }
+
+    #[test]
+    fn test_superscript_expansion_basic() {
+        let s = "5^th^ and m^2^";
+        let out = MarkdownRenderer::expand_superscripts(s);
+        assert!(out.contains("ᵗʰ"));
+        assert!(out.contains("²"));
     }
 
     #[test]

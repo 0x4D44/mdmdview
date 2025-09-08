@@ -507,6 +507,23 @@ impl MarkdownViewerApp {
                 self.renderer.reset_zoom();
             }
 
+            // Ctrl + Mouse Wheel - Zoom
+            if i.modifiers.ctrl {
+                let mut total = 0.0f32;
+                for ev in &i.events {
+                    if let egui::Event::MouseWheel { delta, .. } = ev {
+                        total += delta.y;
+                    }
+                }
+                if total.abs() > 0.0 {
+                    if total > 0.0 {
+                        self.renderer.zoom_in();
+                    } else if total < 0.0 {
+                        self.renderer.zoom_out();
+                    }
+                }
+            }
+
             // Ctrl+R - Toggle raw view
             if i.consume_shortcut(&egui::KeyboardShortcut::new(
                 egui::Modifiers::CTRL,

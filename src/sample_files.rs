@@ -364,6 +364,7 @@ const USAGE_CONTENT: &str = r#"# Usage Instructions
 | `F11` | Toggle fullscreen |
 | `Ctrl++` | Zoom in (increase font size) |
 | `Ctrl+-` | Zoom out (decrease font size) |
+| `Ctrl` + Mouse Wheel | Zoom in/out |
 | `Ctrl+0` | Reset zoom to default size |
 | `Home` | Go to top of document |
 | `End` | Go to bottom of document |
