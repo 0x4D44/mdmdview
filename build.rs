@@ -75,7 +75,9 @@ fn generate_mermaid_js() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let dest = out_dir.join("mermaid_js.rs");
 
-    let vendor_path = PathBuf::from("assets").join("vendor").join("mermaid.min.js");
+    let vendor_path = PathBuf::from("assets")
+        .join("vendor")
+        .join("mermaid.min.js");
     let content = if let Ok(bytes) = fs::read(&vendor_path) {
         // Emit as a byte array literal to avoid path issues
         let mut s = String::new();
@@ -93,6 +95,7 @@ fn generate_mermaid_js() {
         "pub static MERMAID_JS: &[u8] = &[];\n".to_string()
     };
     let mut f = fs::File::create(&dest).expect("create mermaid_js.rs");
-    f.write_all(content.as_bytes()).expect("write mermaid_js.rs");
+    f.write_all(content.as_bytes())
+        .expect("write mermaid_js.rs");
     println!("cargo:rerun-if-changed=assets/vendor/mermaid.min.js");
 }
