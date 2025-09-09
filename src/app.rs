@@ -612,10 +612,15 @@ impl MarkdownViewerApp {
     fn render_menu_bar(&mut self, ctx: &Context) {
         TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             let alt_pressed = ui.input(|i| i.modifiers.alt);
+            let menu_text_color = if ui.visuals().dark_mode {
+                Color32::WHITE
+            } else {
+                Color32::BLACK
+            };
             menu::bar(ui, |ui| {
                 // File menu (Alt+F mnemonic visual)
                 ui.menu_button(
-                    Self::menu_text_with_mnemonic(None, "File", 'F', alt_pressed),
+                    Self::menu_text_with_mnemonic(None, "File", 'F', alt_pressed, menu_text_color),
                     |ui| {
                         ui.horizontal(|ui| {
                             if ui
@@ -624,6 +629,7 @@ impl MarkdownViewerApp {
                                     "Open...",
                                     'O',
                                     alt_pressed,
+                                    menu_text_color,
                                 )))
                                 .clicked()
                             {
@@ -633,7 +639,7 @@ impl MarkdownViewerApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.weak("Ctrl+O");
+                                    ui.label(RichText::new("Ctrl+O").color(menu_text_color));
                                 },
                             );
                         });
@@ -648,6 +654,7 @@ impl MarkdownViewerApp {
                                     "Save",
                                     'S',
                                     alt_pressed,
+                                    menu_text_color,
                                 )),
                             );
                             if button.clicked() {
@@ -659,7 +666,7 @@ impl MarkdownViewerApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.weak("Ctrl+S");
+                                    ui.label(RichText::new("Ctrl+S").color(menu_text_color));
                                 },
                             );
                         });
@@ -671,6 +678,7 @@ impl MarkdownViewerApp {
                                     "Close",
                                     'C',
                                     alt_pressed,
+                                    menu_text_color,
                                 )))
                                 .clicked()
                             {
@@ -680,7 +688,7 @@ impl MarkdownViewerApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.weak("Ctrl+W");
+                                    ui.label(RichText::new("Ctrl+W").color(menu_text_color));
                                 },
                             );
                         });
@@ -694,6 +702,7 @@ impl MarkdownViewerApp {
                                     "Reload",
                                     'R',
                                     alt_pressed,
+                                    menu_text_color,
                                 )),
                             );
                             if button.clicked() {
@@ -703,7 +712,7 @@ impl MarkdownViewerApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.weak("F5");
+                                    ui.label(RichText::new("F5").color(menu_text_color));
                                 },
                             );
                         });
@@ -716,6 +725,7 @@ impl MarkdownViewerApp {
                                     "Find...",
                                     'F',
                                     alt_pressed,
+                                    menu_text_color,
                                 )))
                                 .clicked()
                             {
@@ -726,7 +736,7 @@ impl MarkdownViewerApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.weak("Ctrl+F");
+                                    ui.label(RichText::new("Ctrl+F").color(menu_text_color));
                                 },
                             );
                         });
@@ -735,7 +745,13 @@ impl MarkdownViewerApp {
 
                         // Samples submenu
                         ui.menu_button(
-                            Self::menu_text_with_mnemonic(Some("📚 "), "Samples", 'S', alt_pressed),
+                            Self::menu_text_with_mnemonic(
+                                Some("📚 "),
+                                "Samples",
+                                'S',
+                                alt_pressed,
+                                menu_text_color,
+                            ),
                             |ui| {
                                 for sample in SAMPLE_FILES {
                                     if ui.button(sample.title).clicked() {
@@ -755,6 +771,7 @@ impl MarkdownViewerApp {
                                     "Exit",
                                     'E',
                                     alt_pressed,
+                                    menu_text_color,
                                 )))
                                 .clicked()
                             {
@@ -763,7 +780,7 @@ impl MarkdownViewerApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.weak("Ctrl+Q");
+                                    ui.label(RichText::new("Ctrl+Q").color(menu_text_color));
                                 },
                             );
                         });
@@ -772,7 +789,7 @@ impl MarkdownViewerApp {
 
                 // View menu
                 ui.menu_button(
-                    Self::menu_text_with_mnemonic(None, "View", 'V', alt_pressed),
+                    Self::menu_text_with_mnemonic(None, "View", 'V', alt_pressed, menu_text_color),
                     |ui| {
                         // Raw view toggle
                         ui.horizontal(|ui| {
@@ -785,6 +802,7 @@ impl MarkdownViewerApp {
                                         "Raw Markdown",
                                         'R',
                                         alt_pressed,
+                                        menu_text_color,
                                     ),
                                 ))
                                 .clicked()
@@ -795,7 +813,7 @@ impl MarkdownViewerApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.weak("Ctrl+R");
+                                    ui.label(RichText::new("Ctrl+R").color(menu_text_color));
                                 },
                             );
                         });
@@ -811,6 +829,7 @@ impl MarkdownViewerApp {
                                         "Write Mode",
                                         'W',
                                         alt_pressed,
+                                        menu_text_color,
                                     ),
                                 ))
                                 .clicked()
@@ -821,7 +840,7 @@ impl MarkdownViewerApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.weak("Ctrl+E");
+                                    ui.label(RichText::new("Ctrl+E").color(menu_text_color));
                                 },
                             );
                         });
@@ -844,7 +863,7 @@ impl MarkdownViewerApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.weak("Ctrl++");
+                                    ui.label(RichText::new("Ctrl++").color(menu_text_color));
                                 },
                             );
                         });
@@ -857,7 +876,7 @@ impl MarkdownViewerApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.weak("Ctrl+-");
+                                    ui.label(RichText::new("Ctrl+-").color(menu_text_color));
                                 },
                             );
                         });
@@ -870,7 +889,7 @@ impl MarkdownViewerApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.weak("Ctrl+0");
+                                    ui.label(RichText::new("Ctrl+0").color(menu_text_color));
                                 },
                             );
                         });
@@ -889,7 +908,7 @@ impl MarkdownViewerApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.weak("F11");
+                                    ui.label(RichText::new("F11").color(menu_text_color));
                                 },
                             );
                         });
@@ -1216,9 +1235,10 @@ impl MarkdownViewerApp {
         label: &str,
         mnemonic: char,
         underline: bool,
+        text_color: Color32,
     ) -> LayoutJob {
         let mut job = LayoutJob::default();
-        let default_fmt = TextFormat::default();
+        let default_fmt = TextFormat { color: text_color, ..TextFormat::default() };
         if let Some(p) = prefix {
             job.append(p, 0.0, default_fmt.clone());
         }
@@ -1228,7 +1248,7 @@ impl MarkdownViewerApp {
             let mut fmt = default_fmt.clone();
             if underline && !applied && c.to_ascii_lowercase() == m {
                 // Use a subtle underline color; white works well on dark theme
-                fmt.underline = egui::Stroke::new(1.0, Color32::WHITE);
+                fmt.underline = egui::Stroke::new(1.0, text_color);
                 applied = true;
             }
             let s = c.to_string();
