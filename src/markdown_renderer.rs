@@ -1444,9 +1444,17 @@ impl MarkdownRenderer {
         if text.is_empty() {
             return;
         }
+        let visuals = ui.visuals();
+        let bg = visuals.selection.bg_fill;
+        let mut text_color = style.color;
+        let fallback_color = visuals.selection.stroke.color;
+        if text_color.is_none() {
+            text_color = Some(fallback_color);
+        }
+
         let mut rich = RichText::new(text)
             .size(size)
-            .background_color(Color32::from_rgb(80, 80, 0));
+            .background_color(bg);
         if style.strong {
             rich = rich.strong();
         }
@@ -1456,7 +1464,7 @@ impl MarkdownRenderer {
         if style.strike {
             rich = rich.strikethrough();
         }
-        if let Some(color) = style.color {
+        if let Some(color) = text_color {
             rich = rich.color(color);
         }
         ui.label(rich);
