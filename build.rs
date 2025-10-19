@@ -1,4 +1,5 @@
 /// Build script for Windows metadata and icon resources
+use std::env;
 fn main() {
     // Generate embedded Mermaid JS module if vendor file exists
     generate_mermaid_js();
@@ -7,24 +8,31 @@ fn main() {
     {
         let mut res = winres::WindowsResource::new();
 
-        // Numeric version information (1.0.0.0)
-        // Keep numeric version with a trailing .0 as is common for Win32 resources.
-        res.set_version_info(winres::VersionInfo::PRODUCTVERSION, 0x00010000);
-        res.set_version_info(winres::VersionInfo::FILEVERSION, 0x00010000);
+        let pkg_name = env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "mdmdview".to_string());
+        let pkg_description = env::var("CARGO_PKG_DESCRIPTION").unwrap_or_default();
+        let pkg_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
+        let pkg_authors = env::var("CARGO_PKG_AUTHORS").unwrap_or_default();
+        let (major, minor, patch, build) = parse_version_components(&pkg_version);
+        let numeric_version = encode_windows_version(major, minor, patch, build);
+        let version_string = format!("{major}.{minor}.{patch}.{build}");
 
-        // Branding and descriptive strings shown in the Windows properties dialog
-        res.set("ProductName", "Martin's Simple Markdown viewer");
-        res.set("FileDescription", "Martin's Simple Markdown viewer");
-        res.set("CompanyName", "Martin Davidson");
-        res.set("OriginalFilename", "mdmdview.exe");
-        res.set("InternalName", "mdmdview");
+        res.set_version_info(winres::VersionInfo::PRODUCTVERSION, numeric_version);
+        res.set_version_info(winres::VersionInfo::FILEVERSION, numeric_version);
 
-        // Version strings
-        res.set("ProductVersion", "1.0.0");
-        res.set("FileVersion", "1.0.0");
+        let company_name = first_author(&pkg_authors);
+        let description = if pkg_description.trim().is_empty() {
+            pkg_name.clone()
+        } else {
+            pkg_description.clone()
+        };
 
-        // Copyright
-        res.set("LegalCopyright", "Copyright (c) 2025 Martin Davidson");
+        res.set("ProductName", &pkg_name);
+        res.set("FileDescription", &description);
+        res.set("CompanyName", &company_name);
+        res.set("OriginalFilename", &format!("{}.exe", pkg_name));
+        res.set("InternalName", &pkg_name);
+        res.set("ProductVersion", &version_string);
+        res.set("FileVersion", &version_string);
 
         // Best-effort build timestamp as a custom string (not all dialogs show it).
         // Prefer an ISO-8601 string via PowerShell when available; fall back to epoch seconds.
@@ -48,6 +56,11 @@ fn main() {
             format!("epoch:{secs}")
         });
         res.set("BuildDateTime", &build_dt);
+
+        let copyright = extract_year(&build_dt)
+            .map(|year| format!("Copyright (c) {} {}", year, company_name))
+            .unwrap_or_else(|| format!("Copyright (c) {}", company_name));
+        res.set("LegalCopyright", &copyright);
 
         // Icon
         if std::path::Path::new("icon.ico").exists() {
@@ -98,4 +111,89 @@ fn generate_mermaid_js() {
     f.write_all(content.as_bytes())
         .expect("write mermaid_js.rs");
     println!("cargo:rerun-if-changed=assets/vendor/mermaid.min.js");
+}
+
+fn parse_version_components(version: &str) -> (u16, u16, u16, u16) {
+    let parts: Vec<u16> = version
+        .split(['.', '-'])
+        .filter_map(|part| part.parse::<u16>().ok())
+        .collect();
+    (
+        *parts.first().unwrap_or(&0),
+        *parts.get(1).unwrap_or(&0),
+        *parts.get(2).unwrap_or(&0),
+        *parts.get(3).unwrap_or(&0),
+    )
+}
+
+fn encode_windows_version(major: u16, minor: u16, patch: u16, build: u16) -> u64 {
+    ((major as u64) << 48) | ((minor as u64) << 32) | ((patch as u64) << 16) | (build as u64)
+}
+
+fn first_author(authors: &str) -> String {
+    authors
+        .split(';')
+        .find_map(|entry| {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                None
+            } else if let Some((name, _)) = trimmed.split_once('<') {
+                let name = name.trim();
+                if name.is_empty() {
+                    None
+                } else {
+                    Some(name.to_string())
+                }
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Unknown".to_string())
+}
+
+fn extract_year(timestamp: &str) -> Option<String> {
+    let digits: String = timestamp
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.len() == 4 {
+        Some(digits)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_version_components_handles_semver() {
+        assert_eq!(parse_version_components("1.2.3"), (1, 2, 3, 0));
+        assert_eq!(parse_version_components("0.3.1-alpha.5"), (0, 3, 1, 5));
+    }
+
+    #[test]
+    fn encode_windows_version_packs_words() {
+        assert_eq!(encode_windows_version(1, 2, 3, 4), 0x0001_0002_0003_0004u64);
+    }
+
+    #[test]
+    fn first_author_prefers_name_without_email() {
+        assert_eq!(
+            first_author("Jane Doe <jane@example.com>;John Smith"),
+            "Jane Doe"
+        );
+        assert_eq!(first_author(""), "Unknown");
+    }
+
+    #[test]
+    fn extract_year_finds_iso_year() {
+        assert_eq!(
+            extract_year("2025-10-19T05:42:00.0000000Z"),
+            Some("2025".to_string())
+        );
+        assert_eq!(extract_year("epoch:12345"), None);
+    }
 }

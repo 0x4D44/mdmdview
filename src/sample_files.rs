@@ -34,6 +34,11 @@ pub const SAMPLE_FILES: &[SampleFile] = &[
         content: USAGE_CONTENT,
     },
     SampleFile {
+        name: "search.md",
+        title: "Search Tips & Examples",
+        content: SEARCH_GUIDE_CONTENT,
+    },
+    SampleFile {
         name: "images.md",
         title: "Inline Images & Diagrams",
         content: IMAGES_CONTENT,
@@ -64,6 +69,30 @@ Enjoy reading your markdown files with this lightweight, efficient viewer!
 ---
 
 *Built with ❤️ using Rust, egui, and pulldown-cmark*
+"#;
+
+const SEARCH_GUIDE_CONTENT: &str = r#"# Search Tips & Examples
+
+MarkdownView's search panel is accent-aware and case-insensitive. A single query matches multiple spellings automatically.
+
+## Accent Folding
+
+- Typing `resume` highlights `résumé`, `RESUME`, and `résume` (precomposed vs. combining accent).
+- `istanbul` matches both `İstanbul` (Turkish dotted capital I) and `ISTANBUL`.
+- `São` finds `são`, `SÃO`, and `São` regardless of combining marks.
+- `nino` finds `Niño`, `NINO`, and `niño`.
+
+Try opening this sample, pressing `Ctrl+F`, and searching for the words below:
+
+| Query | Matches in this document |
+|-------|-------------------------|
+| `resume` | résumé, RESUME, résume |
+| `istanbul` | İstanbul, ISTANBUL |
+| `sao` | São, SÃO, São |
+| `nino` | Niño, NINO, niño |
+
+> Tip: Use `Enter` / `Shift+Enter` to cycle through matches. The highlight respects grapheme clusters, so emoji and combined characters stay intact.
+
 "#;
 
 /// Images and diagrams examples
@@ -436,13 +465,14 @@ mod tests {
 
     #[test]
     fn test_sample_files_exist() {
-        assert_eq!(SAMPLE_FILES.len(), 5);
+        assert_eq!(SAMPLE_FILES.len(), 6);
 
         let names: Vec<&str> = SAMPLE_FILES.iter().map(|f| f.name).collect();
         assert!(names.contains(&"welcome.md"));
         assert!(names.contains(&"formatting.md"));
         assert!(names.contains(&"code.md"));
         assert!(names.contains(&"usage.md"));
+        assert!(names.contains(&"search.md"));
         assert!(names.contains(&"images.md"));
     }
 
@@ -502,5 +532,14 @@ mod tests {
         assert!(USAGE_CONTENT.contains("## Opening Files"));
         assert!(USAGE_CONTENT.contains("## Keyboard Shortcuts"));
         assert!(USAGE_CONTENT.contains("## Troubleshooting"));
+    }
+
+    #[test]
+    fn test_search_guide_examples_present() {
+        assert!(SEARCH_GUIDE_CONTENT.contains("résumé"));
+        assert!(SEARCH_GUIDE_CONTENT.contains("İstanbul"));
+        assert!(SEARCH_GUIDE_CONTENT.contains("São"));
+        assert!(SEARCH_GUIDE_CONTENT.contains("Niño"));
+        assert!(SEARCH_GUIDE_CONTENT.contains("Ctrl+F"));
     }
 }

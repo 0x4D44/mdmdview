@@ -1,17 +1,21 @@
 use crate::{emoji_assets, emoji_catalog};
 use anyhow::Result;
+use crossbeam_channel::{
+    bounded, Receiver as KrokiJobReceiver, Sender as KrokiJobSender, TrySendError,
+};
 use egui::{Color32, RichText, Stroke};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
-use unicode_normalization::{UnicodeCaseFold, UnicodeNormalization};
+use unicode_casefold::UnicodeCaseFold;
+use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
 // Embedded Mermaid JS bytes are generated in build.rs into OUT_DIR.
@@ -123,6 +127,18 @@ struct ImageCacheEntry {
     modified: Option<SystemTime>,
 }
 
+struct KrokiRequest {
+    key: u64,
+    url: String,
+    payload: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum KrokiEnqueueError {
+    QueueFull,
+    Disconnected,
+}
+
 /// Markdown renderer with proper inline element handling
 pub struct MarkdownRenderer {
     font_sizes: FontSizes,
@@ -147,7 +163,7 @@ pub struct MarkdownRenderer {
     kroki_pending: RefCell<HashSet<u64>>, // code_hashes in flight
     kroki_svg_cache: RefCell<HashMap<u64, Vec<u8>>>, // code_hash -> image bytes (PNG preferred)
     kroki_errors: RefCell<HashMap<u64, String>>, // code_hash -> last error
-    kroki_tx: Sender<(u64, Result<Vec<u8>, String>)>, // background -> UI thread
+    kroki_job_tx: KrokiJobSender<KrokiRequest>, // UI -> worker queue
     kroki_rx: Receiver<(u64, Result<Vec<u8>, String>)>, // background -> UI thread
     #[cfg(feature = "mermaid-quickjs")]
     mermaid_engine: RefCell<Option<MermaidEngine>>,
@@ -173,6 +189,33 @@ impl MarkdownRenderer {
     /// Create a new markdown renderer
     pub fn new() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
+        let (job_tx, job_rx): (KrokiJobSender<KrokiRequest>, KrokiJobReceiver<KrokiRequest>) =
+            bounded(Self::MAX_KROKI_JOBS * 4);
+        for worker_idx in 0..Self::MAX_KROKI_JOBS {
+            let worker_rx = job_rx.clone();
+            let result_tx = tx.clone();
+            if let Err(err) = std::thread::Builder::new()
+                .name(format!("mdmdview-kroki-{worker_idx}"))
+                .spawn(move || {
+                    let agent = ureq::AgentBuilder::new()
+                        .timeout_connect(Duration::from_secs(5))
+                        .timeout_read(Duration::from_secs(10))
+                        .timeout_write(Duration::from_secs(10))
+                        .build();
+                    for job in worker_rx.iter() {
+                        let result = MarkdownRenderer::perform_kroki_with_agent(
+                            &agent,
+                            &job.url,
+                            &job.payload,
+                        );
+                        let _ = result_tx.send((job.key, result));
+                    }
+                })
+            {
+                eprintln!("Failed to start Kroki worker thread: {}", err);
+            }
+        }
+        drop(job_rx);
         Self {
             font_sizes: FontSizes::default(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
@@ -188,7 +231,7 @@ impl MarkdownRenderer {
             kroki_pending: RefCell::new(HashSet::new()),
             kroki_svg_cache: RefCell::new(HashMap::new()),
             kroki_errors: RefCell::new(HashMap::new()),
-            kroki_tx: tx,
+            kroki_job_tx: job_tx,
             kroki_rx: rx,
             #[cfg(feature = "mermaid-quickjs")]
             mermaid_engine: RefCell::new(None),
@@ -1299,7 +1342,7 @@ impl MarkdownRenderer {
                 let mut folded_to_char: Vec<usize> = Vec::new();
                 let mut char_ranges: Vec<(usize, usize)> = Vec::new();
                 for (char_idx, (byte_idx, ch)) in expanded.char_indices().enumerate() {
-                    let folded_piece: String = ch.to_string().nfkc().default_case_fold().collect();
+                    let folded_piece: String = ch.to_string().case_fold().nfkc().collect();
                     let before = folded.len();
                     folded.push_str(&folded_piece);
                     let after = folded.len();
@@ -1969,7 +2012,7 @@ impl MarkdownRenderer {
                     base_scale
                 };
                 let size = egui::vec2((tw * scale).round(), (th * scale).round());
-                ui.add(egui::Image::new(tex).fit_to_exact_size(size));
+                ui.add(egui::Image::new(&tex).fit_to_exact_size(size));
                 return true;
             }
 
@@ -2020,41 +2063,68 @@ impl MarkdownRenderer {
             return false; // let caller render the source block
         }
 
-        // If no job is pending, kick one off now
-        if !self.kroki_pending.borrow().contains(&key) {
-            if self.kroki_pending.borrow().len() >= Self::MAX_KROKI_JOBS {
-                egui::Frame::none()
-                    .fill(Color32::from_rgb(25, 25, 25))
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
-                    .inner_margin(8.0)
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(
-                                "Mermaid rendering queued; waiting for available slot...",
-                            )
-                            .color(Color32::from_rgb(200, 160, 80))
-                            .family(egui::FontFamily::Monospace)
-                            .size(self.font_sizes.code),
-                        );
-                    });
-                return true;
+        // If no job is pending, enqueue one for the worker pool
+        let should_schedule = {
+            let pending = self.kroki_pending.borrow();
+            !pending.contains(&key)
+        };
+        let waiting_for_slot = if should_schedule {
+            let inflight_before = {
+                let pending = self.kroki_pending.borrow();
+                pending.len()
+            };
+            match self.spawn_kroki_job(key, code) {
+                Ok(()) => {
+                    self.kroki_pending.borrow_mut().insert(key);
+                    ui.ctx().request_repaint();
+                    inflight_before >= Self::MAX_KROKI_JOBS
+                }
+                Err(KrokiEnqueueError::QueueFull) => {
+                    ui.ctx().request_repaint();
+                    true
+                }
+                Err(KrokiEnqueueError::Disconnected) => {
+                    self.kroki_errors
+                        .borrow_mut()
+                        .insert(key, "Mermaid worker pool unavailable".to_string());
+                    return false;
+                }
             }
-            self.spawn_kroki_job(key, code);
-            self.kroki_pending.borrow_mut().insert(key);
-            ui.ctx().request_repaint();
-        }
+        } else {
+            let pending = self.kroki_pending.borrow();
+            pending.len() >= Self::MAX_KROKI_JOBS
+        };
 
-        // Show placeholder while rendering
+        let inflight_count = self.kroki_pending.borrow().len();
+
+        // Show placeholder while rendering or waiting for an available worker
         egui::Frame::none()
             .fill(Color32::from_rgb(25, 25, 25))
             .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
             .inner_margin(8.0)
             .show(ui, |ui| {
                 let url = self.kroki_base_url();
-                ui.label(
-                    RichText::new(format!("Rendering diagram via Kroki…\n{}", url))
-                        .color(Color32::from_rgb(160, 200, 240)),
-                );
+                if waiting_for_slot {
+                    ui.label(
+                        RichText::new(format!(
+                            "Mermaid workers busy ({}/{}) - request queued.",
+                            inflight_count,
+                            Self::MAX_KROKI_JOBS
+                        ))
+                        .color(Color32::from_rgb(200, 160, 80))
+                        .family(egui::FontFamily::Monospace)
+                        .size(self.font_sizes.code),
+                    );
+                    ui.label(
+                        RichText::new(format!("Queue target: {}", url))
+                            .color(Color32::from_rgb(160, 200, 240)),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(format!("Rendering diagram via Kroki...\n{}", url))
+                            .color(Color32::from_rgb(160, 200, 240)),
+                    );
+                }
             });
         true
     }
@@ -2254,40 +2324,44 @@ impl MarkdownRenderer {
         std::env::var("MDMDVIEW_KROKI_URL").unwrap_or_else(|_| "https://kroki.io".to_string())
     }
 
-    fn spawn_kroki_job(&self, key: u64, code: &str) {
-        let tx = self.kroki_tx.clone();
+    fn perform_kroki_with_agent(
+        agent: &ureq::Agent,
+        url: &str,
+        payload: &str,
+    ) -> Result<Vec<u8>, String> {
+        let resp = agent
+            .post(url)
+            .set("Content-Type", "text/plain")
+            .send_string(payload)
+            .map_err(|e| format!("ureq error: {}", e))?;
+        if resp.status() >= 200 && resp.status() < 300 {
+            let mut bytes: Vec<u8> = Vec::new();
+            let mut reader = resp.into_reader();
+            use std::io::Read as _;
+            reader
+                .read_to_end(&mut bytes)
+                .map_err(|e| format!("read body: {}", e))?;
+            if bytes.is_empty() {
+                return Err("Empty SVG from Kroki".to_string());
+            }
+            Ok(bytes)
+        } else {
+            Err(format!("HTTP {} from Kroki", resp.status()))
+        }
+    }
+
+    fn spawn_kroki_job(&self, key: u64, code: &str) -> Result<(), KrokiEnqueueError> {
         // Prefer PNG to avoid client-side SVG CSS/foreignObject limitations
         let url = format!("{}/mermaid/png", self.kroki_base_url());
         let payload = self.wrap_mermaid_theme(code);
-        std::thread::spawn(move || {
-            let result = (|| -> Result<Vec<u8>, String> {
-                // Send Mermaid code to Kroki and expect SVG in response
-                let agent = ureq::AgentBuilder::new()
-                    .timeout_connect(Duration::from_secs(5))
-                    .timeout_read(Duration::from_secs(10))
-                    .timeout_write(Duration::from_secs(10))
-                    .build();
-                let resp = agent
-                    .post(&url)
-                    .set("Content-Type", "text/plain")
-                    .send_string(&payload)
-                    .map_err(|e| format!("ureq error: {}", e))?;
-                if resp.status() >= 200 && resp.status() < 300 {
-                    let mut bytes: Vec<u8> = Vec::new();
-                    let mut r = resp.into_reader();
-                    use std::io::Read as _;
-                    r.read_to_end(&mut bytes)
-                        .map_err(|e| format!("read body: {}", e))?;
-                    if bytes.is_empty() {
-                        return Err("Empty SVG from Kroki".to_string());
-                    }
-                    Ok(bytes)
-                } else {
-                    Err(format!("HTTP {} from Kroki", resp.status()))
-                }
-            })();
-            let _ = tx.send((key, result));
-        });
+        match self
+            .kroki_job_tx
+            .try_send(KrokiRequest { key, url, payload })
+        {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(KrokiEnqueueError::QueueFull),
+            Err(TrySendError::Disconnected(_)) => Err(KrokiEnqueueError::Disconnected),
+        }
     }
 
     fn wrap_mermaid_theme(&self, code: &str) -> String {
@@ -2585,7 +2659,7 @@ impl MarkdownRenderer {
         if let Some(p) = phrase {
             self.highlight_phrase
                 .borrow_mut()
-                .replace(p.nfkc().default_case_fold().collect());
+                .replace(p.case_fold().nfkc().collect());
         } else {
             self.highlight_phrase.borrow_mut().take();
         }
@@ -2675,11 +2749,7 @@ impl MarkdownRenderer {
         let path = Path::new(resolved_src);
 
         if let Some(entry) = self.image_textures.borrow().get(resolved_src) {
-            let stale = if path.exists() {
-                Self::disk_image_timestamp(path) != entry.modified
-            } else {
-                false
-            };
+            let stale = Self::image_source_stale(entry.modified, path);
             if !stale {
                 return Some((entry.texture.clone(), entry.size[0], entry.size[1]));
             }
@@ -2727,6 +2797,19 @@ impl MarkdownRenderer {
 
     fn disk_image_timestamp(path: &Path) -> Option<SystemTime> {
         std::fs::metadata(path).ok()?.modified().ok()
+    }
+
+    fn image_source_stale(cached_modified: Option<SystemTime>, path: &Path) -> bool {
+        if !path.exists() {
+            return false;
+        }
+        let current = Self::disk_image_timestamp(path);
+        match (cached_modified, current) {
+            (Some(prev), Some(cur)) => prev != cur,
+            (Some(_), None) => true,
+            (None, Some(_)) => true,
+            (None, None) => false,
+        }
     }
 
     fn store_image_texture(
@@ -2918,7 +3001,6 @@ impl MarkdownRenderer {
 mod tests {
     use super::*;
     use crate::SAMPLE_FILES;
-    use std::env;
 
     #[test]
     fn test_markdown_renderer_creation() {
@@ -3014,6 +3096,22 @@ mod tests {
     }
 
     #[test]
+    fn test_image_source_stale_detects_file_changes() {
+        use std::time::Duration as StdDuration;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file_path = dir.path().join("image.bin");
+        std::fs::write(&file_path, [1u8, 2, 3, 4]).expect("write image");
+        let initial = MarkdownRenderer::disk_image_timestamp(&file_path);
+        assert!(!MarkdownRenderer::image_source_stale(initial, &file_path));
+
+        std::thread::sleep(StdDuration::from_millis(5));
+        std::fs::write(&file_path, [4u8, 3, 2, 1]).expect("rewrite image");
+
+        assert!(MarkdownRenderer::image_source_stale(initial, &file_path));
+    }
+
+    #[test]
     fn test_inline_code_preserves_whitespace() {
         let renderer = MarkdownRenderer::new();
         let md = "Start `code` end";
@@ -3042,6 +3140,53 @@ mod tests {
         assert!(!MarkdownRenderer::kroki_enabled_for_tests());
 
         std::env::remove_var("MDMDVIEW_ENABLE_KROKI");
+    }
+
+    #[test]
+    fn test_spawn_kroki_job_reports_queue_disconnect() {
+        let mut renderer = MarkdownRenderer::new();
+        let (temp_tx, temp_rx) = crossbeam_channel::bounded::<KrokiRequest>(1);
+        drop(temp_rx);
+        renderer.kroki_job_tx = temp_tx;
+        let result = renderer.spawn_kroki_job(1, "graph TD; A-->B;");
+        assert!(matches!(result, Err(KrokiEnqueueError::Disconnected)));
+    }
+
+    #[test]
+    fn test_spawn_kroki_job_reports_queue_full() {
+        let mut renderer = MarkdownRenderer::new();
+        let (temp_tx, temp_rx) = crossbeam_channel::bounded::<KrokiRequest>(1);
+        // Fill the bounded channel so subsequent sends report Full
+        temp_tx
+            .try_send(KrokiRequest {
+                key: 99,
+                url: "https://example.invalid/diagram".to_string(),
+                payload: "graph TD; A-->B;".to_string(),
+            })
+            .expect("pre-fill queue");
+        renderer.kroki_job_tx = temp_tx.clone();
+        // Keep receiver alive (unused) to avoid disconnecting the channel
+        let _guard = temp_rx;
+        let result = renderer.spawn_kroki_job(42, "graph TD; B-->C;");
+        assert!(matches!(result, Err(KrokiEnqueueError::QueueFull)));
+    }
+
+    #[test]
+    fn test_footnote_markers_render_as_visible_text() {
+        let renderer = MarkdownRenderer::new();
+        let md = "Paragraph with footnote[^1].\n\n[^1]: footnote body.";
+        let parsed = renderer.parse(md).expect("parse ok");
+        assert_eq!(parsed.len(), 2);
+        let first_plain = MarkdownRenderer::element_plain_text(&parsed[0]);
+        assert!(
+            first_plain.contains("footnote[^1]"),
+            "footnote marker should remain visible, got {first_plain}"
+        );
+        let second_plain = MarkdownRenderer::element_plain_text(&parsed[1]);
+        assert!(
+            second_plain.contains("[^1]: footnote body."),
+            "footnote definition should remain visible, got {second_plain}"
+        );
     }
 
     #[test]
