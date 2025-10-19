@@ -2,7 +2,7 @@
 ///
 /// This module contains the primary app state, UI logic, and event handling
 /// for the markdown viewer application built with egui.
-use crate::{MarkdownElement, MarkdownRenderer, SampleFile, SAMPLE_FILES, WindowState};
+use crate::{MarkdownElement, MarkdownRenderer, SampleFile, WindowState, SAMPLE_FILES};
 use anyhow::{bail, Result};
 use egui::text::LayoutJob;
 use egui::text::TextFormat;
@@ -11,7 +11,8 @@ use egui::{TextEdit, TextStyle};
 use rfd::FileDialog;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use unicode_normalization::{UnicodeCaseFold, UnicodeNormalization};
+use unicode_casefold::UnicodeCaseFold;
+use unicode_normalization::UnicodeNormalization;
 
 /// Main application state and logic
 pub struct MarkdownViewerApp {
@@ -372,7 +373,7 @@ impl MarkdownViewerApp {
     }
 
     fn fold_for_search(input: &str) -> String {
-        input.nfkc().default_case_fold().collect()
+        input.case_fold().nfkc().collect()
     }
 
     /// Request a reload of the current file (processed outside of input context)
@@ -1623,12 +1624,12 @@ mod tests {
     #[test]
     fn test_fold_for_search_handles_case_and_accents() {
         assert_eq!(
-            MarkdownViewerApp::fold_for_search("Äß"),
-            MarkdownViewerApp::fold_for_search("äSS")
+            MarkdownViewerApp::fold_for_search("\u{00C4}\u{00DF}"),
+            MarkdownViewerApp::fold_for_search("\u{00E4}SS")
         );
         assert_eq!(
-            MarkdownViewerApp::fold_for_search("Tom\u{0301}"),
-            MarkdownViewerApp::fold_for_search("TÓm")
+            MarkdownViewerApp::fold_for_search("To\u{0301}m"),
+            MarkdownViewerApp::fold_for_search("T\u{00D3}m")
         );
     }
 

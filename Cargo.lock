@@ -936,6 +936,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam-channel"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82b8f8f868b36967f9606790d1903570de9ceaf870a7bf9fbbd3016d636a2cb2"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-utils"
 version = "0.8.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2143,6 +2152,7 @@ name = "mdmdview"
 version = "0.3.1"
 dependencies = [
  "anyhow",
+ "crossbeam-channel",
  "eframe",
  "egui",
  "env_logger",
@@ -2155,6 +2165,7 @@ dependencies = [
  "syntect",
  "tempfile",
  "tiny-skia",
+ "unicode-casefold",
  "unicode-normalization",
  "unicode-segmentation",
  "ureq",
@@ -3743,6 +3754,12 @@ name = "unicode-bidi-mirroring"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64af057ad7466495ca113126be61838d8af947f41d93a949980b2389a118082f"
+
+[[package]]
+name = "unicode-casefold"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7f66b1c8f8caa2ab31dc6d3f35386f16efdab89668f93411e565ac368908e8f"
 
 [[package]]
 name = "unicode-ccc"
