@@ -9,7 +9,7 @@ pub mod markdown_renderer;
 pub mod sample_files;
 pub mod window_state;
 
-pub use app::MarkdownViewerApp;
+pub use app::{MarkdownViewerApp, APP_TITLE_PREFIX};
 pub use markdown_renderer::{MarkdownElement, MarkdownRenderer};
 pub use sample_files::{SampleFile, SAMPLE_FILES};
 pub use window_state::{load_window_state, sanitize_window_state, save_window_state, WindowState};

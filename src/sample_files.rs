@@ -79,7 +79,7 @@ MarkdownView's search panel is accent-aware and case-insensitive. A single query
 
 - Typing `resume` highlights `résumé`, `RESUME`, and `résume` (precomposed vs. combining accent).
 - `istanbul` matches both `İstanbul` (Turkish dotted capital I) and `ISTANBUL`.
-- `São` finds `são`, `SÃO`, and `São` regardless of combining marks.
+- `sao` finds `São`, `SÃO`, and `São` regardless of combining marks.
 - `nino` finds `Niño`, `NINO`, and `niño`.
 
 Try opening this sample, pressing `Ctrl+F`, and searching for the words below:
