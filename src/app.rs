@@ -2,14 +2,16 @@
 ///
 /// This module contains the primary app state, UI logic, and event handling
 /// for the markdown viewer application built with egui.
-use crate::{MarkdownElement, MarkdownRenderer, SampleFile, SAMPLE_FILES};
+use crate::{MarkdownElement, MarkdownRenderer, SampleFile, SAMPLE_FILES, WindowState};
 use anyhow::{bail, Result};
 use egui::text::LayoutJob;
 use egui::text::TextFormat;
 use egui::{menu, CentralPanel, Color32, Context, RichText, TopBottomPanel};
 use egui::{TextEdit, TextStyle};
 use rfd::FileDialog;
-use std::path::PathBuf;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+use unicode_normalization::{UnicodeCaseFold, UnicodeNormalization};
 
 /// Main application state and logic
 pub struct MarkdownViewerApp {
@@ -55,6 +57,8 @@ pub struct MarkdownViewerApp {
     last_window_size: Option<[f32; 2]>,
     /// Last known maximized state
     last_window_maximized: bool,
+    /// Last persisted window snapshot to avoid redundant disk writes
+    last_persisted_state: Option<WindowState>,
     /// Throttle saving window state
     last_persist_instant: std::time::Instant,
     // Search state
@@ -174,9 +178,9 @@ impl MarkdownViewerApp {
         }
         let needle = if !self.search_query.is_empty() {
             self.last_query = self.search_query.clone();
-            self.search_query.to_ascii_lowercase()
+            Self::fold_for_search(&self.search_query)
         } else {
-            self.last_query.to_ascii_lowercase()
+            Self::fold_for_search(&self.last_query)
         };
         if needle.is_empty() {
             return;
@@ -198,9 +202,8 @@ impl MarkdownViewerApp {
             for idx in range {
                 let text = crate::markdown_renderer::MarkdownRenderer::element_plain_text(
                     &self.parsed_elements[idx],
-                )
-                .to_ascii_lowercase();
-                if text.contains(&needle) {
+                );
+                if Self::fold_for_search(&text).contains(&needle) {
                     self.last_match_index = Some(idx);
                     self.pending_scroll_to_element = Some(idx);
                     return;
@@ -215,9 +218,9 @@ impl MarkdownViewerApp {
         }
         let needle = if !self.search_query.is_empty() {
             self.last_query = self.search_query.clone();
-            self.search_query.to_ascii_lowercase()
+            Self::fold_for_search(&self.search_query)
         } else {
-            self.last_query.to_ascii_lowercase()
+            Self::fold_for_search(&self.last_query)
         };
         if needle.is_empty() {
             return;
@@ -239,9 +242,8 @@ impl MarkdownViewerApp {
             for idx in range {
                 let text = crate::markdown_renderer::MarkdownRenderer::element_plain_text(
                     &self.parsed_elements[idx],
-                )
-                .to_ascii_lowercase();
-                if text.contains(&needle) {
+                );
+                if Self::fold_for_search(&text).contains(&needle) {
                     self.last_match_index = Some(idx);
                     self.pending_scroll_to_element = Some(idx);
                     return;
@@ -273,6 +275,7 @@ impl MarkdownViewerApp {
             last_window_pos: None,
             last_window_size: None,
             last_window_maximized: false,
+            last_persisted_state: None,
             last_persist_instant: std::time::Instant::now(),
             show_search: false,
             search_query: String::new(),
@@ -316,7 +319,7 @@ impl MarkdownViewerApp {
 
     /// Load markdown content from a file path
     pub fn load_file(&mut self, path: PathBuf) -> Result<()> {
-        let content = std::fs::read_to_string(&path)?;
+        let (content, lossy) = Self::read_file_lossy(&path)?;
         let filename = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -327,7 +330,49 @@ impl MarkdownViewerApp {
         self.renderer.set_base_dir(base.as_deref());
         self.current_file = Some(path);
         self.load_content(&content, Some(filename));
+        if lossy {
+            eprintln!("Loaded file with invalid UTF-8; replaced invalid sequences.");
+        }
         Ok(())
+    }
+
+    fn read_file_lossy(path: &Path) -> Result<(String, bool)> {
+        match std::fs::read_to_string(path) {
+            Ok(s) => Ok((s, false)),
+            Err(e) if e.kind() == ErrorKind::InvalidData => {
+                let bytes = std::fs::read(path)?;
+                Ok((String::from_utf8_lossy(&bytes).into_owned(), true))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn current_window_state(&self) -> Option<WindowState> {
+        let pos = self.last_window_pos?;
+        let size = self.last_window_size?;
+        Some(WindowState {
+            pos,
+            size,
+            maximized: self.last_window_maximized,
+        })
+    }
+
+    fn window_state_changed(&self, new_state: &WindowState) -> bool {
+        match &self.last_persisted_state {
+            Some(prev) => {
+                let pos_changed = (prev.pos[0] - new_state.pos[0]).abs() > 0.5
+                    || (prev.pos[1] - new_state.pos[1]).abs() > 0.5;
+                let size_changed = (prev.size[0] - new_state.size[0]).abs() > 0.5
+                    || (prev.size[1] - new_state.size[1]).abs() > 0.5;
+                let maximized_changed = prev.maximized != new_state.maximized;
+                pos_changed || size_changed || maximized_changed
+            }
+            None => true,
+        }
+    }
+
+    fn fold_for_search(input: &str) -> String {
+        input.nfkc().default_case_fold().collect()
     }
 
     /// Request a reload of the current file (processed outside of input context)
@@ -1238,7 +1283,10 @@ impl MarkdownViewerApp {
         text_color: Color32,
     ) -> LayoutJob {
         let mut job = LayoutJob::default();
-        let default_fmt = TextFormat { color: text_color, ..TextFormat::default() };
+        let default_fmt = TextFormat {
+            color: text_color,
+            ..TextFormat::default()
+        };
         if let Some(p) = prefix {
             job.append(p, 0.0, default_fmt.clone());
         }
@@ -1256,14 +1304,15 @@ impl MarkdownViewerApp {
         }
         job
     }
-    fn persist_window_state(&self) {
-        if let (Some(pos), Some(size)) = (self.last_window_pos, self.last_window_size) {
-            let state = crate::WindowState {
-                pos,
-                size,
-                maximized: self.last_window_maximized,
-            };
-            let _ = crate::save_window_state(&state);
+    fn persist_window_state(&mut self) {
+        if let Some(state) = self.current_window_state() {
+            if !self.window_state_changed(&state) {
+                return;
+            }
+            if crate::save_window_state(&state).is_ok() {
+                self.last_persist_instant = std::time::Instant::now();
+                self.last_persisted_state = Some(state);
+            }
         }
     }
 
@@ -1271,14 +1320,19 @@ impl MarkdownViewerApp {
         if self.last_persist_instant.elapsed() < std::time::Duration::from_secs(1) {
             return false;
         }
-        // Persist periodically; we could also detect deltas to reduce writes further
-        self.last_window_pos.is_some() && self.last_window_size.is_some()
+        if let Some(state) = self.current_window_state() {
+            self.window_state_changed(&state)
+        } else {
+            false
+        }
     }
 
     /// Save current document. If no file is associated, prompts for a path.
     fn save_current_document(&mut self) -> Result<()> {
         if let Some(path) = self.current_file.clone() {
             std::fs::write(&path, &self.current_content)?;
+            let parent = path.parent();
+            self.renderer.set_base_dir(parent);
             Ok(())
         } else if let Some(path) = FileDialog::new()
             .set_title("Save Markdown File")
@@ -1292,6 +1346,11 @@ impl MarkdownViewerApp {
                 .unwrap_or("Unknown")
                 .to_string();
             self.current_file = Some(path);
+            if let Some(parent) = self.current_file.as_ref().and_then(|p| p.parent()) {
+                self.renderer.set_base_dir(Some(parent));
+            } else {
+                self.renderer.set_base_dir(None);
+            }
             self.title = format!("MarkdownView - {}", filename);
             Ok(())
         } else {
@@ -1343,8 +1402,7 @@ impl MarkdownViewerApp {
                 self.last_query = self.search_query.clone();
                 // Use current last match as baseline if set, else start of doc
                 let baseline = self.last_match_index.unwrap_or(0);
-                // Search forward from baseline
-                let needle = self.search_query.to_ascii_lowercase();
+                let needle = Self::fold_for_search(&self.search_query);
                 let total = self.parsed_elements.len();
                 let mut found: Option<usize> = None;
                 for pass in 0..2 {
@@ -1356,9 +1414,8 @@ impl MarkdownViewerApp {
                     for idx in range {
                         let text = crate::markdown_renderer::MarkdownRenderer::element_plain_text(
                             &self.parsed_elements[idx],
-                        )
-                        .to_ascii_lowercase();
-                        if text.contains(&needle) {
+                        );
+                        if Self::fold_for_search(&text).contains(&needle) {
                             found = Some(idx);
                             break;
                         }
@@ -1523,11 +1580,56 @@ mod tests {
     }
 
     #[test]
+    fn test_load_file_with_invalid_utf8() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let mut temp_file = NamedTempFile::new()?;
+        let bytes = b"Hello\xFFWorld";
+        temp_file.write_all(bytes)?;
+        temp_file.flush()?;
+
+        app.load_file(temp_file.path().to_path_buf())?;
+
+        assert!(app.current_content.contains('\u{FFFD}'));
+        assert!(!app.parsed_elements.is_empty());
+        assert!(app.error_message.is_none());
+        Ok(())
+    }
+
+    #[test]
     fn test_reload_without_file() {
         let mut app = MarkdownViewerApp::new();
         assert!(app.current_file.is_none());
         let result = app.reload_current_file();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_window_state_change_detection() {
+        let mut app = MarkdownViewerApp::new();
+        app.last_window_pos = Some([10.0, 10.0]);
+        app.last_window_size = Some([800.0, 600.0]);
+        app.last_window_maximized = false;
+
+        let state = app.current_window_state().expect("state");
+        assert!(app.window_state_changed(&state));
+        app.last_persisted_state = Some(state);
+        assert!(!app.window_state_changed(&state));
+
+        let mut moved = state;
+        moved.pos = [12.0, 10.0];
+        assert!(app.window_state_changed(&moved));
+    }
+
+    #[test]
+    fn test_fold_for_search_handles_case_and_accents() {
+        assert_eq!(
+            MarkdownViewerApp::fold_for_search("Äß"),
+            MarkdownViewerApp::fold_for_search("äSS")
+        );
+        assert_eq!(
+            MarkdownViewerApp::fold_for_search("Tom\u{0301}"),
+            MarkdownViewerApp::fold_for_search("TÓm")
+        );
     }
 
     #[test]
