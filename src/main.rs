@@ -5,7 +5,7 @@
 /// A simple, standalone markdown viewer for Windows built with Rust and egui.
 /// This application provides a clean interface for viewing markdown files with
 /// syntax highlighting, embedded samples, and essential viewing features.
-use mdmdview::{load_window_state, sanitize_window_state, MarkdownViewerApp};
+use mdmdview::{load_window_state, sanitize_window_state, MarkdownViewerApp, APP_TITLE_PREFIX};
 
 /// Application entry point
 fn main() -> Result<(), eframe::Error> {
@@ -23,7 +23,7 @@ fn main() -> Result<(), eframe::Error> {
 
     // Set up eframe options for the native window
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("MarkdownView - A Simple Markdown Viewer")
+        .with_title(format!("{APP_TITLE_PREFIX} - A Simple Markdown Viewer"))
         .with_inner_size(egui::Vec2::new(1000.0, 700.0))
         .with_min_inner_size(egui::Vec2::new(600.0, 400.0))
         .with_icon(create_app_icon())
@@ -50,7 +50,7 @@ fn main() -> Result<(), eframe::Error> {
 
     // Launch the application
     eframe::run_native(
-        "MarkdownView",
+        APP_TITLE_PREFIX,
         native_options,
         Box::new(|cc| {
             // Configure egui styling for better markdown display

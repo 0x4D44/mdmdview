@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 
+/// Prefix used for application/window titles.
+pub const APP_TITLE_PREFIX: &str = "mdmdview";
+
 /// Main application state and logic
 pub struct MarkdownViewerApp {
     /// Markdown renderer instance
@@ -260,7 +263,7 @@ impl MarkdownViewerApp {
             current_content: String::new(),
             raw_buffer: String::new(),
             parsed_elements: Vec::new(),
-            title: "MarkdownView".to_string(),
+            title: APP_TITLE_PREFIX.to_string(),
             error_message: None,
             nav_request: None,
             scroll_area_id: egui::Id::new("main_scroll_area"),
@@ -308,7 +311,7 @@ impl MarkdownViewerApp {
             Ok(elements) => {
                 self.parsed_elements = elements;
                 if let Some(title) = title {
-                    self.title = format!("MarkdownView - {}", title);
+                    self.title = format!("{APP_TITLE_PREFIX} - {}", title);
                 }
             }
             Err(e) => {
@@ -356,6 +359,82 @@ impl MarkdownViewerApp {
             size,
             maximized: self.last_window_maximized,
         })
+    }
+
+    fn compute_window_adjustment(
+        outer_rect: Option<egui::Rect>,
+        monitor_size: Option<egui::Vec2>,
+    ) -> Option<(egui::Pos2, egui::Vec2)> {
+        let outer = outer_rect?;
+        let monitor = monitor_size?;
+
+        if monitor.x <= 0.0 || monitor.y <= 0.0 {
+            return None;
+        }
+
+        const MIN_WIDTH: f32 = 600.0;
+        const MIN_HEIGHT: f32 = 400.0;
+        const OFFSCREEN_TOLERANCE: f32 = 32.0;
+
+        let mut pos = outer.min;
+        let mut size = outer.size();
+        let mut adjusted = false;
+
+        if !pos.x.is_finite() || !pos.y.is_finite() {
+            pos = egui::pos2(0.0, 0.0);
+            adjusted = true;
+        }
+        if !size.x.is_finite() || !size.y.is_finite() {
+            size = egui::vec2(MIN_WIDTH, MIN_HEIGHT);
+            adjusted = true;
+        }
+
+        let available_width = monitor.x.max(MIN_WIDTH);
+        let available_height = monitor.y.max(MIN_HEIGHT);
+
+        if size.x < MIN_WIDTH {
+            size.x = MIN_WIDTH.min(available_width);
+            adjusted = true;
+        }
+        if size.y < MIN_HEIGHT {
+            size.y = MIN_HEIGHT.min(available_height);
+            adjusted = true;
+        }
+        if size.x > available_width {
+            size.x = available_width;
+            adjusted = true;
+        }
+        if size.y > available_height {
+            size.y = available_height;
+            adjusted = true;
+        }
+
+        let max_pos = egui::pos2((monitor.x - size.x).max(0.0), (monitor.y - size.y).max(0.0));
+
+        if pos.x <= -0.25 * size.x {
+            pos.x = 0.0;
+            adjusted = true;
+        }
+        if pos.y <= -0.25 * size.y {
+            pos.y = 0.0;
+            adjusted = true;
+        }
+        if pos.x > max_pos.x + OFFSCREEN_TOLERANCE {
+            pos.x = max_pos.x;
+            adjusted = true;
+        }
+        if pos.y > max_pos.y + OFFSCREEN_TOLERANCE {
+            pos.y = max_pos.y;
+            adjusted = true;
+        }
+
+        if adjusted {
+            size.x = size.x.max(MIN_WIDTH.min(available_width));
+            size.y = size.y.max(MIN_HEIGHT.min(available_height));
+            Some((pos, size))
+        } else {
+            None
+        }
     }
 
     fn window_state_changed(&self, new_state: &WindowState) -> bool {
@@ -416,7 +495,7 @@ impl MarkdownViewerApp {
             // Fallback if welcome file is missing
             self.current_content.clear();
             self.parsed_elements.clear();
-            self.title = "MarkdownView".to_string();
+            self.title = APP_TITLE_PREFIX.to_string();
             self.error_message = None;
         }
     }
@@ -1021,23 +1100,42 @@ impl eframe::App for MarkdownViewerApp {
         // Handle keyboard shortcuts
         self.handle_shortcuts(ctx);
 
-        // Track window position/size for persistence
-        ctx.input(|i| {
+        // Keep native window title in sync with the current document
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.title.clone()));
+
+        let (monitor_size, outer_rect, inner_rect, is_fullscreen, is_maximized) = ctx.input(|i| {
             let vp = i.viewport();
-            // Position should use outer rect (top-left of the whole window)
-            if let Some(outer) = vp.outer_rect {
+            (
+                vp.monitor_size,
+                vp.outer_rect,
+                vp.inner_rect,
+                vp.fullscreen.unwrap_or(false),
+                vp.maximized.unwrap_or(false),
+            )
+        });
+
+        let mut adjusted = false;
+        if !is_fullscreen {
+            if let Some((pos, size)) = Self::compute_window_adjustment(outer_rect, monitor_size) {
+                adjusted = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                self.last_window_pos = Some([pos.x, pos.y]);
+                self.last_window_size = Some([size.x, size.y]);
+            }
+        }
+
+        if !adjusted {
+            if let Some(outer) = outer_rect {
                 self.last_window_pos = Some([outer.left(), outer.top()]);
             }
-            // Size should use inner rect (content area). Storing outer size and
-            // restoring as inner size causes the window to grow each restart.
-            // Only update if not fullscreen to avoid saving screen-sized values.
-            if !vp.fullscreen.unwrap_or(false) {
-                if let Some(inner) = vp.inner_rect {
+            if !is_fullscreen {
+                if let Some(inner) = inner_rect {
                     self.last_window_size = Some([inner.width(), inner.height()]);
                 }
             }
-            self.last_window_maximized = vp.maximized.unwrap_or(false);
-        });
+        }
+        self.last_window_maximized = is_maximized;
 
         // Opportunistically persist window state if it changed, throttled to once per second
         if self.should_persist_window_state() {
@@ -1352,7 +1450,7 @@ impl MarkdownViewerApp {
             } else {
                 self.renderer.set_base_dir(None);
             }
-            self.title = format!("MarkdownView - {}", filename);
+            self.title = format!("{APP_TITLE_PREFIX} - {}", filename);
             Ok(())
         } else {
             Ok(())
@@ -1457,7 +1555,7 @@ mod tests {
     fn test_app_creation() {
         let app = MarkdownViewerApp::new();
         assert!(!app.parsed_elements.is_empty()); // Should load welcome content
-        assert!(app.title.contains("MarkdownView"));
+        assert!(app.title.contains(APP_TITLE_PREFIX));
         assert!(app.error_message.is_none());
         assert!(matches!(app.view_mode, ViewMode::Rendered));
     }
@@ -1702,7 +1800,7 @@ The end.
 
         // Default should be same as new()
         assert!(!app.parsed_elements.is_empty());
-        assert!(app.title.contains("MarkdownView"));
+        assert!(app.title.contains(APP_TITLE_PREFIX));
         assert!(app.error_message.is_none());
         assert!(app.current_file.is_none());
     }
@@ -1817,4 +1915,28 @@ The end.
         let from_near_top = (near_top - page_size).max(0.0);
         assert_eq!(from_near_top, 0.0);
     }
+
+    #[test]
+    fn test_compute_window_adjustment_clamps_offscreen_window() {
+        let outer = egui::Rect::from_min_size(egui::pos2(1200.0, 900.0), egui::vec2(800.0, 600.0));
+        let monitor = egui::vec2(1024.0, 768.0);
+        let (pos, size) = MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(monitor))
+            .expect("should adjust window geometry");
+        assert!(pos.x <= monitor.x - size.x + 1.0);
+        assert!(pos.y <= monitor.y - size.y + 1.0);
+    }
+
+    #[test]
+    fn test_compute_window_adjustment_respects_min_size() {
+        let outer = egui::Rect::from_min_size(egui::pos2(-200.0, -100.0), egui::vec2(200.0, 100.0));
+        let monitor = egui::vec2(1920.0, 1080.0);
+        let (pos, size) = MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(monitor))
+            .expect("should enforce minimum window size");
+        assert!(size.x >= 600.0);
+        assert!(size.y >= 400.0);
+        assert!(pos.x >= 0.0);
+        assert!(pos.y >= 0.0);
+    }
 }
+
+
