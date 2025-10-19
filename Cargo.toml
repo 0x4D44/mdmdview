@@ -1,6 +1,6 @@
 [package]
 name = "mdmdview"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "A simple markdown viewer for Windows"
 authors = ["Your Name <your.email@example.com>"]
@@ -54,3 +54,4 @@ mermaid-quickjs = ["dep:rquickjs"]
 [dependencies.rquickjs]
 version = "0.6"
 optional = true
+

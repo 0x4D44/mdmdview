@@ -1092,6 +1092,10 @@ impl MarkdownRenderer {
                     | '\u{2014}'
                     | '\u{00A0}'
                     | '\u{202F}'
+                    | '\u{2190}'
+                    | '\u{2192}'
+                    | '\u{2191}'
+                    | '\u{2193}'
             )
         }) {
             return normalized;
@@ -1104,6 +1108,20 @@ impl MarkdownRenderer {
                     out.push('-')
                 }
                 '\u{00A0}' | '\u{202F}' => out.push(' '),
+                '\u{2190}' => {
+                    out.push('<');
+                    out.push('-');
+                }
+                '\u{2192}' => {
+                    out.push('-');
+                    out.push('>');
+                }
+                '\u{2191}' => {
+                    out.push('^');
+                }
+                '\u{2193}' => {
+                    out.push('v');
+                }
                 _ => out.push(ch),
             }
         }
@@ -3090,6 +3108,9 @@ mod tests {
         let input = "A\u{00A0}B\u{2013}C";
         let normalized = renderer.normalize_text_for_test(input);
         assert_eq!(normalized, "A B-C");
+
+        let arrows = renderer.normalize_text_for_test("← → ↑ ↓");
+        assert_eq!(arrows, "<- -> ^ v");
 
         let untouched = renderer.normalize_text_for_test("Plain text");
         assert_eq!(untouched, "Plain text");
