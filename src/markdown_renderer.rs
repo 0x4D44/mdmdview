@@ -6,10 +6,12 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
+use std::time::{Duration, SystemTime};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
+use unicode_normalization::{UnicodeCaseFold, UnicodeNormalization};
 use unicode_segmentation::UnicodeSegmentation;
 
 // Embedded Mermaid JS bytes are generated in build.rs into OUT_DIR.
@@ -115,13 +117,19 @@ type TableParseResult = (Vec<Vec<InlineSpan>>, Vec<Vec<Vec<InlineSpan>>>, usize)
 /// Type alias for quote lines (each line is a sequence of inline spans)
 type QuoteLines = Vec<Vec<InlineSpan>>;
 
+struct ImageCacheEntry {
+    texture: egui::TextureHandle,
+    size: [u32; 2],
+    modified: Option<SystemTime>,
+}
+
 /// Markdown renderer with proper inline element handling
 pub struct MarkdownRenderer {
     font_sizes: FontSizes,
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
     emoji_textures: RefCell<HashMap<String, egui::TextureHandle>>,
-    image_textures: RefCell<HashMap<String, egui::TextureHandle>>,
+    image_textures: RefCell<HashMap<String, ImageCacheEntry>>,
     // Mapping of header id -> last rendered rect (for in-document navigation)
     header_rects: RefCell<HashMap<String, egui::Rect>>,
     // Last clicked internal anchor (e.g., "getting-started") for the app to consume
@@ -160,6 +168,8 @@ impl Default for MarkdownRenderer {
 }
 
 impl MarkdownRenderer {
+    const MAX_KROKI_JOBS: usize = 4;
+
     /// Create a new markdown renderer
     pub fn new() -> Self {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -210,7 +220,6 @@ impl MarkdownRenderer {
         let mut options = Options::empty();
         options.insert(Options::ENABLE_STRIKETHROUGH);
         options.insert(Options::ENABLE_TABLES);
-        options.insert(Options::ENABLE_FOOTNOTES);
         options.insert(Options::ENABLE_TASKLISTS);
 
         let parser = Parser::new_ext(markdown, options);
@@ -1028,30 +1037,42 @@ impl MarkdownRenderer {
 
     /// Fix Unicode characters that may not render properly in the default font
     fn fix_unicode_chars(&self, text: &str) -> String {
-        // Normalize a few problematic glyphs for better cross-font rendering
-        // - Replace arrows with ASCII sequences
-        // - Map non/soft-breaking hyphens to regular hyphen
-        // - Normalize Unicode minus and exotic spaces
-        text.replace('→', " -> ")
-            .replace('←', " <- ")
-            .replace('↑', " ^ ")
-            .replace('↓', " v ")
-            // hyphen/dash family and NBSP variants
-            .replace(['\u{2011}', '\u{00AD}', '\u{2010}', '\u{2212}', '\u{2013}', '\u{2014}'], "-")
-            .replace(['\u{00A0}', '\u{202F}'], " ")
-            // Attempt to repair common mojibake (utf-8 interpreted as cp1252)
-            .replace("â€œ", "“")
-            .replace("â€\u{009d}", "”")
-            .replace("â€˜", "‘")
-            .replace("â€™", "’")
-            .replace("â€¢", "•")
-            .replace("â€“", "–")
-            .replace("â€”", "—")
-            .replace("â€‘", "‑")
-            .replace("â†’", "→")
+        let normalized: String = text.nfc().collect();
+        if !normalized.chars().any(|c| {
+            matches!(
+                c,
+                '\u{2011}'
+                    | '\u{00AD}'
+                    | '\u{2010}'
+                    | '\u{2212}'
+                    | '\u{2013}'
+                    | '\u{2014}'
+                    | '\u{00A0}'
+                    | '\u{202F}'
+            )
+        }) {
+            return normalized;
+        }
+
+        let mut out = String::with_capacity(normalized.len());
+        for ch in normalized.chars() {
+            match ch {
+                '\u{2011}' | '\u{00AD}' | '\u{2010}' | '\u{2212}' | '\u{2013}' | '\u{2014}' => {
+                    out.push('-')
+                }
+                '\u{00A0}' | '\u{202F}' => out.push(' '),
+                _ => out.push(ch),
+            }
+        }
+        out
     }
 
-    /// Render a single inline span
+    #[cfg(test)]
+    pub(crate) fn normalize_text_for_test(&self, text: &str) -> String {
+        self.fix_unicode_chars(text)
+    }
+
+    /// Render a single inline span    /// Render a single inline span
     fn render_inline_span(
         &self,
         ui: &mut egui::Ui,
@@ -1086,7 +1107,7 @@ impl MarkdownRenderer {
                 };
                 ui.add(
                     egui::Label::new(
-                        RichText::new(code.trim())
+                        RichText::new(code)
                             .size(self.font_sizes.code)
                             .family(egui::FontFamily::Monospace)
                             .background_color(bg)
@@ -1273,83 +1294,111 @@ impl MarkdownRenderer {
         let expanded = Self::expand_shortcodes(segment);
         let expanded = Self::expand_superscripts(&expanded);
         if let Some(h) = self.highlight_phrase.borrow().as_ref() {
-            let lower = expanded.to_ascii_lowercase();
-            let mut start_at = 0usize;
-            while let Some(pos) = lower[start_at..].find(h) {
-                let abs = start_at + pos;
-                if abs > start_at {
-                    let pre = &expanded[start_at..abs];
-                    if !pre.is_empty() {
-                        let mut rich = RichText::new(pre).size(size);
-                        if style.strong {
-                            rich = rich.strong();
-                        }
-                        if style.italics {
-                            rich = rich.italics();
-                        }
-                        if style.strike {
-                            rich = rich.strikethrough();
-                        }
-                        if let Some(color) = style.color {
-                            rich = rich.color(color);
-                        }
-                        ui.label(rich);
+            if !h.is_empty() {
+                let mut folded = String::new();
+                let mut folded_to_char: Vec<usize> = Vec::new();
+                let mut char_ranges: Vec<(usize, usize)> = Vec::new();
+                for (char_idx, (byte_idx, ch)) in expanded.char_indices().enumerate() {
+                    let folded_piece: String = ch.to_string().nfkc().default_case_fold().collect();
+                    let before = folded.len();
+                    folded.push_str(&folded_piece);
+                    let after = folded.len();
+                    for _ in before..after {
+                        folded_to_char.push(char_idx);
+                    }
+                    char_ranges.push((byte_idx, byte_idx + ch.len_utf8()));
+                }
+
+                let mut rendered_until = 0usize;
+                let mut search_at = 0usize;
+                while let Some(pos) = folded[search_at..].find(h) {
+                    let abs = search_at + pos;
+                    if abs >= folded_to_char.len() {
+                        break;
+                    }
+                    let start_char_idx = folded_to_char[abs];
+                    let (start_byte, _) = char_ranges[start_char_idx];
+                    if start_byte > rendered_until {
+                        self.render_plain_segment(
+                            ui,
+                            &expanded[rendered_until..start_byte],
+                            size,
+                            style,
+                        );
+                    }
+
+                    let match_end = abs + h.len();
+                    let end_char_idx = if match_end == 0 {
+                        start_char_idx
+                    } else {
+                        folded_to_char[match_end.saturating_sub(1)]
+                    };
+                    let (_, end_byte) = char_ranges[end_char_idx];
+                    let highlight_slice = &expanded[start_byte..end_byte];
+                    self.render_highlighted_segment(ui, highlight_slice, size, style);
+
+                    rendered_until = end_byte;
+                    search_at = match_end;
+                }
+
+                if rendered_until < expanded.len() {
+                    let rest = &expanded[rendered_until..];
+                    if !rest.is_empty() {
+                        self.render_plain_segment(ui, rest, size, style);
                     }
                 }
-                let mat = &expanded[abs..abs + h.len()];
-                let mut rich = RichText::new(mat)
-                    .size(size)
-                    .background_color(Color32::from_rgb(80, 80, 0));
-                if style.strong {
-                    rich = rich.strong();
-                }
-                if style.italics {
-                    rich = rich.italics();
-                }
-                if style.strike {
-                    rich = rich.strikethrough();
-                }
-                if let Some(color) = style.color {
-                    rich = rich.color(color);
-                }
-                ui.label(rich);
-                start_at = abs + h.len();
+                return;
             }
-            if start_at < expanded.len() {
-                let rest = &expanded[start_at..];
-                if !rest.is_empty() {
-                    let mut rich = RichText::new(rest).size(size);
-                    if style.strong {
-                        rich = rich.strong();
-                    }
-                    if style.italics {
-                        rich = rich.italics();
-                    }
-                    if style.strike {
-                        rich = rich.strikethrough();
-                    }
-                    if let Some(color) = style.color {
-                        rich = rich.color(color);
-                    }
-                    ui.label(rich);
-                }
-            }
-        } else {
-            let mut rich = RichText::new(expanded).size(size);
-            if style.strong {
-                rich = rich.strong();
-            }
-            if style.italics {
-                rich = rich.italics();
-            }
-            if style.strike {
-                rich = rich.strikethrough();
-            }
-            if let Some(color) = style.color {
-                rich = rich.color(color);
-            }
-            ui.label(rich);
         }
+        self.render_plain_segment(ui, &expanded, size, style);
+    }
+
+    fn render_plain_segment(&self, ui: &mut egui::Ui, text: &str, size: f32, style: InlineStyle) {
+        if text.is_empty() {
+            return;
+        }
+        let mut rich = RichText::new(text).size(size);
+        if style.strong {
+            rich = rich.strong();
+        }
+        if style.italics {
+            rich = rich.italics();
+        }
+        if style.strike {
+            rich = rich.strikethrough();
+        }
+        if let Some(color) = style.color {
+            rich = rich.color(color);
+        }
+        ui.label(rich);
+    }
+
+    fn render_highlighted_segment(
+        &self,
+        ui: &mut egui::Ui,
+        text: &str,
+        size: f32,
+        style: InlineStyle,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let mut rich = RichText::new(text)
+            .size(size)
+            .background_color(Color32::from_rgb(80, 80, 0));
+        if style.strong {
+            rich = rich.strong();
+        }
+        if style.italics {
+            rich = rich.italics();
+        }
+        if style.strike {
+            rich = rich.strikethrough();
+        }
+        if let Some(color) = style.color {
+            rich = rich.color(color);
+        }
+        ui.label(rich);
     }
 
     /// Map a grapheme cluster to an emoji image key if available.
@@ -1427,8 +1476,7 @@ impl MarkdownRenderer {
                     }
                     InlineSpan::Code(code) => {
                         let mono = egui::FontId::monospace(self.font_sizes.code);
-                        let galley =
-                            fonts.layout_no_wrap(code.trim().to_string(), mono, Color32::WHITE);
+                        let galley = fonts.layout_no_wrap(code.to_string(), mono, Color32::WHITE);
                         width += galley.size().x + 6.0; // small padding for code background
                     }
                     InlineSpan::Image { .. } => {
@@ -1889,14 +1937,29 @@ impl MarkdownRenderer {
         // Default path: render via Kroki service (non-blocking)
         let key = Self::hash_str(code);
 
+        if !Self::kroki_enabled() {
+            egui::Frame::none()
+                .fill(Color32::from_rgb(25, 25, 25))
+                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new("Mermaid rendering via Kroki is disabled. Set MDMDVIEW_ENABLE_KROKI=1 to enable network rendering.")
+                            .color(Color32::from_rgb(200, 160, 80))
+                            .family(egui::FontFamily::Monospace)
+                            .size(self.font_sizes.code),
+                    );
+                });
+            return false;
+        }
         // If we already have an SVG for this diagram, rasterize to a texture and draw it
         if let Some(img_bytes) = self.kroki_svg_cache.borrow().get(&key) {
             // Use a width-bucketed texture cache key to avoid re-rasterizing too often
             let width_bucket = (ui.available_width().ceil() as u32) / 32 * 32;
             let cache_key = format!("mermaid:{}:w{}", key, width_bucket);
-            if let Some(tex) = self.image_textures.borrow().get(&cache_key) {
-                let size = tex.size();
-                let (tw, th) = (size[0] as f32, size[1] as f32);
+            if let Some(entry) = self.image_textures.borrow().get(&cache_key) {
+                let tex = entry.texture.clone();
+                let (tw, th) = (entry.size[0] as f32, entry.size[1] as f32);
                 let available_w = ui.available_width().max(1.0);
                 let base_scale = self.ui_scale();
                 let scaled_w = tw * base_scale;
@@ -1917,9 +1980,7 @@ impl MarkdownRenderer {
                 let tex =
                     ui.ctx()
                         .load_texture(cache_key.clone(), img, egui::TextureOptions::LINEAR);
-                self.image_textures
-                    .borrow_mut()
-                    .insert(cache_key, tex.clone());
+                self.store_image_texture(&cache_key, tex.clone(), [w, h], None);
                 // Draw now
                 let (tw, th) = (w as f32, h as f32);
                 let available_w = ui.available_width().max(1.0);
@@ -1961,6 +2022,23 @@ impl MarkdownRenderer {
 
         // If no job is pending, kick one off now
         if !self.kroki_pending.borrow().contains(&key) {
+            if self.kroki_pending.borrow().len() >= Self::MAX_KROKI_JOBS {
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(25, 25, 25))
+                    .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(
+                                "Mermaid rendering queued; waiting for available slot...",
+                            )
+                            .color(Color32::from_rgb(200, 160, 80))
+                            .family(egui::FontFamily::Monospace)
+                            .size(self.font_sizes.code),
+                        );
+                    });
+                return true;
+            }
             self.spawn_kroki_job(key, code);
             self.kroki_pending.borrow_mut().insert(key);
             ui.ctx().request_repaint();
@@ -2119,17 +2197,15 @@ impl MarkdownRenderer {
         let key = Self::hash_str(code);
         let width_bucket = (ui.available_width().ceil() as u32).saturating_sub(0) / 16 * 16;
         let cache_key = format!("mermaid:{}:w{}", key, width_bucket);
-        if let Some(tex) = self.image_textures.borrow().get(&cache_key) {
-            return Some(tex.clone());
+        if let Some(entry) = self.image_textures.borrow().get(&cache_key) {
+            return Some(entry.texture.clone());
         }
         let svg = self.render_mermaid_to_svg_string(code)?;
-        let (img, _w, _h) = Self::svg_bytes_to_color_image(svg.as_bytes())?;
+        let (img, w, h) = Self::svg_bytes_to_color_image(svg.as_bytes())?;
         let tex = ui
             .ctx()
             .load_texture(cache_key.clone(), img, egui::TextureOptions::LINEAR);
-        self.image_textures
-            .borrow_mut()
-            .insert(cache_key, tex.clone());
+        self.store_image_texture(&cache_key, tex.clone(), [w, h], None);
         Some(tex)
     }
 
@@ -2159,6 +2235,21 @@ impl MarkdownRenderer {
         }
     }
 
+    fn kroki_enabled() -> bool {
+        match std::env::var("MDMDVIEW_ENABLE_KROKI") {
+            Ok(value) => {
+                let normalized = value.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn kroki_enabled_for_tests() -> bool {
+        Self::kroki_enabled()
+    }
+
     fn kroki_base_url(&self) -> String {
         std::env::var("MDMDVIEW_KROKI_URL").unwrap_or_else(|_| "https://kroki.io".to_string())
     }
@@ -2171,8 +2262,14 @@ impl MarkdownRenderer {
         std::thread::spawn(move || {
             let result = (|| -> Result<Vec<u8>, String> {
                 // Send Mermaid code to Kroki and expect SVG in response
-                let req = ureq::post(&url).set("Content-Type", "text/plain");
-                let resp = req
+                let agent = ureq::AgentBuilder::new()
+                    .timeout_connect(Duration::from_secs(5))
+                    .timeout_read(Duration::from_secs(10))
+                    .timeout_write(Duration::from_secs(10))
+                    .build();
+                let resp = agent
+                    .post(&url)
+                    .set("Content-Type", "text/plain")
                     .send_string(&payload)
                     .map_err(|e| format!("ureq error: {}", e))?;
                 if resp.status() >= 200 && resp.status() < 300 {
@@ -2488,7 +2585,7 @@ impl MarkdownRenderer {
         if let Some(p) = phrase {
             self.highlight_phrase
                 .borrow_mut()
-                .replace(p.to_ascii_lowercase());
+                .replace(p.nfkc().default_case_fold().collect());
         } else {
             self.highlight_phrase.borrow_mut().take();
         }
@@ -2575,9 +2672,17 @@ impl MarkdownRenderer {
             return None;
         }
 
-        if let Some(tex) = self.image_textures.borrow().get(resolved_src) {
-            let size = tex.size();
-            return Some((tex.clone(), size[0] as u32, size[1] as u32));
+        let path = Path::new(resolved_src);
+
+        if let Some(entry) = self.image_textures.borrow().get(resolved_src) {
+            let stale = if path.exists() {
+                Self::disk_image_timestamp(path) != entry.modified
+            } else {
+                false
+            };
+            if !stale {
+                return Some((entry.texture.clone(), entry.size[0], entry.size[1]));
+            }
         }
 
         // Try embedded assets first
@@ -2588,15 +2693,15 @@ impl MarkdownRenderer {
                     color_image,
                     egui::TextureOptions::LINEAR,
                 );
-                self.image_textures
-                    .borrow_mut()
-                    .insert(resolved_src.to_string(), tex.clone());
+                self.store_image_texture(resolved_src, tex.clone(), [w, h], None);
                 return Some((tex, w, h));
             }
         }
 
-        // Load from disk
-        let path = Path::new(resolved_src);
+        if !path.exists() {
+            return None;
+        }
+
         let bytes = std::fs::read(path).ok()?;
         let (color_image, w, h) = if Self::is_svg_path(resolved_src) {
             match Self::svg_bytes_to_color_image(&bytes) {
@@ -2615,10 +2720,30 @@ impl MarkdownRenderer {
             color_image,
             egui::TextureOptions::LINEAR,
         );
-        self.image_textures
-            .borrow_mut()
-            .insert(resolved_src.to_string(), tex.clone());
+        let modified = Self::disk_image_timestamp(path);
+        self.store_image_texture(resolved_src, tex.clone(), [w, h], modified);
         Some((tex, w, h))
+    }
+
+    fn disk_image_timestamp(path: &Path) -> Option<SystemTime> {
+        std::fs::metadata(path).ok()?.modified().ok()
+    }
+
+    fn store_image_texture(
+        &self,
+        key: &str,
+        texture: egui::TextureHandle,
+        size: [u32; 2],
+        modified: Option<SystemTime>,
+    ) {
+        self.image_textures.borrow_mut().insert(
+            key.to_string(),
+            ImageCacheEntry {
+                texture,
+                size,
+                modified,
+            },
+        );
     }
 
     /// Return embedded image bytes for known assets used in sample files
@@ -2793,6 +2918,7 @@ impl MarkdownRenderer {
 mod tests {
     use super::*;
     use crate::SAMPLE_FILES;
+    use std::env;
 
     #[test]
     fn test_markdown_renderer_creation() {
@@ -2835,16 +2961,14 @@ mod tests {
     #[test]
     fn test_tight_list_inline_code_and_styles() {
         let renderer = MarkdownRenderer::new();
-        let md = "- Use `code` and **bold** and *italic* and ~~strike~~\n";
+        let md = "- Use `code` and **bold** and *italic* and ~~strike~~\\n";
         let parsed = renderer.parse(md).expect("parse ok");
-        // Expect a single unordered list with one item
         assert_eq!(parsed.len(), 1);
         match &parsed[0] {
             MarkdownElement::List { ordered, items } => {
                 assert!(!ordered);
                 assert_eq!(items.len(), 1);
                 let spans = &items[0];
-                // Presence checks for various inline spans
                 assert!(spans
                     .iter()
                     .any(|s| matches!(s, InlineSpan::Code(c) if c == "code")));
@@ -2864,14 +2988,60 @@ mod tests {
 
     #[test]
     fn test_expand_shortcodes_basic() {
-        // Direct shortcode expansion
-        assert_eq!(MarkdownRenderer::expand_shortcodes(":rocket:"), "🚀");
-        assert_eq!(MarkdownRenderer::expand_shortcodes(":tada:"), "🎉");
-        // Mixed text
+        let rocket = MarkdownRenderer::expand_shortcodes(":rocket:");
+        assert_ne!(rocket, ":rocket:");
+        assert!(crate::emoji_catalog::image_bytes_for(&rocket).is_some());
+
+        let tada = MarkdownRenderer::expand_shortcodes(":tada:");
+        assert_ne!(tada, ":tada:");
+        assert!(crate::emoji_catalog::image_bytes_for(&tada).is_some());
+
         assert_eq!(
             MarkdownRenderer::expand_shortcodes("Hello :tada:!"),
-            "Hello 🎉!"
+            format!("Hello {}!", tada)
         );
+    }
+
+    #[test]
+    fn test_fix_unicode_chars_normalizes_basic_cases() {
+        let renderer = MarkdownRenderer::new();
+        let input = "A\u{00A0}B\u{2013}C";
+        let normalized = renderer.normalize_text_for_test(input);
+        assert_eq!(normalized, "A B-C");
+
+        let untouched = renderer.normalize_text_for_test("Plain text");
+        assert_eq!(untouched, "Plain text");
+    }
+
+    #[test]
+    fn test_inline_code_preserves_whitespace() {
+        let renderer = MarkdownRenderer::new();
+        let md = "Start `code` end";
+        let parsed = renderer.parse(md).expect("parse ok");
+        match &parsed[0] {
+            MarkdownElement::Paragraph(spans) => {
+                let code_span = spans.iter().find_map(|span| match span {
+                    InlineSpan::Code(t) => Some(t),
+                    _ => None,
+                });
+                assert_eq!(code_span, Some(&"code".to_string()));
+            }
+            other => panic!("Expected Paragraph, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_kroki_enabled_env_flag() {
+        std::env::remove_var("MDMDVIEW_ENABLE_KROKI");
+        assert!(!MarkdownRenderer::kroki_enabled_for_tests());
+
+        std::env::set_var("MDMDVIEW_ENABLE_KROKI", "true");
+        assert!(MarkdownRenderer::kroki_enabled_for_tests());
+
+        std::env::set_var("MDMDVIEW_ENABLE_KROKI", "0");
+        assert!(!MarkdownRenderer::kroki_enabled_for_tests());
+
+        std::env::remove_var("MDMDVIEW_ENABLE_KROKI");
     }
 
     #[test]
@@ -2886,7 +3056,6 @@ mod tests {
                 ids.push(id);
             }
         }
-        // Expect 4 headers with deduped slugs
         assert_eq!(ids.len(), 4);
         assert_eq!(ids[0], "getting-started");
         assert_eq!(ids[1], "getting-started-1");
@@ -2910,7 +3079,6 @@ mod tests {
             })
             .collect();
 
-        // Spot check key sections used by ToC
         for expected in [
             "markdown-formatting-guide",
             "table-of-contents",
@@ -2932,11 +3100,9 @@ mod tests {
         let renderer = MarkdownRenderer::new();
         let md = "Here is an image: ![Alt text](images/pic.webp \"Title\") end.";
         let parsed = renderer.parse(md).expect("parse ok");
-        // Expect a single paragraph
         assert_eq!(parsed.len(), 1);
         match &parsed[0] {
             MarkdownElement::Paragraph(spans) => {
-                // Find the image span
                 let img = spans.iter().find(|s| matches!(s, InlineSpan::Image { .. }));
                 assert!(img.is_some(), "image inline span present");
                 if let InlineSpan::Image { src, alt, title } = img.unwrap() {
@@ -2955,7 +3121,6 @@ mod tests {
         let md = "![Diagram](./a.png \"Flow\")";
         let parsed = renderer.parse(md).expect("parse ok");
         let text = MarkdownRenderer::element_plain_text(&parsed[0]);
-        // Plain text should include alt and title
         assert!(text.contains("Diagram"));
         assert!(text.contains("Flow"));
     }

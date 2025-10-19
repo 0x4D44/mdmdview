@@ -120,6 +120,7 @@ All standard markdown elements are fully supported with professional formatting:
 - **Lists** - Both bulleted and numbered with proper spacing
 - **Tables** - Professional grid layout with headers and striped rows
 - **Code blocks** - Syntax highlighting for multiple languages
+- **Mermaid diagrams** - Offline rendering requires the optional QuickJS feature. Network rendering via Kroki is opt-in; set MDMDVIEW_ENABLE_KROKI=1 to enable it.
 - **Inline code** - Properly formatted within text (e.g., use `pip install` command)
 - **Links** - Clickable URLs that open in browser
   - Internal anchors supported: `[Section](#section)` scrolls in‑document

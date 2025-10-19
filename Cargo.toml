@@ -20,6 +20,7 @@ anyhow = "1.0"
 env_logger = "0.10"
 image = { version = "0.24", default-features = false, features = ["png", "jpeg", "gif", "bmp", "ico", "webp"] }
 unicode-segmentation = "1"
+unicode-normalization = "0.1"
 usvg = { version = "0.43", default-features = false, features = ["text"] }
 resvg = "0.43"
 tiny-skia = "0.11"
