@@ -1938,5 +1938,3 @@ The end.
         assert!(pos.y >= 0.0);
     }
 }
-
-
