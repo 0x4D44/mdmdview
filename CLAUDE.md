@@ -15,20 +15,24 @@ cargo build
 # Optimized release build (preferred for distribution)
 cargo build --release
 
+# Build with offline Mermaid support
+cargo build --release --features mermaid-quickjs
+
 # Run in development
 cargo run
 
 # Run with a specific file
 cargo run -- document.md
 
-# Build with Mermaid offline rendering (requires mermaid.min.js in assets/vendor/)
-cargo build --release --features mermaid-quickjs
+# Run with Kroki enabled
+MDMDVIEW_ENABLE_KROKI=1 cargo run
 
-# Run all tests
+# Run tests
 cargo test
 
 # Run specific test module
 cargo test markdown_renderer
+cargo test app
 
 # Run tests with output
 cargo test -- --nocapture
@@ -37,6 +41,35 @@ cargo test -- --nocapture
 cargo fmt
 cargo clippy
 ```
+
+## Key Keyboard Shortcuts
+
+Understanding these shortcuts is important for testing and development:
+- `Ctrl+O` - Open file dialog
+- `Ctrl+W` - Close current file
+- `Ctrl+F` - Toggle search panel
+- `Ctrl+R` - Toggle between Rendered/Raw view
+- `Ctrl+E` - Toggle write mode (in Raw view)
+- `F5` - Reload current file
+- `F11` - Toggle fullscreen
+- `Alt+←` / `Alt+→` - Navigate back/forward in history
+- `Ctrl++` / `Ctrl+-` / `Ctrl+0` - Zoom in/out/reset
+- `Home` / `End` - Scroll to top/bottom
+- `Enter` / `Shift+Enter` - Navigate search results forward/backward
+
+## Drag and Drop Support
+
+The application supports dragging files and folders directly from your file explorer:
+- **Single File**: Drag a `.md` file to open it immediately
+- **Multiple Files**: Drag multiple files to open the first and queue the rest
+  - Use `Alt+→` to navigate through queued files
+  - Status bar shows queue count: "📋 N files in queue"
+- **Folders**: Drag a folder to open all markdown files within (non-recursive)
+  - Files are sorted alphabetically
+  - Only top-level files are included (subdirectories ignored)
+- **Visual Feedback**: Blue overlay appears when dragging over the window
+- **Supported Extensions**: `.md`, `.markdown`, `.mdown`, `.mkd`, `.txt`
+- **Max Files**: 50 files maximum per drop (protection against accidental large drops)
 
 ## Architecture
 
@@ -47,6 +80,7 @@ cargo clippy
    - Command-line argument parsing for file opening
    - Window configuration and icon generation
    - egui style configuration with true black background
+   - Cross-platform window state restoration
 
 2. **Application Logic** (`src/app.rs`)
    - Main app state management (`MarkdownViewerApp`)
@@ -55,18 +89,21 @@ cargo clippy
    - **Navigation history**: Back/Forward navigation through files and samples (browser-like)
    - View mode management (Rendered vs Raw, with optional Write mode)
    - Search functionality with Unicode normalization
+   - Scroll management for navigation and search results
    - File operations and error handling
 
 3. **Markdown Renderer** (`src/markdown_renderer.rs`)
    - Markdown parsing using pulldown-cmark into `MarkdownElement` enum
    - Conversion to egui widgets for display
    - Syntax highlighting with syntect
+   - Inline element handling (code, links, formatting)
    - Image loading and texture management with live refresh
    - Mermaid diagram rendering (Kroki service or QuickJS offline)
    - Table rendering with striped rows
    - Internal anchor navigation for links like `[Section](#section)`
    - Search highlighting with grapheme-aware text matching
    - **Line break preservation**: Single newlines in paragraphs are preserved (good for poetry/lyrics)
+   - Emoji support via Twemoji assets
 
 4. **Sample Files** (`src/sample_files.rs`)
    - Embedded markdown examples (`SAMPLE_FILES` constant array)
@@ -77,11 +114,13 @@ cargo clippy
    - Cross-platform window position/size persistence
    - Windows: Registry storage (`HKEY_CURRENT_USER\Software\MarkdownView`)
    - macOS/Linux: File storage in platform-specific config directories
+   - State sanitization to prevent invalid window positions
    - Window geometry validation and sanitization
 
 6. **Emoji System** (`src/emoji_catalog.rs`, `src/emoji_assets.rs`)
    - Embedded Twemoji PNG assets in binary
    - Shortcode expansion (e.g., `:rocket:` → 🚀)
+   - Grapheme-aware rendering
    - Texture caching for color emoji rendering
 
 7. **Build Script** (`build.rs`)
@@ -96,57 +135,106 @@ cargo clippy
 - **pulldown-cmark**: CommonMark compliant markdown parsing
 - **syntect**: Syntax highlighting for code blocks
 - **Windows Integration**: Custom icon and metadata via build.rs
+- **Cross-platform**: Runs on Windows, Linux, and macOS with platform-specific optimizations
 - **Optional Features**: Mermaid QuickJS rendering can be compiled in with `--features mermaid-quickjs`
+
+### Navigation System
+
+The app implements keyboard-driven navigation:
+- `NavigationRequest` enum handles different scroll types (Top, Bottom, PageUp, PageDown, ScrollUp, ScrollDown)
+- Main scroll area uses persistent state via `egui::Id::new("main_scroll_area")`
+- Keyboard shortcuts processed in `handle_shortcuts()`
+- Search results trigger automatic scrolling to matched elements
+- Internal anchor links (`[text](#anchor)`) scroll to headers within the document
+- Scroll deltas applied via `ui.scroll_with_delta()`
+- Page navigation moves 80% of viewport height
+- **Navigation history**: Browser-like back/forward through files and samples (Alt+← / Alt+→)
+
+### Search System
+
+Advanced search with Unicode support:
+- **Accent-aware matching**: Uses `unicode-normalization` and `unicode-casefold` crates
+- Searches normalized/case-folded versions of text for broader matches (finds "resume" and "Istanbul" from "istanbul")
+- Highlights respect grapheme clusters (emoji, accents stay intact)
+- Element-level highlighting: each `MarkdownElement` tracks matches
+- Real-time highlighting: search phrase highlighted inline as you type
+- Navigation: Enter/Shift+Enter or F3/Shift+F3 for next/previous match
+- Search state managed in `MarkdownViewerApp` with query tracking
+
+### View Modes
+
+Two primary viewing modes:
+- **Rendered Mode** (default): Displays parsed markdown with formatting, syntax highlighting, images
+- **Raw Mode** (Ctrl+R): Shows original markdown source in text editor/monospace
+  - **Write Mode** (Ctrl+E in Raw view): Enables editing with auto-save on view switch
+  - Preserves cursor position when toggling modes
+  - Line-based navigation with keyboard shortcuts
+  - Live preview update when switching back to rendered mode
+
+### Image Handling
+
+Images are loaded and cached with live refresh:
+- Base directory tracking: relative image paths resolved against current file's parent
+- Monitors file modification times via `std::time::SystemTime`
+- Automatically invalidates cached textures when source files change
+- F5 reload picks up modified images without restarting
+- Supports PNG, JPEG, GIF, BMP, ICO, WebP formats (via `image` crate)
+- SVG rendering via `usvg` and `resvg` / `tiny-skia` crates
+- Image paths resolved relative to markdown file location
+- Missing images show placeholder text instead of crashing
 
 ### Mermaid Diagram Rendering
 
-Two rendering modes exist:
-
-1. **Kroki Service (Default)**
+Two rendering modes available:
+1. **Kroki Service** (default, network-based):
    - Network-based rendering via Kroki API
    - Enable with `MDMDVIEW_ENABLE_KROKI=1` environment variable
    - Custom instance: `MDMDVIEW_KROKI_URL=https://your-instance.com`
-   - Background rendering with 4 concurrent workers
-   - Queue status panel when pool is busy
+   - Background rendering with worker pool (max 4 concurrent workers)
+   - Queue status UI panel when workers busy
 
-2. **QuickJS Offline**
-   - Build with `--features mermaid-quickjs`
-   - Requires `mermaid.min.js` in `assets/vendor/mermaid.min.js`
-   - Embedded JavaScript execution via rquickjs
+2. **QuickJS** (optional, offline):
+   - Enable at compile time with `--features mermaid-quickjs`
+   - Requires `assets/vendor/mermaid.min.js` file
+   - JavaScript embedded during build via `build.rs`
+   - Uses `rquickjs` crate for JS execution
    - No network dependency
 
 Both modes share caching and zoom behavior. Diagram textures are stored with refresh timestamps.
 
-### Image Loading and Texture Management
+### Font and Rendering
 
-- Base directory tracking: relative image paths resolved against current file's parent
-- Live refresh: textures invalidate when source file timestamp changes
-- F5 reload picks up modified images without restarting
-- Format support: PNG, JPEG, GIF, BMP, ICO, WEBP (via `image` crate)
-- SVG support via usvg/resvg/tiny-skia rasterization
+- Configurable font sizes for different markdown elements (`FontSizes` struct)
+- Proper inline element rendering with `InlineSpan` enum
+- Table rendering with headers and striped rows
+- Professional styling with proper spacing and colors
+- Dark mode with true black background for maximum contrast
+- **Line break preservation**: Single newlines preserved in paragraphs (important for poetry/lyrics)
 
-### Search System
+### Data Structures
 
-- Unicode-aware: case folding and NFKC normalization (finds "resume" and "Istanbul" from "istanbul")
-- Grapheme cluster respect: emoji and accent marks highlighted correctly
-- Real-time highlighting: search phrase highlighted inline as you type
-- Navigation: Enter/Shift+Enter or F3/Shift+F3 for next/previous match
-- Search state: tracks current match index, scrolls to element on match
+Key types for markdown representation:
 
-### View Modes
+**`MarkdownElement` enum** - Represents parsed markdown blocks:
+- `Paragraph(Vec<InlineSpan>)`
+- `Header { level, spans, id }` - id used for anchor links
+- `CodeBlock { language, code }` - with syntax highlighting
+- `List { items, ordered }` - nested list support
+- `Table { headers, rows }` - full table rendering
+- `HorizontalRule`, `Blockquote`, `Mermaid`, `Image`, etc.
 
-- **Rendered Mode**: Default markdown display with rich formatting
-- **Raw Mode** (Ctrl+R): Shows raw markdown source in monospace
-- **Write Mode** (Ctrl+E): Enables editing in Raw mode with live preview update
-- Cursor position preserved when toggling between modes
+**`InlineSpan` enum** - Represents inline formatting:
+- `Text(String)`, `Code(String)`
+- `Strong(String)`, `Emphasis(String)`, `Strikethrough(String)`
+- `Link { text, url }` - clickable links
+- `Image { src, alt, title }` - embedded images
 
-### Navigation System
+**`ViewMode` enum**:
+- `Rendered` - Display formatted markdown
+- `Raw` - Show source text (with optional editing)
 
-- `NavigationRequest` enum handles scroll types (Top, Bottom, PageUp/Down, Arrow scroll)
-- Main scroll area uses persistent state via `egui::Id::new("main_scroll_area")`
-- Keyboard shortcuts processed in `handle_shortcuts()`
-- Scroll deltas applied via `ui.scroll_with_delta()`
-- Page navigation moves 80% of viewport height
+**`NavigationRequest` enum**:
+- `Top`, `Bottom`, `PageUp`, `PageDown`, `ScrollUp`, `ScrollDown`
 
 ### Window State Persistence
 
@@ -154,19 +242,26 @@ Both modes share caching and zoom behavior. Diagram textures are stored with ref
 - Tracks position, size, and maximized state
 - Geometry validation: clamps offscreen/invalid values
 - Dual storage on Windows: registry + config file fallback
-- Cross-platform: XDG_CONFIG_HOME on Linux, ~/Library/Application Support on macOS
+- Cross-platform: `XDG_CONFIG_HOME` on Linux, `~/Library/Application Support` on macOS
 
 ## Development Patterns
 
 ### Error Handling
 - Uses `anyhow::Result` for consistent error propagation
 - Error messages displayed in UI rather than panicking
-- Graceful fallbacks: non-UTF-8 files loaded via `String::from_utf8_lossy`
+- Graceful fallbacks for missing files or parsing errors
+- **Non-UTF-8 files**: Uses `String::from_utf8_lossy` to handle legacy encodings
+  - Replacement characters (`U+FFFD`) mark invalid bytes
+  - Warning emitted once to stderr
+  - Always saves as UTF-8
 - Missing images show placeholder text instead of crashing
 
 ### State Management
 - Centralized app state in `MarkdownViewerApp`
 - Parsed content cached as `Vec<MarkdownElement>`
+- Window state persistence with throttling (avoids excessive disk writes)
+- Deferred state changes to avoid borrowing conflicts during input handling
+- Search state tracking with query normalization
 - Element rects tracked via `element_rects` HashMap for scroll-to-element
 - Header IDs stored for anchor navigation
 - Texture cache managed by MarkdownRenderer
@@ -174,7 +269,11 @@ Both modes share caching and zoom behavior. Diagram textures are stored with ref
 ### Testing Strategy
 - Unit tests for markdown parsing and rendering
 - Integration tests for file loading (use `tempfile` crate)
-- Build script tests for version parsing and metadata extraction
+- Search functionality tests (Unicode normalization, accent handling)
+- Window state persistence tests
+- Build metadata tests for version parsing and metadata extraction
+- Use `tempfile` crate for file system tests
+- Run specific test modules: `cargo test markdown_renderer`, `cargo test app`
 - Run tests after any changes to parsing/rendering logic
 
 ### File Operations
@@ -185,14 +284,35 @@ Both modes share caching and zoom behavior. Diagram textures are stored with ref
 - Base directory tracked for relative image paths
 - F5 reload re-reads from disk without losing position
 
-## Windows-Specific Features
+## Feature Flags and Environment Variables
 
-- Custom application icon (icon.ico)
-- File metadata and version information from Cargo.toml
-- Registry-based window state persistence
+### Cargo Features
+- `mermaid-quickjs`: Enables offline Mermaid rendering via QuickJS
+  - Build with: `cargo build --features mermaid-quickjs`
+  - Requires `assets/vendor/mermaid.min.js` file
+  - Adds `rquickjs` dependency
+
+### Environment Variables
+- `MDMDVIEW_ENABLE_KROKI=1`: Enable Kroki service for Mermaid diagram rendering
+- `MDMDVIEW_KROKI_URL`: Custom Kroki server URL (default: public Kroki instance)
+- `RUST_LOG`: Control logging level in debug builds (via `env_logger`)
+
+## Platform-Specific Features
+
+### Windows
+- Custom application icon (icon.ico) embedded via `build.rs`
+- File metadata and version information from `Cargo.toml`
+- Windows registry for window state persistence (`HKEY_CURRENT_USER\Software\MarkdownView`)
 - Shell association support for .md files
-- Native file dialogs using rfd crate
-- Build timestamp captured at compile time
+- Build metadata includes timestamp via PowerShell
+- Uses `winres` crate for resource compilation
+- Native file dialogs using `rfd` crate
+
+### Linux/macOS
+- Window state in `~/.config/mdmdview/window_state.txt` (Linux)
+- Window state in `~/Library/Application Support/MarkdownView/window_state.txt` (macOS)
+- Native file dialogs using `rfd` crate
+- Cross-platform config directory resolution (`XDG_CONFIG_HOME`)
 
 ## Code Quality Standards
 
@@ -213,6 +333,7 @@ Release profile configured for minimal binary size:
 - Panic abort strategy
 
 When making changes:
+- Once a debug/test build succeeds then proceed to build the release version as well
 - Run both debug and release builds to verify
 - Test with large markdown files (1000+ elements)
 - Verify texture memory usage with many images
