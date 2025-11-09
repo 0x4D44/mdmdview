@@ -1348,6 +1348,73 @@ impl MarkdownViewerApp {
             }
         });
     }
+
+    /// Render drag-and-drop overlay when files are hovered
+    fn render_drag_overlay(&self, ctx: &Context) {
+        if !self.drag_hover {
+            return;
+        }
+
+        // Full-screen overlay
+        egui::Area::new(egui::Id::new("drag_overlay"))
+            .fixed_pos(egui::pos2(0.0, 0.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let screen_rect = ctx.screen_rect();
+
+                // Semi-transparent dark background
+                ui.painter().rect_filled(
+                    screen_rect,
+                    0.0,
+                    egui::Color32::from_black_alpha(180),
+                );
+
+                // Dashed border effect using rounded rect with stroke
+                let border_rect = screen_rect.shrink(20.0);
+                let border_color = egui::Color32::from_rgb(100, 150, 255);
+
+                // Draw border
+                ui.painter().rect_stroke(
+                    border_rect,
+                    8.0,
+                    egui::Stroke::new(4.0, border_color),
+                );
+
+                // Center text
+                ui.allocate_ui_at_rect(screen_rect, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(screen_rect.height() / 2.0 - 80.0);
+
+                        // Main message with file emoji
+                        ui.label(
+                            RichText::new("📄 Drop files to open")
+                                .size(36.0)
+                                .color(egui::Color32::WHITE)
+                                .strong(),
+                        );
+
+                        ui.add_space(20.0);
+
+                        // Supported formats
+                        ui.label(
+                            RichText::new("Supported: .md, .markdown, .mdown, .mkd, .txt")
+                                .size(18.0)
+                                .color(egui::Color32::LIGHT_GRAY),
+                        );
+
+                        ui.add_space(10.0);
+
+                        // Additional hint
+                        ui.label(
+                            RichText::new("Drop multiple files to open them in sequence")
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(150, 150, 150))
+                                .italics(),
+                        );
+                    });
+                });
+            });
+    }
 }
 
 impl eframe::App for MarkdownViewerApp {
@@ -1651,6 +1718,9 @@ impl eframe::App for MarkdownViewerApp {
 
         // Render status bar
         self.render_status_bar(ctx);
+
+        // Render drag-and-drop overlay (must be last to appear on top)
+        self.render_drag_overlay(ctx);
     }
 
     fn auto_save_interval(&self) -> std::time::Duration {
