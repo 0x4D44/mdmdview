@@ -351,11 +351,26 @@ impl MarkdownViewerApp {
             }
 
             if path.is_dir() {
-                // Phase 4 will handle directories
-                errors.push(format!(
-                    "Directory not yet supported: {}",
-                    path.display()
-                ));
+                // Handle directory by scanning for markdown files
+                match self.scan_directory(&path) {
+                    Ok(dir_files) => {
+                        if dir_files.is_empty() {
+                            errors.push(format!(
+                                "No markdown files in directory: {}",
+                                path.display()
+                            ));
+                        } else {
+                            valid_files.extend(dir_files);
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(format!(
+                            "Cannot read directory {}: {}",
+                            path.display(),
+                            e
+                        ));
+                    }
+                }
                 continue;
             }
 
@@ -427,6 +442,28 @@ impl MarkdownViewerApp {
             };
             self.error_message = Some(error_msg);
         }
+    }
+
+    /// Scan directory for markdown files (non-recursive)
+    fn scan_directory(&self, dir: &Path) -> Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+
+        let entries = std::fs::read_dir(dir)?;
+
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+
+            // Only include files (not subdirectories)
+            if path.is_file() && self.is_valid_markdown_file(&path) {
+                files.push(path);
+            }
+        }
+
+        // Sort alphabetically for predictable order
+        files.sort();
+
+        Ok(files)
     }
 
     /// Load markdown content from a string
@@ -2492,5 +2529,45 @@ The end.
 
         // No extension
         assert!(!app.is_valid_markdown_file(Path::new("test")));
+    }
+
+    #[test]
+    fn test_scan_directory() -> Result<()> {
+        let temp_dir = tempfile::TempDir::new()?;
+        let dir_path = temp_dir.path();
+
+        // Create test files
+        std::fs::write(dir_path.join("zebra.md"), "# Z")?;
+        std::fs::write(dir_path.join("alpha.md"), "# A")?;
+        std::fs::write(dir_path.join("image.png"), "fake")?;
+        std::fs::write(dir_path.join("beta.markdown"), "# B")?;
+
+        // Create subdirectory (should be ignored)
+        std::fs::create_dir(dir_path.join("subdir"))?;
+        std::fs::write(dir_path.join("subdir/nested.md"), "# N")?;
+
+        let app = MarkdownViewerApp::new();
+        let files = app.scan_directory(dir_path)?;
+
+        // Should find 3 markdown files (alpha, beta, zebra)
+        // Should NOT find image.png or nested.md
+        assert_eq!(files.len(), 3);
+
+        // Should be sorted alphabetically
+        assert!(files[0].ends_with("alpha.md"));
+        assert!(files[1].ends_with("beta.markdown"));
+        assert!(files[2].ends_with("zebra.md"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_scan_empty_directory() -> Result<()> {
+        let temp_dir = tempfile::TempDir::new()?;
+        let app = MarkdownViewerApp::new();
+        let files = app.scan_directory(temp_dir.path())?;
+
+        assert_eq!(files.len(), 0);
+        Ok(())
     }
 }
