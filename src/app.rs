@@ -9,6 +9,7 @@ use egui::text::TextFormat;
 use egui::{menu, CentralPanel, Color32, Context, RichText, TopBottomPanel};
 use egui::{TextEdit, TextStyle};
 use rfd::FileDialog;
+use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use unicode_casefold::UnicodeCaseFold;
@@ -92,6 +93,8 @@ pub struct MarkdownViewerApp {
     // Drag and drop state
     /// Visual state: file is being dragged over window
     drag_hover: bool,
+    /// Queue of files waiting to be opened (from multi-file drop)
+    pending_files: VecDeque<PathBuf>,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -310,6 +313,7 @@ impl MarkdownViewerApp {
             history_index: 0,
             max_history: 50,
             drag_hover: false,
+            pending_files: VecDeque::new(),
         };
 
         // Load welcome content by default
@@ -330,47 +334,98 @@ impl MarkdownViewerApp {
         }
     }
 
-    /// Handle dropped files from drag-and-drop operation (Phase 1: single file only)
+    /// Handle dropped files from drag-and-drop operation
     fn handle_file_drop(&mut self, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             return;
         }
 
-        // For Phase 1, only handle first file
-        let path = &paths[0];
+        let mut valid_files = Vec::new();
+        let mut errors = Vec::new();
 
-        // Validate file exists
-        if !path.exists() {
-            self.error_message = Some(format!("File not found: {}", path.display()));
-            return;
+        // Validate all dropped files
+        for path in paths {
+            if !path.exists() {
+                errors.push(format!("File not found: {}", path.display()));
+                continue;
+            }
+
+            if path.is_dir() {
+                // Phase 4 will handle directories
+                errors.push(format!(
+                    "Directory not yet supported: {}",
+                    path.display()
+                ));
+                continue;
+            }
+
+            if !self.is_valid_markdown_file(&path) {
+                errors.push(format!(
+                    "Not a markdown file: {}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ));
+                continue;
+            }
+
+            valid_files.push(path);
         }
 
-        // Validate it's a file (not directory)
-        if !path.is_file() {
+        // Limit to prevent memory issues
+        const MAX_FILES: usize = 50;
+        if valid_files.len() > MAX_FILES {
             self.error_message = Some(format!(
-                "Not a file: {}. Directories will be supported in Phase 4.",
-                path.display()
+                "Too many files ({}). Maximum is {}.\n\
+                 Please drop files in smaller batches.",
+                valid_files.len(),
+                MAX_FILES
             ));
             return;
         }
 
-        // Validate markdown extension
-        if !self.is_valid_markdown_file(path) {
-            self.error_message = Some(format!(
-                "Not a markdown file: {}\nSupported extensions: .md, .markdown, .mdown, .mkd, .txt",
-                path.display()
-            ));
-            return;
+        // Handle valid files
+        if !valid_files.is_empty() {
+            // Push current state to history if we have content
+            if !self.current_content.is_empty() {
+                self.push_history();
+            }
+
+            // Open first file immediately
+            let first_file = valid_files.remove(0);
+            if let Err(e) = self.load_file(first_file) {
+                self.error_message = Some(format!("Failed to load file: {}", e));
+                return;
+            }
+
+            // Queue remaining files
+            self.pending_files.extend(valid_files.iter().cloned());
+
+            // Show info message if multiple files
+            if !self.pending_files.is_empty() {
+                eprintln!(
+                    "Queued {} files. Use Alt+→ to navigate to next file.",
+                    self.pending_files.len()
+                );
+            }
         }
 
-        // Push current state to history if we have content
-        if !self.current_content.is_empty() {
-            self.push_history();
-        }
-
-        // Load the file
-        if let Err(e) = self.load_file(path.clone()) {
-            self.error_message = Some(format!("Failed to load file: {}", e));
+        // Show errors if any
+        if !errors.is_empty() {
+            let valid_count = if valid_files.is_empty() { 0 } else { valid_files.len() + 1 };
+            let error_msg = if errors.len() == 1 && valid_count == 0 {
+                errors[0].clone()
+            } else if valid_count == 0 {
+                // All files failed
+                format!("No valid files:\n{}", errors.join("\n"))
+            } else {
+                // Some succeeded, some failed
+                format!(
+                    "Opened {} files. Skipped {}:\n{}",
+                    valid_count,
+                    errors.len(),
+                    errors.join("\n")
+                )
+            };
+            self.error_message = Some(error_msg);
         }
     }
 
@@ -581,6 +636,21 @@ impl MarkdownViewerApp {
 
     /// Navigate forward in history
     fn navigate_forward(&mut self) -> bool {
+        // First try pending files queue
+        if let Some(next_file) = self.pending_files.pop_front() {
+            // Push current state to history
+            if !self.current_content.is_empty() {
+                self.push_history();
+            }
+
+            // Load next file from queue
+            if let Err(e) = self.load_file(next_file) {
+                self.error_message = Some(format!("Failed to load file: {}", e));
+            }
+            return true;
+        }
+
+        // Otherwise use history navigation (existing code)
         if self.history_index < self.history.len() - 1 {
             self.history_index += 1;
             self.restore_from_history();
@@ -628,7 +698,8 @@ impl MarkdownViewerApp {
 
     /// Check if we can navigate forward
     fn can_navigate_forward(&self) -> bool {
-        self.history_index < self.history.len().saturating_sub(1)
+        !self.pending_files.is_empty()
+            || self.history_index < self.history.len().saturating_sub(1)
     }
 
     /// Request a reload of the current file (processed outside of input context)
@@ -1309,6 +1380,24 @@ impl MarkdownViewerApp {
                     ui.label("📄 Sample file");
                 } else {
                     ui.label("📄 No file loaded");
+                }
+
+                // Show pending file count if files are queued
+                if !self.pending_files.is_empty() {
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!(
+                            "📋 {} files in queue",
+                            self.pending_files.len()
+                        ))
+                        .color(egui::Color32::from_rgb(100, 150, 255))
+                    );
+
+                    ui.label(
+                        RichText::new("(Alt+→ for next)")
+                            .color(egui::Color32::GRAY)
+                            .italics()
+                    );
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
