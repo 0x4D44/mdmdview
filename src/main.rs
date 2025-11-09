@@ -29,7 +29,8 @@ fn main() -> Result<(), eframe::Error> {
         .with_icon(create_app_icon())
         .with_resizable(true)
         .with_maximize_button(true)
-        .with_minimize_button(true);
+        .with_minimize_button(true)
+        .with_drag_and_drop(true);
 
     // Restore previous window position/size if available
     if let Some(ws) = load_window_state() {

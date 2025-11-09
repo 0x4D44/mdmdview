@@ -89,6 +89,9 @@ pub struct MarkdownViewerApp {
     history_index: usize,
     /// Maximum history entries to keep
     max_history: usize,
+    // Drag and drop state
+    /// Visual state: file is being dragged over window
+    drag_hover: bool,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -306,6 +309,7 @@ impl MarkdownViewerApp {
             history: Vec::new(),
             history_index: 0,
             max_history: 50,
+            drag_hover: false,
         };
 
         // Load welcome content by default
@@ -314,6 +318,60 @@ impl MarkdownViewerApp {
         }
 
         app
+    }
+
+    /// Check if file has valid markdown extension
+    fn is_valid_markdown_file(&self, path: &Path) -> bool {
+        if let Some(ext) = path.extension() {
+            let ext = ext.to_string_lossy().to_lowercase();
+            matches!(ext.as_str(), "md" | "markdown" | "mdown" | "mkd" | "txt")
+        } else {
+            false
+        }
+    }
+
+    /// Handle dropped files from drag-and-drop operation (Phase 1: single file only)
+    fn handle_file_drop(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+
+        // For Phase 1, only handle first file
+        let path = &paths[0];
+
+        // Validate file exists
+        if !path.exists() {
+            self.error_message = Some(format!("File not found: {}", path.display()));
+            return;
+        }
+
+        // Validate it's a file (not directory)
+        if !path.is_file() {
+            self.error_message = Some(format!(
+                "Not a file: {}. Directories will be supported in Phase 4.",
+                path.display()
+            ));
+            return;
+        }
+
+        // Validate markdown extension
+        if !self.is_valid_markdown_file(path) {
+            self.error_message = Some(format!(
+                "Not a markdown file: {}\nSupported extensions: .md, .markdown, .mdown, .mkd, .txt",
+                path.display()
+            ));
+            return;
+        }
+
+        // Push current state to history if we have content
+        if !self.current_content.is_empty() {
+            self.push_history();
+        }
+
+        // Load the file
+        if let Err(e) = self.load_file(path.clone()) {
+            self.error_message = Some(format!("Failed to load file: {}", e));
+        }
     }
 
     /// Load markdown content from a string
@@ -1269,11 +1327,35 @@ impl MarkdownViewerApp {
             });
         });
     }
+    /// Handle drag-drop events from egui
+    fn handle_drag_drop_events(&mut self, ctx: &Context) {
+        ctx.input(|i| {
+            // Check if files are being hovered
+            if !i.raw.hovered_files.is_empty() {
+                self.drag_hover = true;
+            } else {
+                self.drag_hover = false;
+            }
+
+            // Check if files were dropped
+            if !i.raw.dropped_files.is_empty() {
+                let paths: Vec<PathBuf> = i.raw.dropped_files
+                    .iter()
+                    .filter_map(|f| f.path.clone())
+                    .collect();
+
+                self.handle_file_drop(paths);
+            }
+        });
+    }
 }
 
 impl eframe::App for MarkdownViewerApp {
     /// Update function called every frame
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Handle drag-drop events
+        self.handle_drag_drop_events(ctx);
+
         // Handle keyboard shortcuts
         self.handle_shortcuts(ctx);
 
@@ -2227,5 +2309,29 @@ The end.
         assert!(size.y >= 400.0);
         assert!(pos.x >= 0.0);
         assert!(pos.y >= 0.0);
+    }
+
+    #[test]
+    fn test_is_valid_markdown_file() {
+        let app = MarkdownViewerApp::new();
+
+        // Valid markdown extensions
+        assert!(app.is_valid_markdown_file(Path::new("test.md")));
+        assert!(app.is_valid_markdown_file(Path::new("test.markdown")));
+        assert!(app.is_valid_markdown_file(Path::new("test.mdown")));
+        assert!(app.is_valid_markdown_file(Path::new("test.mkd")));
+        assert!(app.is_valid_markdown_file(Path::new("test.txt")));
+
+        // Case insensitive
+        assert!(app.is_valid_markdown_file(Path::new("test.MD")));
+        assert!(app.is_valid_markdown_file(Path::new("test.Markdown")));
+
+        // Invalid extensions
+        assert!(!app.is_valid_markdown_file(Path::new("test.pdf")));
+        assert!(!app.is_valid_markdown_file(Path::new("test.docx")));
+        assert!(!app.is_valid_markdown_file(Path::new("test.html")));
+
+        // No extension
+        assert!(!app.is_valid_markdown_file(Path::new("test")));
     }
 }
