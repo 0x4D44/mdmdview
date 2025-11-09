@@ -1452,9 +1452,7 @@ impl MarkdownRenderer {
             text_color = Some(fallback_color);
         }
 
-        let mut rich = RichText::new(text)
-            .size(size)
-            .background_color(bg);
+        let mut rich = RichText::new(text).size(size).background_color(bg);
         if style.strong {
             rich = rich.strong();
         }
