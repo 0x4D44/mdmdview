@@ -9,6 +9,7 @@ A simple, standalone markdown viewer for Windows built with Rust and egui.
 - **Syntax Highlighting** - Code blocks with proper syntax coloring
 - **Native File Dialogs** - Seamless Windows integration
 - **Embedded Examples** - Built-in sample files to explore
+- **Navigation History** - Browser-like back/forward navigation through files and samples
 - **Zoom Support** - Adjustable font sizes for better readability
 - **Keyboard Shortcuts** - Quick access to common functions
 - **Command Line Support** - Open files directly: `mdmdview.exe file.md`
@@ -119,6 +120,8 @@ Update `Cargo.toml` before publishing and rebuild to refresh these values. The b
 | `Ctrl+W` | Close current file |
 | `F5` | Reload current file |
 | `Ctrl+Q` | Quit application |
+| `Alt+←` | Navigate back in history |
+| `Alt+→` | Navigate forward in history |
 | `F11` | Toggle fullscreen |
 | `Ctrl++` | Zoom in (increase font size) |
 | `Ctrl+-` | Zoom out (decrease font size) |
