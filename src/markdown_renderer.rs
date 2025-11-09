@@ -289,8 +289,10 @@ impl MarkdownRenderer {
     ) -> Result<usize, anyhow::Error> {
         match &events[start] {
             Event::Start(Tag::Paragraph) => {
+                // Always preserve line breaks in paragraphs (consistent with blockquotes)
+                // This allows poetry, lyrics, and structured content to render correctly
                 let (spans, next_idx) =
-                    self.parse_inline_spans(events, start + 1, Tag::Paragraph)?;
+                    self.parse_inline_spans_with_breaks(events, start + 1, Tag::Paragraph, true)?;
                 if !spans.is_empty() {
                     elements.push(MarkdownElement::Paragraph(spans));
                 }
@@ -427,6 +429,67 @@ impl MarkdownRenderer {
             }
         }
         s
+    }
+
+    /// Extract plain text from all markdown elements
+    pub fn elements_to_plain_text(elements: &[MarkdownElement]) -> String {
+        let mut result = String::new();
+        for element in elements {
+            match element {
+                MarkdownElement::Paragraph(spans) | MarkdownElement::Header { spans, .. } => {
+                    if !result.is_empty() {
+                        result.push('\n');
+                    }
+                    result.push_str(&Self::spans_plain_text(spans));
+                }
+                MarkdownElement::CodeBlock { text, .. } => {
+                    if !result.is_empty() {
+                        result.push('\n');
+                    }
+                    result.push_str(text);
+                }
+                MarkdownElement::List { items, .. } => {
+                    for item in items {
+                        if !result.is_empty() {
+                            result.push('\n');
+                        }
+                        result.push_str(&Self::spans_plain_text(item));
+                    }
+                }
+                MarkdownElement::Quote { lines, .. } => {
+                    for line in lines {
+                        if !result.is_empty() {
+                            result.push('\n');
+                        }
+                        result.push_str(&Self::spans_plain_text(line));
+                    }
+                }
+                MarkdownElement::Table { headers, rows } => {
+                    // Headers
+                    for header in headers {
+                        if !result.is_empty() {
+                            result.push('\n');
+                        }
+                        result.push_str(&Self::spans_plain_text(header));
+                    }
+                    // Rows
+                    for row in rows {
+                        for cell in row {
+                            if !result.is_empty() {
+                                result.push('\n');
+                            }
+                            result.push_str(&Self::spans_plain_text(cell));
+                        }
+                    }
+                }
+                MarkdownElement::HorizontalRule => {
+                    if !result.is_empty() {
+                        result.push_str("\n---\n");
+                    }
+                }
+            }
+        }
+        result
     }
 
     /// Collect blockquotes into (depth, lines) entries; supports nesting and multi-line content
@@ -1166,17 +1229,24 @@ impl MarkdownRenderer {
                     // Light theme: white background with readable code color
                     (Color32::WHITE, Color32::from_rgb(60, 80, 150))
                 };
-                ui.add(
+                let response = ui.add(
                     egui::Label::new(
-                        RichText::new(code)
+                        RichText::new(code.clone())
                             .size(self.font_sizes.code)
                             .family(egui::FontFamily::Monospace)
                             .background_color(bg)
                             .color(fg),
                     )
-                    .wrap(false)
-                    .selectable(false),
+                    .wrap(false),
                 );
+
+                // Add context menu for code
+                response.context_menu(|ui| {
+                    if ui.button("📋 Copy Code").clicked() {
+                        ui.ctx().copy_text(code.clone());
+                        ui.close_menu();
+                    }
+                });
             }
             InlineSpan::Strong(text) => {
                 let fixed_text = self.fix_unicode_chars(text);
@@ -1237,6 +1307,27 @@ impl MarkdownRenderer {
                         self.open_url(url);
                     }
                 }
+
+                // Add context menu for links
+                r.context_menu(|ui| {
+                    if ui.button("🔗 Open Link").clicked() {
+                        if let Some(fragment) = Self::extract_fragment(url) {
+                            *self.pending_anchor.borrow_mut() = Some(fragment);
+                        } else {
+                            self.open_url(url);
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("📋 Copy Link Text").clicked() {
+                        ui.ctx().copy_text(text.clone());
+                        ui.close_menu();
+                    }
+                    if ui.button("📋 Copy Link URL").clicked() {
+                        ui.ctx().copy_text(url.clone());
+                        ui.close_menu();
+                    }
+                });
             }
             InlineSpan::Image { src, alt, title } => {
                 // Resolve path
@@ -1431,7 +1522,18 @@ impl MarkdownRenderer {
         if let Some(color) = style.color {
             rich = rich.color(color);
         }
-        ui.label(rich);
+        let response = ui.label(rich);
+
+        // Add context menu for text
+        // Note: Due to egui limitations, selection is cleared on right-click
+        // As a workaround, we provide "Copy Text" for the segment
+        response.context_menu(|ui| {
+            if ui.button("📋 Copy Text").clicked() {
+                ui.ctx().copy_text(text.to_string());
+                ui.close_menu();
+            }
+            ui.label("💡 Tip: Use Ctrl+C to copy selected text");
+        });
     }
 
     fn render_highlighted_segment(
@@ -1465,7 +1567,16 @@ impl MarkdownRenderer {
         if let Some(color) = text_color {
             rich = rich.color(color);
         }
-        ui.label(rich);
+        let response = ui.label(rich);
+
+        // Add context menu for highlighted text
+        response.context_menu(|ui| {
+            if ui.button("📋 Copy Text").clicked() {
+                ui.ctx().copy_text(text.to_string());
+                ui.close_menu();
+            }
+            ui.label("💡 Tip: Use Ctrl+C to copy selected text");
+        });
     }
 
     /// Map a grapheme cluster to an emoji image key if available.
@@ -1620,19 +1731,42 @@ impl MarkdownRenderer {
         let mut chars = s.chars().peekable();
         while let Some(c) = chars.next() {
             if c == '^' {
-                // Collect until next caret
+                // Look ahead to see if there's a matching closing caret
+                // within reasonable bounds (max 10 chars for superscript)
                 let mut buf = String::new();
-                while let Some(&nc) = chars.peek() {
-                    chars.next();
+                let mut found_closing = false;
+                let mut temp_chars = chars.clone();
+                let mut char_count = 0;
+
+                while let Some(&nc) = temp_chars.peek() {
                     if nc == '^' {
+                        found_closing = true;
                         break;
                     }
-                    buf.push(nc);
+                    // Only allow alphanumeric and basic symbols in superscript
+                    if !nc.is_alphanumeric() && !matches!(nc, '+' | '-' | '=' | '(' | ')') {
+                        break;
+                    }
+                    // Limit superscript length to something reasonable
+                    if char_count >= 10 {
+                        break;
+                    }
+                    temp_chars.next();
+                    char_count += 1;
                 }
-                if !buf.is_empty() {
+
+                if found_closing && char_count > 0 {
+                    // We have a valid pair, collect the content
+                    for _ in 0..char_count {
+                        if let Some(nc) = chars.next() {
+                            buf.push(nc);
+                        }
+                    }
+                    // Skip the closing caret
+                    chars.next();
                     out.push_str(&Self::to_superscript(&buf));
                 } else {
-                    // Lone caret, keep as-is
+                    // No valid pair, keep the caret as-is
                     out.push('^');
                 }
             } else {
@@ -1820,7 +1954,7 @@ impl MarkdownRenderer {
             }
         }
 
-        egui::Frame::none()
+        let frame_response = egui::Frame::none()
             .fill(Color32::from_rgb(25, 25, 25))
             .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
             .inner_margin(8.0)
@@ -1927,6 +2061,21 @@ impl MarkdownRenderer {
                     );
                 });
             });
+
+        // Add context menu for code blocks
+        frame_response.response.context_menu(|ui| {
+            if ui.button("📋 Copy Code").clicked() {
+                ui.ctx().copy_text(code.to_string());
+                ui.close_menu();
+            }
+            if let Some(lang) = language {
+                if ui.button(format!("📋 Copy as {}", lang)).clicked() {
+                    // Include language identifier for better pasting
+                    ui.ctx().copy_text(format!("```{}\n{}\n```", lang, code));
+                    ui.close_menu();
+                }
+            }
+        });
 
         ui.add_space(8.0);
     }
@@ -3042,6 +3191,31 @@ mod tests {
     }
 
     #[test]
+    fn test_superscript_expansion_single_caret() {
+        // Test that single carets (not paired) are left as-is
+        let s = "2^32 = 4,294,967,296";
+        let out = MarkdownRenderer::expand_superscripts(s);
+        assert_eq!(
+            out, "2^32 = 4,294,967,296",
+            "Single caret should be preserved"
+        );
+
+        // Test the problematic line from the bug report
+        let problematic = "A 32-bit address bus would provide 2^32 = 4,294,967,296 bytes (4 GB) of addressable memory.";
+        let fixed = MarkdownRenderer::expand_superscripts(problematic);
+        assert_eq!(
+            fixed, problematic,
+            "Text should remain unchanged when no paired carets exist"
+        );
+
+        // Test mixed cases
+        let mixed = "Use 2^32 for math and 5^th^ for ordinal";
+        let result = MarkdownRenderer::expand_superscripts(mixed);
+        assert!(result.contains("2^32"), "Single caret should be preserved");
+        assert!(result.contains("ᵗʰ"), "Paired carets should be converted");
+    }
+
+    #[test]
     fn test_font_sizes_default() {
         let sizes = FontSizes::default();
         assert_eq!(sizes.body, 14.0);
@@ -3120,6 +3294,52 @@ mod tests {
 
         let untouched = renderer.normalize_text_for_test("Plain text");
         assert_eq!(untouched, "Plain text");
+    }
+
+    #[test]
+    fn test_elements_to_plain_text_basic() {
+        let elements = vec![
+            MarkdownElement::Header {
+                level: 1,
+                spans: vec![InlineSpan::Text("Test Header".to_string())],
+                id: "test-header".to_string(),
+            },
+            MarkdownElement::Paragraph(vec![
+                InlineSpan::Text("This is a ".to_string()),
+                InlineSpan::Strong("bold".to_string()),
+                InlineSpan::Text(" paragraph.".to_string()),
+            ]),
+        ];
+
+        let plain_text = MarkdownRenderer::elements_to_plain_text(&elements);
+        assert!(plain_text.contains("Test Header"));
+        assert!(plain_text.contains("This is a bold paragraph."));
+    }
+
+    #[test]
+    fn test_elements_to_plain_text_code_block() {
+        let elements = vec![MarkdownElement::CodeBlock {
+            language: Some("rust".to_string()),
+            text: "fn main() {\n    println!(\"Hello\");\n}".to_string(),
+        }];
+
+        let plain_text = MarkdownRenderer::elements_to_plain_text(&elements);
+        assert_eq!(plain_text, "fn main() {\n    println!(\"Hello\");\n}");
+    }
+
+    #[test]
+    fn test_elements_to_plain_text_with_links() {
+        let elements = vec![MarkdownElement::Paragraph(vec![
+            InlineSpan::Text("Visit ".to_string()),
+            InlineSpan::Link {
+                text: "GitHub".to_string(),
+                url: "https://github.com".to_string(),
+            },
+            InlineSpan::Text(" for more.".to_string()),
+        ])];
+
+        let plain_text = MarkdownRenderer::elements_to_plain_text(&elements);
+        assert_eq!(plain_text, "Visit GitHub for more.");
     }
 
     #[test]

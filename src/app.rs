@@ -17,6 +17,14 @@ use unicode_normalization::UnicodeNormalization;
 /// Prefix used for application/window titles.
 pub const APP_TITLE_PREFIX: &str = "mdmdview";
 
+/// Entry in navigation history for back/forward navigation
+#[derive(Clone, Debug)]
+struct HistoryEntry {
+    file_path: Option<PathBuf>,
+    title: String,
+    content: String,
+}
+
 /// Main application state and logic
 pub struct MarkdownViewerApp {
     /// Markdown renderer instance
@@ -74,6 +82,13 @@ pub struct MarkdownViewerApp {
     search_focus_requested: bool,
     /// Deferred caret movement (in lines) for raw editor
     pending_raw_cursor_line_move: Option<i32>,
+    // Navigation history
+    /// History of visited files and samples for back/forward navigation
+    history: Vec<HistoryEntry>,
+    /// Current position in history
+    history_index: usize,
+    /// Maximum history entries to keep
+    max_history: usize,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -288,6 +303,9 @@ impl MarkdownViewerApp {
             pending_scroll_to_element: None,
             search_focus_requested: false,
             pending_raw_cursor_line_move: None,
+            history: Vec::new(),
+            history_index: 0,
+            max_history: 50,
         };
 
         // Load welcome content by default
@@ -323,6 +341,11 @@ impl MarkdownViewerApp {
 
     /// Load markdown content from a file path
     pub fn load_file(&mut self, path: PathBuf) -> Result<()> {
+        // Push current state to history before loading new file
+        if !self.current_content.is_empty() {
+            self.push_history();
+        }
+
         let (content, lossy) = Self::read_file_lossy(&path)?;
         let filename = path
             .file_name()
@@ -340,12 +363,20 @@ impl MarkdownViewerApp {
         Ok(())
     }
 
+    /// Normalize all line endings to Unix style (\n)
+    /// Handles Windows (\r\n), Unix (\n), and old Mac (\r) formats
+    fn normalize_line_endings(s: &str) -> String {
+        // Order matters: replace \r\n first (Windows), then remaining \r (old Mac)
+        s.replace("\r\n", "\n").replace('\r', "\n")
+    }
+
     fn read_file_lossy(path: &Path) -> Result<(String, bool)> {
         match std::fs::read_to_string(path) {
-            Ok(s) => Ok((s, false)),
+            Ok(s) => Ok((Self::normalize_line_endings(&s), false)),
             Err(e) if e.kind() == ErrorKind::InvalidData => {
                 let bytes = std::fs::read(path)?;
-                Ok((String::from_utf8_lossy(&bytes).into_owned(), true))
+                let s = String::from_utf8_lossy(&bytes).into_owned();
+                Ok((Self::normalize_line_endings(&s), true))
             }
             Err(e) => Err(e.into()),
         }
@@ -455,6 +486,93 @@ impl MarkdownViewerApp {
         input.case_fold().nfkc().collect()
     }
 
+    /// Push current state to navigation history
+    fn push_history(&mut self) {
+        // Truncate forward history if we're not at the end
+        if self.history_index < self.history.len() {
+            self.history.truncate(self.history_index);
+        }
+
+        // Create entry for current state
+        let entry = HistoryEntry {
+            file_path: self.current_file.clone(),
+            title: self.title.clone(),
+            content: self.current_content.clone(),
+        };
+
+        self.history.push(entry);
+
+        // Limit history size
+        if self.history.len() > self.max_history {
+            self.history.remove(0);
+        } else {
+            self.history_index = self.history.len();
+        }
+    }
+
+    /// Navigate back in history
+    fn navigate_back(&mut self) -> bool {
+        if self.history_index > 0 {
+            self.history_index -= 1;
+            self.restore_from_history();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Navigate forward in history
+    fn navigate_forward(&mut self) -> bool {
+        if self.history_index < self.history.len() - 1 {
+            self.history_index += 1;
+            self.restore_from_history();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Restore state from history at current index
+    fn restore_from_history(&mut self) {
+        if let Some(entry) = self.history.get(self.history_index) {
+            self.current_file = entry.file_path.clone();
+            self.title = entry.title.clone();
+            self.current_content = entry.content.clone();
+            self.raw_buffer = self.current_content.clone();
+
+            // Re-parse content
+            match self.renderer.parse(&self.current_content) {
+                Ok(elements) => {
+                    self.parsed_elements = elements;
+                    self.error_message = None;
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("Failed to parse: {}", e));
+                }
+            }
+
+            // Set base dir for images
+            if let Some(ref path) = self.current_file {
+                self.renderer.set_base_dir(path.parent());
+            } else {
+                self.renderer.set_base_dir(None);
+            }
+
+            // Scroll to top
+            self.pending_scroll_to_element = Some(0);
+        }
+    }
+
+    /// Check if we can navigate back
+    fn can_navigate_back(&self) -> bool {
+        self.history_index > 0
+    }
+
+    /// Check if we can navigate forward
+    fn can_navigate_forward(&self) -> bool {
+        self.history_index < self.history.len().saturating_sub(1)
+    }
+
     /// Request a reload of the current file (processed outside of input context)
     fn request_reload(&mut self) {
         if self.current_file.is_some() {
@@ -476,6 +594,11 @@ impl MarkdownViewerApp {
 
     /// Load a sample file by name
     pub fn load_sample(&mut self, sample: &SampleFile) {
+        // Push current state to history before loading sample
+        if !self.current_content.is_empty() {
+            self.push_history();
+        }
+
         self.current_file = None;
         // Samples have no file base-dir
         self.renderer.set_base_dir(None);
@@ -630,6 +753,22 @@ impl MarkdownViewerApp {
                 egui::Key::Num0,
             )) {
                 self.renderer.reset_zoom();
+            }
+
+            // Alt+Left - Navigate back
+            if i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::ALT,
+                egui::Key::ArrowLeft,
+            )) {
+                self.navigate_back();
+            }
+
+            // Alt+Right - Navigate forward
+            if i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::ALT,
+                egui::Key::ArrowRight,
+            )) {
+                self.navigate_forward();
             }
 
             // Ctrl + Mouse Wheel - Zoom
@@ -916,6 +1055,44 @@ impl MarkdownViewerApp {
                 ui.menu_button(
                     Self::menu_text_with_mnemonic(None, "View", 'V', alt_pressed, menu_text_color),
                     |ui| {
+                        // Back navigation
+                        ui.horizontal(|ui| {
+                            let enabled = self.can_navigate_back();
+                            if ui
+                                .add_enabled(enabled, egui::Button::new("← Back"))
+                                .clicked()
+                            {
+                                self.navigate_back();
+                                ui.close_menu();
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(RichText::new("Alt+←").color(menu_text_color));
+                                },
+                            );
+                        });
+
+                        // Forward navigation
+                        ui.horizontal(|ui| {
+                            let enabled = self.can_navigate_forward();
+                            if ui
+                                .add_enabled(enabled, egui::Button::new("→ Forward"))
+                                .clicked()
+                            {
+                                self.navigate_forward();
+                                ui.close_menu();
+                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(RichText::new("Alt+→").color(menu_text_color));
+                                },
+                            );
+                        });
+
+                        ui.separator();
+
                         // Raw view toggle
                         ui.horizontal(|ui| {
                             let selected = matches!(self.view_mode, ViewMode::Raw);
@@ -1179,7 +1356,7 @@ impl eframe::App for MarkdownViewerApp {
         self.render_menu_bar(ctx);
 
         // Main content area
-        CentralPanel::default().show(ctx, |ui| {
+        let central_response = CentralPanel::default().show(ctx, |ui| {
             // Show error message if any
             if let Some(ref error) = self.error_message {
                 ui.colored_label(Color32::RED, format!("⚠ Error: {}", error));
@@ -1353,6 +1530,38 @@ impl eframe::App for MarkdownViewerApp {
                         }
                     }
                 });
+        });
+
+        // Add context menu for the main panel
+        central_response.response.context_menu(|ui| {
+            ui.label("💡 Select text, then use Ctrl+C to copy");
+            ui.separator();
+
+            // Copy All Text option
+            if ui.button("📋 Copy All Text").clicked() {
+                let all_text = MarkdownRenderer::elements_to_plain_text(&self.parsed_elements);
+                ui.ctx().copy_text(all_text);
+                ui.close_menu();
+            }
+
+            // Copy as Markdown (Raw) option
+            if ui.button("📋 Copy as Markdown").clicked() {
+                ui.ctx().copy_text(self.current_content.clone());
+                ui.close_menu();
+            }
+
+            ui.separator();
+
+            // Navigation shortcuts
+            if ui.button("⬆ Go to Top").clicked() {
+                self.nav_request = Some(NavigationRequest::Top);
+                ui.close_menu();
+            }
+
+            if ui.button("⬇ Go to Bottom").clicked() {
+                self.nav_request = Some(NavigationRequest::Bottom);
+                ui.close_menu();
+            }
         });
 
         // Render floating search dialog (non-modal, always on top)
@@ -1550,6 +1759,88 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_normalize_line_endings() {
+        // Windows style (\r\n)
+        assert_eq!(
+            MarkdownViewerApp::normalize_line_endings("Hello\r\nWorld"),
+            "Hello\nWorld"
+        );
+
+        // Unix style (\n) - no change
+        assert_eq!(
+            MarkdownViewerApp::normalize_line_endings("Hello\nWorld"),
+            "Hello\nWorld"
+        );
+
+        // Old Mac style (\r)
+        assert_eq!(
+            MarkdownViewerApp::normalize_line_endings("Hello\rWorld"),
+            "Hello\nWorld"
+        );
+
+        // Mixed line endings
+        assert_eq!(
+            MarkdownViewerApp::normalize_line_endings("A\r\nB\nC\rD"),
+            "A\nB\nC\nD"
+        );
+
+        // Multiple blank lines with Windows endings
+        assert_eq!(
+            MarkdownViewerApp::normalize_line_endings("A\r\n\r\nB"),
+            "A\n\nB"
+        );
+
+        // Empty string
+        assert_eq!(MarkdownViewerApp::normalize_line_endings(""), "");
+
+        // No line endings
+        assert_eq!(
+            MarkdownViewerApp::normalize_line_endings("Single line"),
+            "Single line"
+        );
+    }
+
+    #[test]
+    fn test_load_file_with_windows_line_endings() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let mut temp_file = NamedTempFile::new()?;
+
+        // Write content with explicit Windows line endings
+        temp_file.write_all(b"Line 1\r\nLine 2\r\n\r\nParagraph text")?;
+        temp_file.flush()?;
+
+        app.load_file(temp_file.path().to_path_buf())?;
+
+        // Should not contain any \r characters after normalization
+        assert!(!app.current_content.contains('\r'));
+        assert!(app.current_content.contains("Line 1\nLine 2"));
+        assert!(app.current_content.contains("\n\nParagraph"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_file_with_mixed_line_endings() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let mut temp_file = NamedTempFile::new()?;
+
+        // Mix of \r\n (Windows), \n (Unix), and \r (old Mac)
+        temp_file.write_all(b"Line 1\r\nLine 2\nLine 3\rLine 4")?;
+        temp_file.flush()?;
+
+        app.load_file(temp_file.path().to_path_buf())?;
+
+        // All should be normalized to \n
+        assert!(!app.current_content.contains('\r'));
+        assert_eq!(app.current_content.lines().count(), 4);
+        let lines: Vec<&str> = app.current_content.lines().collect();
+        assert_eq!(lines[0], "Line 1");
+        assert_eq!(lines[1], "Line 2");
+        assert_eq!(lines[2], "Line 3");
+        assert_eq!(lines[3], "Line 4");
+        Ok(())
+    }
 
     #[test]
     fn test_app_creation() {
