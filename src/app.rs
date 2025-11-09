@@ -9,6 +9,7 @@ use egui::text::TextFormat;
 use egui::{menu, CentralPanel, Color32, Context, RichText, TopBottomPanel};
 use egui::{TextEdit, TextStyle};
 use rfd::FileDialog;
+use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use unicode_casefold::UnicodeCaseFold;
@@ -89,6 +90,11 @@ pub struct MarkdownViewerApp {
     history_index: usize,
     /// Maximum history entries to keep
     max_history: usize,
+    // Drag and drop state
+    /// Visual state: file is being dragged over window
+    drag_hover: bool,
+    /// Queue of files waiting to be opened (from multi-file drop)
+    pending_files: VecDeque<PathBuf>,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -306,6 +312,8 @@ impl MarkdownViewerApp {
             history: Vec::new(),
             history_index: 0,
             max_history: 50,
+            drag_hover: false,
+            pending_files: VecDeque::new(),
         };
 
         // Load welcome content by default
@@ -314,6 +322,148 @@ impl MarkdownViewerApp {
         }
 
         app
+    }
+
+    /// Check if file has valid markdown extension
+    fn is_valid_markdown_file(&self, path: &Path) -> bool {
+        if let Some(ext) = path.extension() {
+            let ext = ext.to_string_lossy().to_lowercase();
+            matches!(ext.as_str(), "md" | "markdown" | "mdown" | "mkd" | "txt")
+        } else {
+            false
+        }
+    }
+
+    /// Handle dropped files from drag-and-drop operation
+    fn handle_file_drop(&mut self, paths: Vec<PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+
+        let mut valid_files = Vec::new();
+        let mut errors = Vec::new();
+
+        // Validate all dropped files
+        for path in paths {
+            if !path.exists() {
+                errors.push(format!("File not found: {}", path.display()));
+                continue;
+            }
+
+            if path.is_dir() {
+                // Handle directory by scanning for markdown files
+                match self.scan_directory(&path) {
+                    Ok(dir_files) => {
+                        if dir_files.is_empty() {
+                            errors.push(format!(
+                                "No markdown files in directory: {}",
+                                path.display()
+                            ));
+                        } else {
+                            valid_files.extend(dir_files);
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(format!(
+                            "Cannot read directory {}: {}",
+                            path.display(),
+                            e
+                        ));
+                    }
+                }
+                continue;
+            }
+
+            if !self.is_valid_markdown_file(&path) {
+                errors.push(format!(
+                    "Not a markdown file: {}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ));
+                continue;
+            }
+
+            valid_files.push(path);
+        }
+
+        // Limit to prevent memory issues
+        const MAX_FILES: usize = 50;
+        if valid_files.len() > MAX_FILES {
+            self.error_message = Some(format!(
+                "Too many files ({}). Maximum is {}.\n\
+                 Please drop files in smaller batches.",
+                valid_files.len(),
+                MAX_FILES
+            ));
+            return;
+        }
+
+        // Handle valid files
+        if !valid_files.is_empty() {
+            // Push current state to history if we have content
+            if !self.current_content.is_empty() {
+                self.push_history();
+            }
+
+            // Open first file immediately
+            let first_file = valid_files.remove(0);
+            if let Err(e) = self.load_file(first_file) {
+                self.error_message = Some(format!("Failed to load file: {}", e));
+                return;
+            }
+
+            // Queue remaining files
+            self.pending_files.extend(valid_files.iter().cloned());
+
+            // Show info message if multiple files
+            if !self.pending_files.is_empty() {
+                eprintln!(
+                    "Queued {} files. Use Alt+→ to navigate to next file.",
+                    self.pending_files.len()
+                );
+            }
+        }
+
+        // Show errors if any
+        if !errors.is_empty() {
+            let valid_count = if valid_files.is_empty() { 0 } else { valid_files.len() + 1 };
+            let error_msg = if errors.len() == 1 && valid_count == 0 {
+                errors[0].clone()
+            } else if valid_count == 0 {
+                // All files failed
+                format!("No valid files:\n{}", errors.join("\n"))
+            } else {
+                // Some succeeded, some failed
+                format!(
+                    "Opened {} files. Skipped {}:\n{}",
+                    valid_count,
+                    errors.len(),
+                    errors.join("\n")
+                )
+            };
+            self.error_message = Some(error_msg);
+        }
+    }
+
+    /// Scan directory for markdown files (non-recursive)
+    fn scan_directory(&self, dir: &Path) -> Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+
+        let entries = std::fs::read_dir(dir)?;
+
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+
+            // Only include files (not subdirectories)
+            if path.is_file() && self.is_valid_markdown_file(&path) {
+                files.push(path);
+            }
+        }
+
+        // Sort alphabetically for predictable order
+        files.sort();
+
+        Ok(files)
     }
 
     /// Load markdown content from a string
@@ -523,6 +673,21 @@ impl MarkdownViewerApp {
 
     /// Navigate forward in history
     fn navigate_forward(&mut self) -> bool {
+        // First try pending files queue
+        if let Some(next_file) = self.pending_files.pop_front() {
+            // Push current state to history
+            if !self.current_content.is_empty() {
+                self.push_history();
+            }
+
+            // Load next file from queue
+            if let Err(e) = self.load_file(next_file) {
+                self.error_message = Some(format!("Failed to load file: {}", e));
+            }
+            return true;
+        }
+
+        // Otherwise use history navigation (existing code)
         if self.history_index < self.history.len() - 1 {
             self.history_index += 1;
             self.restore_from_history();
@@ -570,7 +735,8 @@ impl MarkdownViewerApp {
 
     /// Check if we can navigate forward
     fn can_navigate_forward(&self) -> bool {
-        self.history_index < self.history.len().saturating_sub(1)
+        !self.pending_files.is_empty()
+            || self.history_index < self.history.len().saturating_sub(1)
     }
 
     /// Request a reload of the current file (processed outside of input context)
@@ -1253,6 +1419,24 @@ impl MarkdownViewerApp {
                     ui.label("📄 No file loaded");
                 }
 
+                // Show pending file count if files are queued
+                if !self.pending_files.is_empty() {
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!(
+                            "📋 {} files in queue",
+                            self.pending_files.len()
+                        ))
+                        .color(egui::Color32::from_rgb(100, 150, 255))
+                    );
+
+                    ui.label(
+                        RichText::new("(Alt+→ for next)")
+                            .color(egui::Color32::GRAY)
+                            .italics()
+                    );
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Document stats
                     let element_count = self.parsed_elements.len();
@@ -1269,11 +1453,102 @@ impl MarkdownViewerApp {
             });
         });
     }
+    /// Handle drag-drop events from egui
+    fn handle_drag_drop_events(&mut self, ctx: &Context) {
+        ctx.input(|i| {
+            // Check if files are being hovered
+            if !i.raw.hovered_files.is_empty() {
+                self.drag_hover = true;
+            } else {
+                self.drag_hover = false;
+            }
+
+            // Check if files were dropped
+            if !i.raw.dropped_files.is_empty() {
+                let paths: Vec<PathBuf> = i.raw.dropped_files
+                    .iter()
+                    .filter_map(|f| f.path.clone())
+                    .collect();
+
+                self.handle_file_drop(paths);
+            }
+        });
+    }
+
+    /// Render drag-and-drop overlay when files are hovered
+    fn render_drag_overlay(&self, ctx: &Context) {
+        if !self.drag_hover {
+            return;
+        }
+
+        // Full-screen overlay
+        egui::Area::new(egui::Id::new("drag_overlay"))
+            .fixed_pos(egui::pos2(0.0, 0.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let screen_rect = ctx.screen_rect();
+
+                // Semi-transparent dark background
+                ui.painter().rect_filled(
+                    screen_rect,
+                    0.0,
+                    egui::Color32::from_black_alpha(180),
+                );
+
+                // Dashed border effect using rounded rect with stroke
+                let border_rect = screen_rect.shrink(20.0);
+                let border_color = egui::Color32::from_rgb(100, 150, 255);
+
+                // Draw border
+                ui.painter().rect_stroke(
+                    border_rect,
+                    8.0,
+                    egui::Stroke::new(4.0, border_color),
+                );
+
+                // Center text
+                ui.allocate_ui_at_rect(screen_rect, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(screen_rect.height() / 2.0 - 80.0);
+
+                        // Main message with file emoji
+                        ui.label(
+                            RichText::new("📄 Drop files to open")
+                                .size(36.0)
+                                .color(egui::Color32::WHITE)
+                                .strong(),
+                        );
+
+                        ui.add_space(20.0);
+
+                        // Supported formats
+                        ui.label(
+                            RichText::new("Supported: .md, .markdown, .mdown, .mkd, .txt")
+                                .size(18.0)
+                                .color(egui::Color32::LIGHT_GRAY),
+                        );
+
+                        ui.add_space(10.0);
+
+                        // Additional hint
+                        ui.label(
+                            RichText::new("Drop multiple files to open them in sequence")
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(150, 150, 150))
+                                .italics(),
+                        );
+                    });
+                });
+            });
+    }
 }
 
 impl eframe::App for MarkdownViewerApp {
     /// Update function called every frame
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        // Handle drag-drop events
+        self.handle_drag_drop_events(ctx);
+
         // Handle keyboard shortcuts
         self.handle_shortcuts(ctx);
 
@@ -1569,6 +1844,9 @@ impl eframe::App for MarkdownViewerApp {
 
         // Render status bar
         self.render_status_bar(ctx);
+
+        // Render drag-and-drop overlay (must be last to appear on top)
+        self.render_drag_overlay(ctx);
     }
 
     fn auto_save_interval(&self) -> std::time::Duration {
@@ -2227,5 +2505,209 @@ The end.
         assert!(size.y >= 400.0);
         assert!(pos.x >= 0.0);
         assert!(pos.y >= 0.0);
+    }
+
+    #[test]
+    fn test_is_valid_markdown_file() {
+        let app = MarkdownViewerApp::new();
+
+        // Valid markdown extensions
+        assert!(app.is_valid_markdown_file(Path::new("test.md")));
+        assert!(app.is_valid_markdown_file(Path::new("test.markdown")));
+        assert!(app.is_valid_markdown_file(Path::new("test.mdown")));
+        assert!(app.is_valid_markdown_file(Path::new("test.mkd")));
+        assert!(app.is_valid_markdown_file(Path::new("test.txt")));
+
+        // Case insensitive
+        assert!(app.is_valid_markdown_file(Path::new("test.MD")));
+        assert!(app.is_valid_markdown_file(Path::new("test.Markdown")));
+
+        // Invalid extensions
+        assert!(!app.is_valid_markdown_file(Path::new("test.pdf")));
+        assert!(!app.is_valid_markdown_file(Path::new("test.docx")));
+        assert!(!app.is_valid_markdown_file(Path::new("test.html")));
+
+        // No extension
+        assert!(!app.is_valid_markdown_file(Path::new("test")));
+    }
+
+    #[test]
+    fn test_scan_directory() -> Result<()> {
+        let temp_dir = tempfile::TempDir::new()?;
+        let dir_path = temp_dir.path();
+
+        // Create test files
+        std::fs::write(dir_path.join("zebra.md"), "# Z")?;
+        std::fs::write(dir_path.join("alpha.md"), "# A")?;
+        std::fs::write(dir_path.join("image.png"), "fake")?;
+        std::fs::write(dir_path.join("beta.markdown"), "# B")?;
+
+        // Create subdirectory (should be ignored)
+        std::fs::create_dir(dir_path.join("subdir"))?;
+        std::fs::write(dir_path.join("subdir/nested.md"), "# N")?;
+
+        let app = MarkdownViewerApp::new();
+        let files = app.scan_directory(dir_path)?;
+
+        // Should find 3 markdown files (alpha, beta, zebra)
+        // Should NOT find image.png or nested.md
+        assert_eq!(files.len(), 3);
+
+        // Should be sorted alphabetically
+        assert!(files[0].ends_with("alpha.md"));
+        assert!(files[1].ends_with("beta.markdown"));
+        assert!(files[2].ends_with("zebra.md"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_scan_empty_directory() -> Result<()> {
+        let temp_dir = tempfile::TempDir::new()?;
+        let app = MarkdownViewerApp::new();
+        let files = app.scan_directory(temp_dir.path())?;
+
+        assert_eq!(files.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_single_file_drop() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = tempfile::TempDir::new()?;
+        let file = temp_dir.path().join("test.md");
+        std::fs::write(&file, "# Test")?;
+
+        app.handle_file_drop(vec![file.clone()]);
+
+        assert_eq!(app.current_file, Some(file));
+        assert!(app.pending_files.is_empty());
+        assert!(app.error_message.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_multiple_files_drop() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = tempfile::TempDir::new()?;
+
+        let files: Vec<PathBuf> = (0..5)
+            .map(|i| {
+                let path = temp_dir.path().join(format!("file{}.md", i));
+                std::fs::write(&path, format!("# File {}", i)).unwrap();
+                path
+            })
+            .collect();
+
+        app.handle_file_drop(files.clone());
+
+        assert_eq!(app.current_file, Some(files[0].clone()));
+        assert_eq!(app.pending_files.len(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn test_directory_drop() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = tempfile::TempDir::new()?;
+
+        // Create files in directory
+        std::fs::write(temp_dir.path().join("a.md"), "# A")?;
+        std::fs::write(temp_dir.path().join("b.md"), "# B")?;
+        std::fs::write(temp_dir.path().join("c.md"), "# C")?;
+
+        app.handle_file_drop(vec![temp_dir.path().to_path_buf()]);
+
+        assert!(app.current_file.is_some());
+        assert_eq!(app.pending_files.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_invalid_file_drop() {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file = temp_dir.path().join("test.pdf");
+        std::fs::write(&file, "fake pdf").unwrap();
+
+        app.handle_file_drop(vec![file]);
+
+        // Current file should remain None (or welcome sample)
+        assert!(app.error_message.is_some());
+        assert!(app.error_message.as_ref().unwrap().contains("Not a markdown file"));
+    }
+
+    #[test]
+    fn test_too_many_files() {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        let files: Vec<PathBuf> = (0..60)
+            .map(|i| {
+                let path = temp_dir.path().join(format!("file{}.md", i));
+                std::fs::write(&path, format!("# File {}", i)).unwrap();
+                path
+            })
+            .collect();
+
+        app.handle_file_drop(files);
+
+        assert!(app.error_message.is_some());
+        assert!(app.error_message.as_ref().unwrap().contains("Too many files"));
+    }
+
+    #[test]
+    fn test_queue_navigation() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = tempfile::TempDir::new()?;
+
+        let file1 = temp_dir.path().join("file1.md");
+        let file2 = temp_dir.path().join("file2.md");
+
+        std::fs::write(&file1, "# File 1")?;
+        std::fs::write(&file2, "# File 2")?;
+
+        // Load first file and queue second
+        app.load_file(file1.clone())?;
+        app.pending_files.push_back(file2.clone());
+
+        assert!(app.can_navigate_forward());
+        app.navigate_forward();
+        assert_eq!(app.current_file, Some(file2));
+        assert!(app.pending_files.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mixed_valid_invalid_files() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = tempfile::TempDir::new()?;
+
+        let md_file = temp_dir.path().join("test.md");
+        let pdf_file = temp_dir.path().join("test.pdf");
+
+        std::fs::write(&md_file, "# Test")?;
+        std::fs::write(&pdf_file, "fake pdf")?;
+
+        app.handle_file_drop(vec![md_file.clone(), pdf_file]);
+
+        // Should open the valid markdown file
+        assert_eq!(app.current_file, Some(md_file));
+        // Should show error about the invalid file
+        assert!(app.error_message.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn test_empty_directory_drop() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = tempfile::TempDir::new()?;
+
+        app.handle_file_drop(vec![temp_dir.path().to_path_buf()]);
+
+        assert!(app.error_message.is_some());
+        assert!(app.error_message.as_ref().unwrap().contains("No markdown files"));
+        Ok(())
     }
 }
