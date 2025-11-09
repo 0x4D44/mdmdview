@@ -57,6 +57,20 @@ Understanding these shortcuts is important for testing and development:
 - `Home` / `End` - Scroll to top/bottom
 - `Enter` / `Shift+Enter` - Navigate search results forward/backward
 
+## Drag and Drop Support
+
+The application supports dragging files and folders directly from your file explorer:
+- **Single File**: Drag a `.md` file to open it immediately
+- **Multiple Files**: Drag multiple files to open the first and queue the rest
+  - Use `Alt+→` to navigate through queued files
+  - Status bar shows queue count: "📋 N files in queue"
+- **Folders**: Drag a folder to open all markdown files within (non-recursive)
+  - Files are sorted alphabetically
+  - Only top-level files are included (subdirectories ignored)
+- **Visual Feedback**: Blue overlay appears when dragging over the window
+- **Supported Extensions**: `.md`, `.markdown`, `.mdown`, `.mkd`, `.txt`
+- **Max Files**: 50 files maximum per drop (protection against accidental large drops)
+
 ## Architecture
 
 ### Core Components
