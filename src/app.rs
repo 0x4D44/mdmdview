@@ -2570,4 +2570,144 @@ The end.
         assert_eq!(files.len(), 0);
         Ok(())
     }
+
+    #[test]
+    fn test_single_file_drop() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = tempfile::TempDir::new()?;
+        let file = temp_dir.path().join("test.md");
+        std::fs::write(&file, "# Test")?;
+
+        app.handle_file_drop(vec![file.clone()]);
+
+        assert_eq!(app.current_file, Some(file));
+        assert!(app.pending_files.is_empty());
+        assert!(app.error_message.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_multiple_files_drop() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = tempfile::TempDir::new()?;
+
+        let files: Vec<PathBuf> = (0..5)
+            .map(|i| {
+                let path = temp_dir.path().join(format!("file{}.md", i));
+                std::fs::write(&path, format!("# File {}", i)).unwrap();
+                path
+            })
+            .collect();
+
+        app.handle_file_drop(files.clone());
+
+        assert_eq!(app.current_file, Some(files[0].clone()));
+        assert_eq!(app.pending_files.len(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn test_directory_drop() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = tempfile::TempDir::new()?;
+
+        // Create files in directory
+        std::fs::write(temp_dir.path().join("a.md"), "# A")?;
+        std::fs::write(temp_dir.path().join("b.md"), "# B")?;
+        std::fs::write(temp_dir.path().join("c.md"), "# C")?;
+
+        app.handle_file_drop(vec![temp_dir.path().to_path_buf()]);
+
+        assert!(app.current_file.is_some());
+        assert_eq!(app.pending_files.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_invalid_file_drop() {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file = temp_dir.path().join("test.pdf");
+        std::fs::write(&file, "fake pdf").unwrap();
+
+        app.handle_file_drop(vec![file]);
+
+        // Current file should remain None (or welcome sample)
+        assert!(app.error_message.is_some());
+        assert!(app.error_message.as_ref().unwrap().contains("Not a markdown file"));
+    }
+
+    #[test]
+    fn test_too_many_files() {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        let files: Vec<PathBuf> = (0..60)
+            .map(|i| {
+                let path = temp_dir.path().join(format!("file{}.md", i));
+                std::fs::write(&path, format!("# File {}", i)).unwrap();
+                path
+            })
+            .collect();
+
+        app.handle_file_drop(files);
+
+        assert!(app.error_message.is_some());
+        assert!(app.error_message.as_ref().unwrap().contains("Too many files"));
+    }
+
+    #[test]
+    fn test_queue_navigation() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = tempfile::TempDir::new()?;
+
+        let file1 = temp_dir.path().join("file1.md");
+        let file2 = temp_dir.path().join("file2.md");
+
+        std::fs::write(&file1, "# File 1")?;
+        std::fs::write(&file2, "# File 2")?;
+
+        // Load first file and queue second
+        app.load_file(file1.clone())?;
+        app.pending_files.push_back(file2.clone());
+
+        assert!(app.can_navigate_forward());
+        app.navigate_forward();
+        assert_eq!(app.current_file, Some(file2));
+        assert!(app.pending_files.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_mixed_valid_invalid_files() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = tempfile::TempDir::new()?;
+
+        let md_file = temp_dir.path().join("test.md");
+        let pdf_file = temp_dir.path().join("test.pdf");
+
+        std::fs::write(&md_file, "# Test")?;
+        std::fs::write(&pdf_file, "fake pdf")?;
+
+        app.handle_file_drop(vec![md_file.clone(), pdf_file]);
+
+        // Should open the valid markdown file
+        assert_eq!(app.current_file, Some(md_file));
+        // Should show error about the invalid file
+        assert!(app.error_message.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn test_empty_directory_drop() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = tempfile::TempDir::new()?;
+
+        app.handle_file_drop(vec![temp_dir.path().to_path_buf()]);
+
+        assert!(app.error_message.is_some());
+        assert!(app.error_message.as_ref().unwrap().contains("No markdown files"));
+        Ok(())
+    }
 }
