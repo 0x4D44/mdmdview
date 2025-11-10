@@ -2729,13 +2729,9 @@ impl MarkdownRenderer {
                             |ui| {
                                 ui.style_mut().wrap = Some(true);
                                 ui.set_width(w);
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.spacing_mut().item_spacing.x = 0.0;
-                                    for span in h {
-                                        // Emphasize header text
-                                        self.render_inline_span(ui, span, None, Some(true));
-                                    }
-                                });
+                                ui.set_max_width(w);
+                                // Render table cell content with proper wrapping
+                                self.render_table_cell_spans(ui, h, w, true);
                             },
                         );
                     }
@@ -2751,12 +2747,9 @@ impl MarkdownRenderer {
                                     |ui| {
                                         ui.style_mut().wrap = Some(true);
                                         ui.set_width(w);
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.spacing_mut().item_spacing.x = 0.0;
-                                            for span in cell {
-                                                self.render_inline_span(ui, span, None, None);
-                                            }
-                                        });
+                                        ui.set_max_width(w);
+                                        // Render table cell content with proper wrapping
+                                        self.render_table_cell_spans(ui, cell, w, false);
                                     },
                                 );
                             }
@@ -2766,6 +2759,42 @@ impl MarkdownRenderer {
                 });
             });
         ui.add_space(8.0);
+    }
+
+    /// Render table cell spans with proper text wrapping within the given width
+    fn render_table_cell_spans(
+        &self,
+        ui: &mut egui::Ui,
+        spans: &[InlineSpan],
+        max_width: f32,
+        is_header: bool,
+    ) {
+        // Create a scope with clipped max width to ensure content doesn't overflow
+        ui.scope(|ui| {
+            // Set maximum width constraint
+            ui.set_max_width(max_width);
+            ui.spacing_mut().item_spacing.y = 0.0;
+
+            // Get the current cursor position for clipping
+            let start_pos = ui.cursor().left_top();
+
+            // Render spans inline with wrapping enabled
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.set_max_width(max_width);
+                for span in spans {
+                    self.render_inline_span(ui, span, None, Some(is_header));
+                }
+            });
+
+            // Ensure we clip any overflow (as a safety measure)
+            let end_pos = ui.cursor().left_top();
+            let height = (end_pos.y - start_pos.y).max(0.0);
+            ui.allocate_exact_size(
+                egui::Vec2::new(max_width, height),
+                egui::Sense::hover(),
+            );
+        });
     }
 
     fn resolve_table_widths(available: f32, mins: &[f32], desired: &[f32]) -> Vec<f32> {
