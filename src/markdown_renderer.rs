@@ -2723,35 +2723,37 @@ impl MarkdownRenderer {
                 egui::Grid::new("md_table").striped(true).show(ui, |ui| {
                     for (ci, h) in headers.iter().enumerate() {
                         let w = widths.get(ci).copied().unwrap_or(120.0);
-                        ui.allocate_ui_with_layout(
-                            Vec2::new(w, 0.0),
-                            egui::Layout::top_down(egui::Align::LEFT),
-                            |ui| {
-                                ui.style_mut().wrap = Some(true);
-                                ui.set_width(w);
-                                ui.set_max_width(w);
-                                // Render table cell content with proper wrapping
-                                self.render_table_cell_spans(ui, h, w, true);
-                            },
-                        );
+                        ui.push_id(("header", ci), |ui| {
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(w, 0.0),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| {
+                                    ui.set_width(w);  // Use set_width to force exact width
+                                    ui.set_max_width(w);
+                                    // Render table cell content with proper wrapping
+                                    self.render_table_cell_spans(ui, h, w, true);
+                                },
+                            );
+                        });
                     }
                     ui.end_row();
 
-                    for row in rows {
+                    for (ri, row) in rows.iter().enumerate() {
                         for (ci, cell) in row.iter().enumerate() {
                             if ci < headers.len() {
                                 let w = widths.get(ci).copied().unwrap_or(120.0);
-                                ui.allocate_ui_with_layout(
-                                    Vec2::new(w, 0.0),
-                                    egui::Layout::top_down(egui::Align::LEFT),
-                                    |ui| {
-                                        ui.style_mut().wrap = Some(true);
-                                        ui.set_width(w);
-                                        ui.set_max_width(w);
-                                        // Render table cell content with proper wrapping
-                                        self.render_table_cell_spans(ui, cell, w, false);
-                                    },
-                                );
+                                ui.push_id(("cell", ri, ci), |ui| {
+                                    ui.allocate_ui_with_layout(
+                                        Vec2::new(w, 0.0),
+                                        egui::Layout::top_down(egui::Align::LEFT),
+                                        |ui| {
+                                            ui.set_width(w);  // Use set_width to force exact width
+                                            ui.set_max_width(w);
+                                            // Render table cell content with proper wrapping
+                                            self.render_table_cell_spans(ui, cell, w, false);
+                                        },
+                                    );
+                                });
                             }
                         }
                         ui.end_row();
@@ -2769,31 +2771,20 @@ impl MarkdownRenderer {
         max_width: f32,
         is_header: bool,
     ) {
-        // Create a scope with clipped max width to ensure content doesn't overflow
-        ui.scope(|ui| {
-            // Set maximum width constraint
+        // Render content with wrapping, forcing exact width to ensure wrapping occurs
+        ui.vertical(|ui| {
+            ui.set_width(max_width);  // Force exact width
             ui.set_max_width(max_width);
             ui.spacing_mut().item_spacing.y = 0.0;
 
-            // Get the current cursor position for clipping
-            let start_pos = ui.cursor().left_top();
-
-            // Render spans inline with wrapping enabled
+            // Render all spans in a wrapped horizontal layout
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
-                ui.set_max_width(max_width);
+                ui.set_width(max_width);
                 for span in spans {
                     self.render_inline_span(ui, span, None, Some(is_header));
                 }
             });
-
-            // Ensure we clip any overflow (as a safety measure)
-            let end_pos = ui.cursor().left_top();
-            let height = (end_pos.y - start_pos.y).max(0.0);
-            ui.allocate_exact_size(
-                egui::Vec2::new(max_width, height),
-                egui::Sense::hover(),
-            );
         });
     }
 
