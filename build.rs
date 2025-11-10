@@ -1,6 +1,11 @@
 /// Build script for Windows metadata and icon resources
 use std::env;
 fn main() {
+    let build_timestamp = build_timestamp_string();
+    println!(
+        "cargo:rustc-env=MDMDVIEW_BUILD_TIMESTAMP={}",
+        build_timestamp
+    );
     // Generate embedded Mermaid JS module if vendor file exists
     generate_mermaid_js();
     // Only build Windows resources on Windows
@@ -34,27 +39,8 @@ fn main() {
         res.set("ProductVersion", &version_string);
         res.set("FileVersion", &version_string);
 
-        // Best-effort build timestamp as a custom string (not all dialogs show it).
-        // Prefer an ISO-8601 string via PowerShell when available; fall back to epoch seconds.
-        let build_dt = (|| -> Option<String> {
-            use std::process::Command;
-            let out = Command::new("powershell")
-                .args(["-NoProfile", "-Command", "Get-Date -Format o"])
-                .output()
-                .ok()?;
-            if !out.status.success() {
-                return None;
-            }
-            let s = String::from_utf8(out.stdout).ok()?;
-            Some(s.trim().to_string())
-        })()
-        .unwrap_or_else(|| {
-            let secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            format!("epoch:{secs}")
-        });
+        // Build timestamp for about dialogs/tooltips
+        let build_dt = build_timestamp.clone();
         res.set("BuildDateTime", &build_dt);
 
         let copyright = extract_year(&build_dt)
@@ -128,6 +114,34 @@ fn parse_version_components(version: &str) -> (u16, u16, u16, u16) {
 
 fn encode_windows_version(major: u16, minor: u16, patch: u16, build: u16) -> u64 {
     ((major as u64) << 48) | ((minor as u64) << 32) | ((patch as u64) << 16) | (build as u64)
+}
+
+fn build_timestamp_string() -> String {
+    #[cfg(windows)]
+    {
+        if let Some(iso) = powershell_iso_timestamp() {
+            return iso;
+        }
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("epoch:{secs}")
+}
+
+#[cfg(windows)]
+fn powershell_iso_timestamp() -> Option<String> {
+    use std::process::Command;
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-Command", "Get-Date -Format o"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?;
+    Some(s.trim().to_string())
 }
 
 fn first_author(authors: &str) -> String {

@@ -17,6 +17,8 @@ use unicode_normalization::UnicodeNormalization;
 
 /// Prefix used for application/window titles.
 pub const APP_TITLE_PREFIX: &str = "mdmdview";
+const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
+const BUILD_TIMESTAMP: &str = env!("MDMDVIEW_BUILD_TIMESTAMP");
 
 /// Entry in navigation history for back/forward navigation
 #[derive(Clone, Debug)]
@@ -364,11 +366,7 @@ impl MarkdownViewerApp {
                         }
                     }
                     Err(e) => {
-                        errors.push(format!(
-                            "Cannot read directory {}: {}",
-                            path.display(),
-                            e
-                        ));
+                        errors.push(format!("Cannot read directory {}: {}", path.display(), e));
                     }
                 }
                 continue;
@@ -425,7 +423,11 @@ impl MarkdownViewerApp {
 
         // Show errors if any
         if !errors.is_empty() {
-            let valid_count = if valid_files.is_empty() { 0 } else { valid_files.len() + 1 };
+            let valid_count = if valid_files.is_empty() {
+                0
+            } else {
+                valid_files.len() + 1
+            };
             let error_msg = if errors.len() == 1 && valid_count == 0 {
                 errors[0].clone()
             } else if valid_count == 0 {
@@ -735,8 +737,7 @@ impl MarkdownViewerApp {
 
     /// Check if we can navigate forward
     fn can_navigate_forward(&self) -> bool {
-        !self.pending_files.is_empty()
-            || self.history_index < self.history.len().saturating_sub(1)
+        !self.pending_files.is_empty() || self.history_index < self.history.len().saturating_sub(1)
     }
 
     /// Request a reload of the current file (processed outside of input context)
@@ -1423,17 +1424,14 @@ impl MarkdownViewerApp {
                 if !self.pending_files.is_empty() {
                     ui.separator();
                     ui.label(
-                        RichText::new(format!(
-                            "📋 {} files in queue",
-                            self.pending_files.len()
-                        ))
-                        .color(egui::Color32::from_rgb(100, 150, 255))
+                        RichText::new(format!("📋 {} files in queue", self.pending_files.len()))
+                            .color(egui::Color32::from_rgb(100, 150, 255)),
                     );
 
                     ui.label(
                         RichText::new("(Alt+→ for next)")
                             .color(egui::Color32::GRAY)
-                            .italics()
+                            .italics(),
                     );
                 }
 
@@ -1445,10 +1443,14 @@ impl MarkdownViewerApp {
                         ViewMode::Rendered => "Rendered",
                         ViewMode::Raw => "Raw",
                     };
-                    ui.label(format!(
+                    let status = format!(
                         "Mode: {} | Elements: {} | Characters: {}",
                         mode, element_count, char_count
-                    ));
+                    );
+                    ui.label(status).on_hover_ui(|ui| {
+                        ui.label(format!("Version: {}", BUILD_VERSION));
+                        ui.label(format!("Built: {}", BUILD_TIMESTAMP));
+                    });
                 });
             });
         });
@@ -1465,7 +1467,9 @@ impl MarkdownViewerApp {
 
             // Check if files were dropped
             if !i.raw.dropped_files.is_empty() {
-                let paths: Vec<PathBuf> = i.raw.dropped_files
+                let paths: Vec<PathBuf> = i
+                    .raw
+                    .dropped_files
                     .iter()
                     .filter_map(|f| f.path.clone())
                     .collect();
@@ -1489,22 +1493,16 @@ impl MarkdownViewerApp {
                 let screen_rect = ctx.screen_rect();
 
                 // Semi-transparent dark background
-                ui.painter().rect_filled(
-                    screen_rect,
-                    0.0,
-                    egui::Color32::from_black_alpha(180),
-                );
+                ui.painter()
+                    .rect_filled(screen_rect, 0.0, egui::Color32::from_black_alpha(180));
 
                 // Dashed border effect using rounded rect with stroke
                 let border_rect = screen_rect.shrink(20.0);
                 let border_color = egui::Color32::from_rgb(100, 150, 255);
 
                 // Draw border
-                ui.painter().rect_stroke(
-                    border_rect,
-                    8.0,
-                    egui::Stroke::new(4.0, border_color),
-                );
+                ui.painter()
+                    .rect_stroke(border_rect, 8.0, egui::Stroke::new(4.0, border_color));
 
                 // Center text
                 ui.allocate_ui_at_rect(screen_rect, |ui| {
@@ -2634,7 +2632,11 @@ The end.
 
         // Current file should remain None (or welcome sample)
         assert!(app.error_message.is_some());
-        assert!(app.error_message.as_ref().unwrap().contains("Not a markdown file"));
+        assert!(app
+            .error_message
+            .as_ref()
+            .unwrap()
+            .contains("Not a markdown file"));
     }
 
     #[test]
@@ -2653,7 +2655,11 @@ The end.
         app.handle_file_drop(files);
 
         assert!(app.error_message.is_some());
-        assert!(app.error_message.as_ref().unwrap().contains("Too many files"));
+        assert!(app
+            .error_message
+            .as_ref()
+            .unwrap()
+            .contains("Too many files"));
     }
 
     #[test]
@@ -2707,7 +2713,11 @@ The end.
         app.handle_file_drop(vec![temp_dir.path().to_path_buf()]);
 
         assert!(app.error_message.is_some());
-        assert!(app.error_message.as_ref().unwrap().contains("No markdown files"));
+        assert!(app
+            .error_message
+            .as_ref()
+            .unwrap()
+            .contains("No markdown files"));
         Ok(())
     }
 }

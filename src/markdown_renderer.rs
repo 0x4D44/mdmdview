@@ -3,7 +3,7 @@ use anyhow::Result;
 use crossbeam_channel::{
     bounded, Receiver as KrokiJobReceiver, Sender as KrokiJobSender, TrySendError,
 };
-use egui::{Color32, RichText, Stroke};
+use egui::{Color32, RichText, Stroke, Vec2};
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -1522,7 +1522,7 @@ impl MarkdownRenderer {
         if let Some(color) = style.color {
             rich = rich.color(color);
         }
-        let response = ui.label(rich);
+        let response = ui.add(egui::Label::new(rich).wrap(true));
 
         // Add context menu for text
         // Note: Due to egui limitations, selection is cleared on right-click
@@ -1567,7 +1567,7 @@ impl MarkdownRenderer {
         if let Some(color) = text_color {
             rich = rich.color(color);
         }
-        let response = ui.label(rich);
+        let response = ui.add(egui::Label::new(rich).wrap(true));
 
         // Add context menu for highlighted text
         response.context_menu(|ui| {
@@ -2685,83 +2685,36 @@ impl MarkdownRenderer {
 
         ui.add_space(8.0);
 
-        // 1) Measure intrinsic (natural) widths per column
-        let mut natural: Vec<f32> = vec![0.0; headers.len()];
-        // Header widths define a good minimum baseline
-        for (ci, h) in headers.iter().enumerate() {
-            natural[ci] = natural[ci].max(self.measure_inline_spans(ui, h));
+        const MIN_COL_MULTIPLIER: f32 = 6.0;
+        const HARD_MIN_COL_WIDTH: f32 = 48.0;
+        const MAX_WRAP_MULTIPLIER: f32 = 30.0;
+
+        let min_floor = (self.font_sizes.body * MIN_COL_MULTIPLIER).max(HARD_MIN_COL_WIDTH);
+        let wrap_cap = (self.font_sizes.body * MAX_WRAP_MULTIPLIER).min(640.0);
+
+        // 1) Establish baseline widths from headers so small columns don't collapse
+        let min_widths: Vec<f32> = headers
+            .iter()
+            .map(|h| self.measure_inline_spans(ui, h).max(min_floor))
+            .collect();
+        if min_widths.is_empty() {
+            return;
         }
-        // Include rows
+
+        // 2) Allow body cells to request more width (capped so single verbose cells don't dominate)
+        let mut desired_widths = min_widths.clone();
         for row in rows {
             for (ci, cell) in row.iter().enumerate() {
-                if ci < natural.len() {
-                    natural[ci] = natural[ci].max(self.measure_inline_spans(ui, cell));
+                if ci >= desired_widths.len() {
+                    break;
                 }
+                let measured = self.measure_inline_spans(ui, cell).max(min_floor);
+                desired_widths[ci] = desired_widths[ci].max(measured.min(wrap_cap));
             }
         }
 
-        // 2) Compute target widths to fit viewport: if total natural > available, shrink with wrapping
         let available = ui.available_width().max(100.0);
-        let total_natural: f32 = natural.iter().sum();
-        let mut widths = natural.clone();
-
-        if total_natural > available {
-            // Initial proportional shrink
-            let ratio = (available / total_natural).clamp(0.1, 1.0);
-            for w in &mut widths {
-                *w *= ratio;
-            }
-            // Enforce per-column minimums based on header widths (so headers remain readable)
-            let mins = natural.clone(); // header/natural widths are our minima
-                                        // If mins already exceed available, scale mins down proportionally
-            let sum_mins: f32 = mins.iter().sum();
-            if sum_mins > available {
-                let r = (available / sum_mins).clamp(0.1, 1.0);
-                for (w, m) in widths.iter_mut().zip(mins.iter()) {
-                    *w = (*m * r).max(40.0); // absolute hard floor
-                }
-            } else {
-                // Bring widths down but not below minima
-                for (w, m) in widths.iter_mut().zip(mins.iter()) {
-                    if *w < *m {
-                        *w = (*m).max(40.0);
-                    }
-                }
-                // If after clamping we still exceed available, shrink the slack columns
-                let mut sum_w: f32 = widths.iter().sum();
-                if sum_w > available {
-                    let slack: Vec<f32> = widths
-                        .iter()
-                        .zip(mins.iter())
-                        .map(|(w, m)| (w - m).max(0.0))
-                        .collect();
-                    let total_slack: f32 = slack.iter().sum();
-                    if total_slack > 1.0 {
-                        let excess = sum_w - available;
-                        for (i, w) in widths.iter_mut().enumerate() {
-                            if slack[i] > 0.0 {
-                                let cut = excess * (slack[i] / total_slack);
-                                *w -= cut;
-                            }
-                        }
-                        // Recompute in case of rounding
-                        sum_w = widths.iter().sum();
-                        if sum_w > available {
-                            let r2 = available / sum_w;
-                            for w in &mut widths {
-                                *w *= r2;
-                            }
-                        }
-                    } else {
-                        // No slack; scale everything
-                        let r2 = available / sum_w;
-                        for w in &mut widths {
-                            *w *= r2;
-                        }
-                    }
-                }
-            }
-        }
+        let widths = Self::resolve_table_widths(available, &min_widths, &desired_widths);
 
         // 3) Render the table with per-column width constraints; content wraps as needed
         egui::Frame::none()
@@ -2770,16 +2723,21 @@ impl MarkdownRenderer {
                 egui::Grid::new("md_table").striped(true).show(ui, |ui| {
                     for (ci, h) in headers.iter().enumerate() {
                         let w = widths.get(ci).copied().unwrap_or(120.0);
-                        ui.scope(|ui| {
-                            ui.set_max_width(w);
-                            ui.horizontal_wrapped(|ui| {
-                                ui.spacing_mut().item_spacing.x = 0.0;
-                                for span in h {
-                                    // Emphasize header text
-                                    self.render_inline_span(ui, span, None, Some(true));
-                                }
-                            });
-                        });
+                        ui.allocate_ui_with_layout(
+                            Vec2::new(w, 0.0),
+                            egui::Layout::top_down(egui::Align::LEFT),
+                            |ui| {
+                                ui.style_mut().wrap = Some(true);
+                                ui.set_width(w);
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 0.0;
+                                    for span in h {
+                                        // Emphasize header text
+                                        self.render_inline_span(ui, span, None, Some(true));
+                                    }
+                                });
+                            },
+                        );
                     }
                     ui.end_row();
 
@@ -2787,15 +2745,20 @@ impl MarkdownRenderer {
                         for (ci, cell) in row.iter().enumerate() {
                             if ci < headers.len() {
                                 let w = widths.get(ci).copied().unwrap_or(120.0);
-                                ui.scope(|ui| {
-                                    ui.set_max_width(w);
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 0.0;
-                                        for span in cell {
-                                            self.render_inline_span(ui, span, None, None);
-                                        }
-                                    });
-                                });
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(w, 0.0),
+                                    egui::Layout::top_down(egui::Align::LEFT),
+                                    |ui| {
+                                        ui.style_mut().wrap = Some(true);
+                                        ui.set_width(w);
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 0.0;
+                                            for span in cell {
+                                                self.render_inline_span(ui, span, None, None);
+                                            }
+                                        });
+                                    },
+                                );
                             }
                         }
                         ui.end_row();
@@ -2803,6 +2766,57 @@ impl MarkdownRenderer {
                 });
             });
         ui.add_space(8.0);
+    }
+
+    fn resolve_table_widths(available: f32, mins: &[f32], desired: &[f32]) -> Vec<f32> {
+        debug_assert_eq!(mins.len(), desired.len());
+        if mins.is_empty() {
+            return Vec::new();
+        }
+        let clamped_available = available.max(1.0);
+        let desired_total: f32 = desired.iter().sum();
+        let min_total: f32 = mins.iter().sum();
+
+        let mut widths = if desired_total <= clamped_available {
+            desired.to_vec()
+        } else if min_total >= clamped_available {
+            if min_total <= f32::EPSILON {
+                vec![clamped_available / mins.len() as f32; mins.len()]
+            } else {
+                mins.iter()
+                    .map(|m| m * (clamped_available / min_total))
+                    .collect()
+            }
+        } else {
+            let mut widths = mins.to_vec();
+            let extra = clamped_available - min_total;
+            let slack: Vec<f32> = desired
+                .iter()
+                .zip(mins.iter())
+                .map(|(d, m)| (d - m).max(0.0))
+                .collect();
+            let total_slack: f32 = slack.iter().sum();
+            if total_slack <= f32::EPSILON {
+                let bonus = extra / widths.len() as f32;
+                for w in &mut widths {
+                    *w += bonus;
+                }
+            } else {
+                for (w, s) in widths.iter_mut().zip(slack.iter()) {
+                    *w += extra * (*s / total_slack);
+                }
+            }
+            widths
+        };
+
+        let sum: f32 = widths.iter().sum();
+        if sum > clamped_available + 0.5 {
+            let ratio = clamped_available / sum;
+            for w in &mut widths {
+                *w *= ratio;
+            }
+        }
+        widths
     }
 
     /// Open URL in default browser
@@ -3515,5 +3529,45 @@ mod tests {
         let text = MarkdownRenderer::element_plain_text(&parsed[0]);
         assert!(text.contains("Diagram"));
         assert!(text.contains("Flow"));
+    }
+
+    #[test]
+    fn test_table_width_solver_keeps_short_columns_readable() {
+        let mins = vec![90.0, 90.0, 90.0, 90.0];
+        let desired = vec![120.0, 120.0, 360.0, 160.0];
+        let widths = MarkdownRenderer::resolve_table_widths(420.0, &mins, &desired);
+        assert_eq!(widths.len(), 4);
+        // Narrow columns should stay near their minimums even when a wide column exists
+        assert!(
+            widths[0] >= 85.0,
+            "Version column shrank too far: {}",
+            widths[0]
+        );
+        assert!(
+            widths[2] > widths[0],
+            "Wide column should retain more width"
+        );
+        let sum: f32 = widths.iter().sum();
+        assert!(
+            (sum - 420.0).abs() < 0.5,
+            "Widths should consume available space, got {sum}"
+        );
+    }
+
+    #[test]
+    fn test_table_width_solver_handles_constrained_space() {
+        let mins = vec![100.0, 100.0, 100.0, 100.0];
+        let desired = vec![200.0, 240.0, 360.0, 160.0];
+        let widths = MarkdownRenderer::resolve_table_widths(260.0, &mins, &desired);
+        assert_eq!(widths.len(), 4);
+        assert!(
+            widths.iter().all(|w| *w > 0.0),
+            "Widths must stay positive even when clamped hard"
+        );
+        let sum: f32 = widths.iter().sum();
+        assert!(
+            (sum - 260.0).abs() < 0.5,
+            "Widths should sum to available space even under tight constraints"
+        );
     }
 }
