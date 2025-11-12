@@ -1,182 +1,390 @@
-# MarkdownView
+# mdmdview
 
-A simple, standalone markdown viewer for Windows built with Rust and egui.
+<div align="center">
 
-## Features
+**A fast, standalone markdown viewer built with Rust and egui**
 
-- **Pure Rust Implementation** - Single executable, no dependencies
-- **Fast Rendering** - Efficient markdown parsing with pulldown-cmark
-- **Syntax Highlighting** - Code blocks with proper syntax coloring
-- **Native File Dialogs** - Seamless Windows integration
-- **Embedded Examples** - Built-in sample files to explore
-- **Navigation History** - Browser-like back/forward navigation through files and samples
-- **Zoom Support** - Adjustable font sizes for better readability
-- **Keyboard Shortcuts** - Quick access to common functions
-- **Command Line Support** - Open files directly: `mdmdview.exe file.md`
-- **Professional Menus** - Right-aligned keyboard shortcuts
-- **Custom Icon** - Distinctive markdown document icon
-- **Windows Integration** - Full metadata, icon, and shell association support
-- **Perfect Formatting** - Proper inline code, tables, lists, and all markdown elements
-- **Encoding Fallback** - Opens non-UTF-8 files via lossy decoding so legacy content still renders.
-- **Accent-Aware Search** - Finds matches across case and diacritics with precise inline highlighting.
-- **Live Image Refresh** - Automatically reloads textures when linked image files change on disk.
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](https://github.com/0x4D44/mdmdview)
 
-## Requirements
+</div>
 
-- Rust 1.70 or later
-- Windows 10/11 (other platforms may work but are not tested)
+---
 
-## Building
+## 📖 Overview
 
-### Install Rust
+**mdmdview** is a professional markdown viewer designed for speed, simplicity, and reliability. Built entirely in Rust with the egui framework, it delivers a native, responsive experience with zero external dependencies. Perfect for viewing documentation, notes, technical specs, or any markdown content with beautiful formatting and syntax-highlighted code blocks.
 
-If you don't have Rust installed, download and install it from [rustup.rs](https://rustup.rs/):
+### Why mdmdview?
 
-```powershell
-# Download and run the Rust installer
-# Follow the on-screen instructions
-```
+- **🚀 Blazing Fast** - Instant startup and rendering with efficient Rust implementation
+- **📦 Single Binary** - No installation, no dependencies, just run the executable
+- **🎨 Beautiful Rendering** - Professional formatting with syntax highlighting for 100+ languages
+- **⌨️ Keyboard-First** - Comprehensive shortcuts for power users
+- **🔍 Smart Search** - Unicode-aware search with accent normalization
+- **🖼️ Live Images** - Automatic refresh when linked images change
+- **📂 Drag & Drop** - Drop files or folders to open instantly
+- **🌐 Cross-Platform** - Works on Windows, Linux, and macOS
 
-### Build the Application
+---
+
+## ✨ Features
+
+### Core Functionality
+
+- **Pure Rust Implementation** - Single executable (~4.8MB) with all assets embedded
+- **Fast Markdown Rendering** - CommonMark compliant parsing with pulldown-cmark
+- **Syntax Highlighting** - 100+ languages supported via syntect
+- **Native File Dialogs** - Seamless OS integration with rfd
+- **Embedded Examples** - Built-in sample files demonstrating all features
+- **Command Line Support** - Open files directly: `mdmdview document.md`
+- **Custom Application Icon** - Distinctive markdown document icon with full Windows metadata
+
+### Advanced Features
+
+- **🔄 Navigation History** - Browser-like back/forward through files and samples (`Alt+←`/`Alt+→`)
+- **🔍 Accent-Aware Search** - Finds matches across case and diacritics (e.g., "istanbul" matches "İstanbul")
+- **🖼️ Live Image Refresh** - Automatically reloads textures when linked images change on disk
+- **📝 Raw Mode with Edit** - View and edit source markdown (`Ctrl+R` to toggle, `Ctrl+E` to edit)
+- **🔗 Internal Anchors** - In-document navigation via `[link](#anchor)` syntax
+- **📊 Table Support** - Professional grid layout with headers and striped rows
+- **🎨 Mermaid Diagrams** - Render flowcharts, sequence diagrams, and more (Kroki or offline QuickJS)
+- **😀 Emoji Support** - Embedded Twemoji assets with shortcode expansion (`:rocket:` → 🚀)
+- **🌍 Encoding Fallback** - Opens non-UTF-8 legacy files via lossy decoding
+- **💾 Window State Persistence** - Remembers position, size, and zoom level across sessions
+- **🔆 Zoom Support** - Adjustable font sizes (`Ctrl++`/`Ctrl+-`/`Ctrl+0`)
+- **📋 Multi-File Queue** - Drag multiple files to queue them for sequential viewing
+
+### Drag and Drop Support
+
+Drop files and folders directly from your file explorer:
+
+- **Single File** - Drop a `.md` file to open it immediately
+- **Multiple Files** - Drop multiple files to open the first and queue the rest
+  - Navigate through queue with `Alt+→` / `Alt+←`
+  - Status bar shows: "📋 N files in queue"
+- **Folders** - Drop a folder to open all markdown files within (non-recursive, top-level only)
+- **Visual Feedback** - Blue overlay appears during drag operations
+- **Supported Extensions** - `.md`, `.markdown`, `.mdown`, `.mkd`, `.txt`
+- **Protection** - 50 file maximum per drop (prevents accidental large drops)
+
+---
+
+## 🚀 Getting Started
+
+### Prerequisites
+
+- **Rust 1.70+** - Install from [rustup.rs](https://rustup.rs/)
+- **Operating System** - Windows 10/11, Linux (Ubuntu 20.04+, Fedora 35+), or macOS 10.15+
+
+### Installation
+
+#### Option 1: Download Pre-built Binary (Recommended)
+
+1. Go to [Releases](https://github.com/0x4D44/mdmdview/releases)
+2. Download the latest release for your platform:
+   - `mdmdview-vX.Y.Z-windows-x86_64.zip` (Windows)
+   - `mdmdview-vX.Y.Z-linux-x86_64.tar.gz` (Linux)
+3. Extract and run the executable
+
+#### Option 2: Build from Source
 
 ```bash
-# Clone or navigate to the project directory
+# Clone the repository
+git clone https://github.com/0x4D44/mdmdview.git
 cd mdmdview
 
-# Build in release mode for optimal performance
+# Build in release mode (optimized, ~4.8MB binary)
 cargo build --release
 
-# The executable will be created at:
-# target/release/mdmdview.exe
+# Run the application
+./target/release/mdmdview
 ```
 
-### Running
+#### Optional Features
 
+**Offline Mermaid Rendering** (via QuickJS):
 ```bash
-# Run directly with cargo
-cargo run
-
-# Or run the built executable
-./target/release/mdmdview.exe
+# Requires assets/vendor/mermaid.min.js
+cargo build --release --features mermaid-quickjs
 ```
 
-## Usage
+---
+
+## 📘 Usage
 
 ### Opening Files
 
-- Use `File > Open` or `Ctrl+O` to load a markdown file
-- Drag and drop `.md` files directly into the application
-- Use `File > Samples` to explore built-in examples
-- **Command line**: `mdmdview.exe filename.md` to open a specific file
+**Interactive:**
+- Use `File > Open` or press `Ctrl+O`
+- Drag and drop `.md` files into the window
+- Explore `File > Samples` for built-in examples
+
+**Command Line:**
+```bash
+# Open with welcome screen
+mdmdview
+
+# Open a specific file
+mdmdview document.md
+mdmdview "C:\path\to\my document.md"
+
+# Works with relative paths
+mdmdview ../README.md
+```
 
 ### Windows Shell Integration
 
-You can associate MarkdownView with `.md` files for easy opening:
+Associate mdmdview with `.md` files for double-click opening:
 
 1. Right-click any `.md` file in Windows Explorer
-2. Select "Open with > Choose another app"
-3. Browse to `mdmdview.exe`
-4. Check "Always use this app to open .md files"
+2. Select **"Open with > Choose another app"**
+3. Click **"More apps"** → **"Look for another app on this PC"**
+4. Browse to `mdmdview.exe` and select it
+5. Check **"Always use this app to open .md files"**
+6. Click **OK**
 
-Now double-clicking any `.md` file will open it in MarkdownView!
+Now all `.md` files will open in mdmdview by double-clicking!
 
-### Window State Persistence
+### View Modes
 
-- The app saves window position and size on exit and restores them on startup.
-- On Windows, the state file is stored under `%APPDATA%\MarkdownView\window_state.txt`.
-- On Linux/macOS, it is stored under the user config directory (e.g., `~/.config/mdmdview/window_state.txt` or `~/Library/Application Support/MarkdownView/window_state.txt`).
+- **Rendered Mode** (default) - Formatted markdown with styling and images
+- **Raw Mode** (`Ctrl+R`) - Source text in monospace editor
+  - **Write Mode** (`Ctrl+E` in Raw mode) - Edit and auto-save changes
 
-### Searching
+### Search Functionality
 
-- Press `Ctrl+F` to open the search panel.
-- Queries use Unicode normalization and case folding, so the same search hits `resume`, `RESUME`, and versions that include accents (for example, typing `istanbul` also finds `Istanbul`).
-- Highlights respect grapheme clusters, keeping emoji and accent marks intact.
-- Use `Enter`/`Shift+Enter` to move forward or backward through results.
+Press `Ctrl+F` to open the search panel:
 
-### Handling Non-UTF-8 Files
+- **Unicode-aware matching** - Finds "resume" and "résumé" from single query
+- **Case-insensitive** - "istanbul" matches "Istanbul" and "İstanbul"
+- **Grapheme-aware highlighting** - Preserves emoji and accent marks
+- **Navigation** - Use `Enter`/`Shift+Enter` or `F3`/`Shift+F3` to cycle results
+- **Real-time highlighting** - Matches highlighted as you type
 
-MarkdownView falls back to `String::from_utf8_lossy` when a document contains invalid UTF-8 bytes (common for Windows-1252 or ISO-8859 encodings). Replacement characters (`U+FFFD`) mark any bytes that could not be converted. A warning is emitted once to the console/stderr, and saving always writes UTF-8 output.
+---
 
-### Refreshing Linked Images
+## ⌨️ Keyboard Shortcuts
 
-Linked image textures invalidate automatically when the source file timestamp changes. After editing an image externally, return to MarkdownView (or press `F5`) and the viewer will pick up the new pixels without restarting the app.
-
-### File Properties and Icon
-
-Windows file properties are generated from the crate metadata during each build:
-- **Product/Internal Name** comes from `package.name` (currently `mdmdview`).
-- **Description** mirrors `package.description`.
-- **Version** is encoded from `package.version` (for example `0.3.1` renders as `0.3.1.0` in Explorer).
-- **Company** resolves to the first entry in `package.authors`.
-- **BuildDateTime** records an ISO-8601 timestamp captured at build time.
-
-Update `Cargo.toml` before publishing and rebuild to refresh these values. The bundled `icon.ico` remains embedded for Explorer integration.
-
-### Keyboard Shortcuts
-
+### File Operations
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl+O` | Open file |
+| `Ctrl+O` | Open file dialog |
 | `Ctrl+W` | Close current file |
-| `F5` | Reload current file |
+| `F5` | Reload current file from disk |
 | `Ctrl+Q` | Quit application |
+
+### Navigation
+| Shortcut | Action |
+|----------|--------|
 | `Alt+←` | Navigate back in history |
 | `Alt+→` | Navigate forward in history |
+| `Home` | Jump to top of document |
+| `End` | Jump to bottom of document |
+| `Page Up` | Scroll up one page (~80% viewport) |
+| `Page Down` | Scroll down one page (~80% viewport) |
+| `↑` / `↓` | Scroll up/down (small increment) |
+
+### View Controls
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+F` | Toggle search panel |
+| `Ctrl+R` | Toggle Rendered/Raw view |
+| `Ctrl+E` | Toggle edit mode (in Raw view) |
 | `F11` | Toggle fullscreen |
 | `Ctrl++` | Zoom in (increase font size) |
 | `Ctrl+-` | Zoom out (decrease font size) |
-| `Ctrl+0` | Reset zoom to default size |
-| `Home` | Go to top of document |
-| `End` | Go to bottom of document |
-| `Page Up` | Scroll up one page |
-| `Page Down` | Scroll down one page |
+| `Ctrl+0` | Reset zoom to default |
 
-### Markdown Rendering
+### Search Navigation
+| Shortcut | Action |
+|----------|--------|
+| `Enter` | Next search result |
+| `Shift+Enter` | Previous search result |
+| `F3` | Next search result |
+| `Shift+F3` | Previous search result |
+| `Esc` | Close search panel |
 
-All standard markdown elements are fully supported with professional formatting:
+---
 
-- **Headers** (H1-H6) with proper sizing and hierarchy
-- **Text formatting** - Bold, italic, strikethrough  
-- **Lists** - Both bulleted and numbered with proper spacing
-- **Tables** - Professional grid layout with headers and striped rows
-- **Code blocks** - Syntax highlighting for multiple languages
-- **Mermaid diagrams** - Optional QuickJS (offline) or Kroki (network) rendering. See **Mermaid Rendering Modes** for configuration details.
-- **Inline code** - Properly formatted within text (e.g., use `pip install` command)
-- **Links** - Clickable URLs that open in browser
-  - Internal anchors supported: `[Section](#section)` scrolls in-document
-- **Horizontal rules** - Clean section separators
-- **Blockquotes** - Polished dark block with orange bar; supports multi-line and nested quotes
-- **Emojis** - Color emoji images embedded (Twemoji); common shortcodes (e.g., `:rocket:`, `:tada:`) expand to Unicode automatically
+## 🎨 Markdown Support
 
-### Mermaid Rendering Modes
+mdmdview supports all CommonMark elements with professional formatting:
 
-- **Default (Kroki service)**  
-  Rendering runs in the background with at most four concurrent workers. Enable network rendering by setting the `MDMDVIEW_ENABLE_KROKI=1` environment variable (use `MDMDVIEW_KROKI_URL` to target a self-hosted instance). When the pool is busy the viewer shows a queue status panel and renders diagrams automatically once a slot frees up.
-- **Offline (QuickJS)**  
-  Build or run with `--features mermaid-quickjs` to render diagrams locally without network access. Place `mermaid.min.js` in `assets/vendor/mermaid.min.js`; the build script embeds it during compilation. Offline mode shares the same caching and zoom behaviour as the network renderer.
+### Text Formatting
+- **Bold** (`**text**` or `__text__`)
+- *Italic* (`*text*` or `_text_`)
+- ~~Strikethrough~~ (`~~text~~`)
+- `Inline code` with proper inline rendering
+- [Links](https://example.com) that open in browser
+- Internal anchors: `[Section](#section)` for in-document navigation
 
-**Key Improvement**: Inline code elements like `filename.ext` now stay properly inline with surrounding text instead of breaking to new lines.
+### Structure
+- **Headers** (H1-H6) with proper hierarchy and sizing
+- **Lists** - Bulleted and numbered with nesting support
+- **Tables** - Professional grid with headers and striped rows
+- **Blockquotes** - Styled with orange accent bar
+- **Horizontal rules** (`---`) for section separation
 
-### Supported File Types
+### Code Blocks
+- Syntax highlighting for 100+ languages
+- Rust, Python, JavaScript, C++, Go, TypeScript, SQL, and more
+- Proper indentation and color schemes
+- Line-based rendering for readability
 
-- `.md` - Standard markdown files
-- `.markdown` - Alternative markdown extension
-- `.mdown` - Another common variation
-- `.mkd` - Short markdown extension
+### Rich Content
+- **Images** - PNG, JPEG, GIF, BMP, ICO, WebP, SVG
+  - Relative paths resolved from markdown file location
+  - Live refresh when source files change
+  - Graceful fallback for missing images
+- **Emoji** - Color Twemoji assets embedded
+  - Shortcode expansion: `:rocket:`, `:tada:`, `:heart:`
+  - Native Unicode emoji rendering
+- **Mermaid Diagrams** - Flowcharts, sequence diagrams, gantt charts, etc.
+  - Network rendering via Kroki service (set `MDMDVIEW_ENABLE_KROKI=1`)
+  - Offline rendering with `--features mermaid-quickjs`
 
-## Development
+### Special Features
+- **Line break preservation** - Single newlines respected (perfect for poetry/lyrics)
+- **Header IDs** - Auto-generated for anchor navigation
+- **Nested structures** - Lists within blockquotes, tables with formatting, etc.
 
-### Tagged Releases
+---
 
-- Push a semver tag to trigger a release build and publish assets:
-  - Create tag: `git tag v1.0.0 && git push origin v1.0.0`
-  - Or use GitHub UI: Releases > Draft a new release > Tag `vX.Y.Z` > Publish
-- The `Release` workflow builds on Windows and Linux, then attaches:
-  - `mdmdview-vX.Y.Z-windows-x86_64.zip`
-  - `mdmdview-vX.Y.Z-linux-x86_64.tar.gz`
-- You can also run the workflow manually (Actions > Release > Run workflow) and choose a `toolchain` (default `stable`).
+## 🔧 Configuration
 
-### Running Tests
+### Environment Variables
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `MDMDVIEW_ENABLE_KROKI` | Enable Kroki service for Mermaid rendering | `0` (disabled) |
+| `MDMDVIEW_KROKI_URL` | Custom Kroki server URL | Public Kroki instance |
+| `RUST_LOG` | Logging level (`error`, `warn`, `info`, `debug`, `trace`) | `warn` |
+
+**Example:**
+```bash
+# Enable Kroki for Mermaid diagrams
+MDMDVIEW_ENABLE_KROKI=1 mdmdview document.md
+
+# Use custom Kroki instance
+MDMDVIEW_KROKI_URL=https://kroki.example.com mdmdview document.md
+
+# Enable debug logging
+RUST_LOG=debug mdmdview document.md
+```
+
+### Window State Persistence
+
+Window position, size, and maximized state are automatically saved:
+
+- **Windows**: `%APPDATA%\MarkdownView\window_state.txt` + Registry backup
+- **Linux**: `~/.config/mdmdview/window_state.txt` (respects `XDG_CONFIG_HOME`)
+- **macOS**: `~/Library/Application Support/MarkdownView/window_state.txt`
+
+State is saved every second (throttled) and on exit.
+
+---
+
+## 🏗️ Architecture
+
+### Project Structure
+
+```
+mdmdview/
+├── src/
+│   ├── main.rs                   # Entry point, eframe setup, CLI args
+│   ├── app.rs                    # Main app state, UI logic, shortcuts
+│   ├── markdown_renderer.rs      # Parsing, rendering, syntax highlighting
+│   ├── sample_files.rs           # Embedded markdown examples
+│   ├── window_state.rs           # Cross-platform state persistence
+│   ├── emoji_catalog.rs          # Emoji shortcode mappings
+│   ├── emoji_assets.rs           # Embedded Twemoji PNGs
+│   └── lib.rs                    # Library interface for testing
+├── build.rs                      # Windows resources, version metadata
+├── assets/
+│   ├── icon.ico                  # Application icon
+│   └── vendor/
+│       └── mermaid.min.js        # (Optional) For offline Mermaid
+├── Cargo.toml                    # Dependencies and build config
+└── README.md                     # This file
+```
+
+### Core Components
+
+1. **Main Entry Point** (`src/main.rs`)
+   - eframe/egui application setup
+   - Command-line argument parsing
+   - Window configuration with icon
+   - Cross-platform initialization
+
+2. **Application Logic** (`src/app.rs`)
+   - `MarkdownViewerApp` struct manages all state
+   - UI rendering (menu bar, status bar, content area)
+   - Keyboard shortcut handling
+   - Navigation history (back/forward stack)
+   - View mode switching (Rendered/Raw/Write)
+   - Search state and result navigation
+   - File operations and error handling
+
+3. **Markdown Renderer** (`src/markdown_renderer.rs`)
+   - Parsing with pulldown-cmark into `MarkdownElement` enum
+   - Conversion to egui widgets
+   - Syntax highlighting with syntect
+   - Image loading and texture caching
+   - Mermaid diagram rendering (Kroki or QuickJS)
+   - Table layout with proper sizing
+   - Search result highlighting
+   - Emoji rendering with Twemoji assets
+
+4. **Window State** (`src/window_state.rs`)
+   - Platform-specific persistence
+   - Geometry validation and sanitization
+   - Registry storage on Windows
+   - Config file storage on Linux/macOS
+
+5. **Build Script** (`build.rs`)
+   - Windows resource file generation
+   - Version info from Cargo.toml
+   - Icon embedding
+   - Mermaid.js embedding (optional feature)
+
+### Key Design Decisions
+
+- **Single Binary** - All dependencies embedded for zero-config distribution
+- **Immediate Mode GUI** - egui provides responsive, native-feeling interface
+- **CommonMark Compliance** - pulldown-cmark ensures standard compatibility
+- **Efficient Rendering** - Texture caching, incremental updates, scroll optimization
+- **Cross-Platform** - Platform-specific code isolated, core logic portable
+- **Zero Warnings** - Strict compilation standards for code quality
+
+---
+
+## 🛠️ Development
+
+### Building
+
+```bash
+# Development build (faster compilation, larger binary)
+cargo build
+
+# Release build (optimized, ~4.8MB)
+cargo build --release
+
+# With offline Mermaid support
+cargo build --release --features mermaid-quickjs
+
+# Run in development mode
+cargo run
+
+# Run with specific file
+cargo run -- document.md
+
+# Run with Kroki enabled
+MDMDVIEW_ENABLE_KROKI=1 cargo run
+```
+
+### Testing
 
 ```bash
 # Run all unit tests
@@ -187,103 +395,225 @@ cargo test -- --nocapture
 
 # Run specific test module
 cargo test markdown_renderer
+cargo test app
+cargo test window_state
+
+# Run tests for search functionality
+cargo test search
 ```
 
-### Code Structure
-
-- `src/main.rs` - Application entry point and eframe setup
-- `src/app.rs` - Main application logic and UI
-- `src/markdown_renderer.rs` - Markdown parsing and rendering engine
-- `src/sample_files.rs` - Embedded sample markdown files
-- `src/lib.rs` - Library interface for testing
-
-### Building for Release
-
-For distribution, build an optimized single executable:
+### Code Quality
 
 ```bash
-# Build optimized release version
-cargo build --release
+# Format code (required before commits)
+cargo fmt
 
-# The executable will be a single file with no external dependencies
-# Located at: target/release/mdmdview.exe
-# Size: ~4.8MB with embedded samples and syntax highlighting
+# Lint with Clippy (zero warnings policy)
+cargo clippy
+
+# Check compilation without building
+cargo check
+
+# Run all quality checks
+cargo fmt && cargo clippy && cargo test
 ```
 
-### Command Line Usage
+### Release Process
+
+**Tagged Releases:**
 
 ```bash
-# Open MarkdownView with welcome screen
-mdmdview.exe
-
-# Open a specific markdown file
-mdmdview.exe document.md
-mdmdview.exe "C:\path\to\my document.md"
-
-# Works with relative and absolute paths
-mdmdview.exe ..\README.md
+# Create and push a version tag
+git tag v1.0.0
+git push origin v1.0.0
 ```
 
-## Architecture
+This triggers the `Release` workflow which:
+1. Builds on Windows and Linux runners
+2. Creates release archives:
+   - `mdmdview-vX.Y.Z-windows-x86_64.zip`
+   - `mdmdview-vX.Y.Z-linux-x86_64.tar.gz`
+3. Attaches artifacts to GitHub release
 
-### Components
+**Manual Release:**
+- Go to Actions → Release → Run workflow
+- Choose toolchain (`stable`, `beta`, or `nightly`)
 
-1. **Main App State** (`app.rs`)
-   - Manages application state and UI logic
-   - Handles file loading and user interactions
-   - Implements eframe::App trait for the main loop
+### File Metadata (Windows)
 
-2. **Markdown Renderer** (`markdown_renderer.rs`)
-   - Parses markdown using pulldown-cmark
-   - Converts to egui widgets for display
-   - Provides syntax highlighting with syntect
+Version information is auto-generated from `Cargo.toml`:
+- **ProductName/InternalName**: `package.name`
+- **FileDescription**: `package.description`
+- **FileVersion**: `package.version` (e.g., `0.3.3.0`)
+- **CompanyName**: First entry in `package.authors`
+- **BuildDateTime**: ISO-8601 timestamp at build time
 
-3. **Sample Files** (`sample_files.rs`)
-   - Embedded markdown examples
-   - Usage instructions and feature demos
-   - Built into the executable for easy access
+Update `Cargo.toml` before release, then rebuild to refresh metadata.
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please follow these guidelines:
+
+### Code Standards
+
+1. **Zero Warnings Policy** - Code must compile cleanly with no warnings
+2. **Documentation** - Each `.rs` file needs a descriptive block comment explaining:
+   - File's purpose and functionality
+   - Key components/structures defined
+   - How it fits in the overall architecture
+3. **Comments** - Public functions and complex logic must be well-commented
+4. **Test Coverage** - New features should include unit tests
+5. **Formatting** - Run `cargo fmt` before committing
+6. **Linting** - Run `cargo clippy` and address all warnings
+
+### Contribution Workflow
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/my-feature`
+3. Make your changes following code standards
+4. Run quality checks: `cargo fmt && cargo clippy && cargo test`
+5. Test both debug and release builds
+6. Commit with clear, descriptive messages
+7. Push to your fork and submit a pull request
+
+### Testing Checklist
+
+- [ ] All existing tests pass
+- [ ] New tests added for new features
+- [ ] Tested with large markdown files (1000+ elements)
+- [ ] Tested with images and embedded content
+- [ ] Verified keyboard shortcuts work correctly
+- [ ] Checked memory usage with many images
+- [ ] Tested on target platforms (Windows/Linux/macOS)
+
+---
+
+## 📝 Supported File Types
+
+mdmdview recognizes these file extensions:
+
+- `.md` - Standard markdown
+- `.markdown` - Alternative markdown extension
+- `.mdown` - Common variation
+- `.mkd` - Short markdown extension
+- `.txt` - Plain text files
+
+All files are processed as UTF-8 with lossy fallback for legacy encodings.
+
+---
+
+## 🐛 Troubleshooting
+
+### Images Not Displaying
+
+- **Check file path** - Relative paths resolved from markdown file location
+- **Verify format** - Supported: PNG, JPEG, GIF, BMP, ICO, WebP, SVG
+- **Press F5** - Manually reload if live refresh doesn't trigger
+- **Check console** - Error messages printed to stderr
+
+### Non-UTF-8 Files Show Strange Characters
+
+mdmdview uses `String::from_utf8_lossy` for legacy encodings:
+- Replacement characters (`U+FFFD`) mark invalid bytes
+- Save file as UTF-8 in text editor to fix permanently
+- Warning emitted once to console/stderr
+
+### Mermaid Diagrams Not Rendering
+
+**Kroki mode:**
+- Set `MDMDVIEW_ENABLE_KROKI=1` environment variable
+- Check internet connection
+- Look for queue status panel (max 4 concurrent renders)
+
+**Offline mode:**
+- Build with `--features mermaid-quickjs`
+- Ensure `assets/vendor/mermaid.min.js` exists before building
+- Check that diagram syntax is valid
+
+### Window Position Lost
+
+State file may be corrupted:
+- **Windows**: Delete `%APPDATA%\MarkdownView\window_state.txt`
+- **Linux**: Delete `~/.config/mdmdview/window_state.txt`
+- **macOS**: Delete `~/Library/Application Support/MarkdownView/window_state.txt`
+
+App will recreate with default centered window.
+
+### Performance Issues
+
+- **Large files** - Files with 1000+ elements may render slowly
+- **Many images** - Texture memory usage grows with image count
+- **Syntax highlighting** - Code blocks in very large files may lag
+
+Try breaking large documents into smaller files.
+
+---
+
+## 🔒 Security Considerations
+
+### Safe Markdown Rendering
+
+- **No script execution** - JavaScript in markdown is not executed
+- **Safe link handling** - External links open in browser, not in-app
+- **Image loading** - Only from local filesystem or explicit URLs
+- **No remote code** - All rendering done locally (except optional Kroki)
+
+### Mermaid Rendering
+
+**Kroki mode** (network):
+- Diagrams sent to external service for rendering
+- Use `MDMDVIEW_KROKI_URL` to point to trusted self-hosted instance
+- Review diagram content before rendering sensitive data
+
+**QuickJS mode** (offline):
+- JavaScript sandboxed in QuickJS runtime
+- No network access during rendering
+- Recommended for sensitive/confidential content
+
+---
+
+## 📜 License
+
+This project is provided as-is for demonstration purposes.
+
+### Third-Party Assets
+
+**Emoji Graphics:**
+© 2020 Twitter, Inc and other contributors
+Licensed under CC-BY 4.0 (Twemoji)
+See https://github.com/twitter/twemoji for details
+Images embedded in executable for offline use
 
 ### Dependencies
 
-- `eframe` / `egui` - Cross-platform GUI framework
-- `pulldown-cmark` - CommonMark compliant markdown parser
-- `syntect` - Syntax highlighting library
-- `rfd` - Native file dialogs
-- `anyhow` - Error handling
+All Rust crates used are listed in `Cargo.toml` with their respective licenses (mostly MIT/Apache-2.0).
 
-## Contributing
+---
 
-1. Ensure all tests pass: `cargo test`
-2. Format code: `cargo fmt`
-3. Check for warnings: `cargo clippy`
-4. Build release version: `cargo build --release`
+## 🙏 Acknowledgments
 
-## License
+- **egui** - Excellent immediate-mode GUI framework
+- **pulldown-cmark** - Fast, CommonMark-compliant parser
+- **syntect** - Comprehensive syntax highlighting
+- **Twemoji** - Beautiful open-source emoji set
+- **Rust Community** - Amazing ecosystem and tooling
 
-This project is provided as‑is for demonstration purposes.
+---
 
-Emoji graphics are © 2020 Twitter, Inc and other contributors, licensed under CC‑BY 4.0 (Twemoji). See https://github.com/twitter/twemoji for details. The images are embedded into the executable for offline use.
+## 📬 Contact & Support
 
+- **Issues**: [GitHub Issues](https://github.com/0x4D44/mdmdview/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/0x4D44/mdmdview/discussions)
+- **Pull Requests**: Contributions welcome!
 
+---
 
+<div align="center">
 
+**Made with ❤️ and Rust**
 
+[⬆ Back to Top](#mdmdview)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+</div>
