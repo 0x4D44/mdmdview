@@ -14,12 +14,20 @@ fn main() -> Result<(), eframe::Error> {
     env_logger::init();
 
     // Parse command line arguments
-    let args: Vec<String> = std::env::args().collect();
-    let initial_file = if args.len() > 1 {
-        Some(std::path::PathBuf::from(&args[1]))
-    } else {
-        None
-    };
+    let mut initial_file: Option<std::path::PathBuf> = None;
+    let mut table_wrap_cli: Option<bool> = None;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--table-wrap" => table_wrap_cli = Some(true),
+            "--no-table-wrap" => table_wrap_cli = Some(false),
+            _ if initial_file.is_none() => initial_file = Some(std::path::PathBuf::from(&arg)),
+            _ => {}
+        }
+    }
+    let table_wrap_env = std::env::var("MDMDVIEW_TABLE_WRAP_OVERHAUL")
+        .ok()
+        .and_then(|value| parse_bool_flag(&value));
+    let table_wrap_enabled = table_wrap_cli.or(table_wrap_env).unwrap_or(true);
 
     // Set up eframe options for the native window
     let mut viewport = egui::ViewportBuilder::default()
@@ -53,11 +61,12 @@ fn main() -> Result<(), eframe::Error> {
     eframe::run_native(
         APP_TITLE_PREFIX,
         native_options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             // Configure egui styling for better markdown display
             configure_egui_style(&cc.egui_ctx);
 
             let mut app = MarkdownViewerApp::new();
+            app.set_table_wrap_overhaul_enabled(table_wrap_enabled);
 
             // Load initial file if provided via command line
             if let Some(file_path) = initial_file {
@@ -180,6 +189,14 @@ fn configure_egui_style(ctx: &egui::Context) {
     // Custom fonts could be added here if needed
 }
 
+fn parse_bool_flag(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,18 +218,11 @@ mod tests {
     }
 
     #[test]
-    fn test_command_line_parsing() {
-        // This tests the command line logic conceptually
-        let args = ["program".to_string(), "test.md".to_string()];
-        let initial_file = args.get(1).map(std::path::PathBuf::from);
-
-        assert!(initial_file.is_some());
-        assert_eq!(initial_file.unwrap().to_string_lossy(), "test.md");
-
-        // Test no arguments
-        let args = ["program".to_string()];
-        let initial_file = args.get(1).map(std::path::PathBuf::from);
-
-        assert!(initial_file.is_none());
+    fn test_parse_bool_flag() {
+        assert_eq!(parse_bool_flag("true"), Some(true));
+        assert_eq!(parse_bool_flag("FALSE"), Some(false));
+        assert_eq!(parse_bool_flag("1"), Some(true));
+        assert_eq!(parse_bool_flag("0"), Some(false));
+        assert_eq!(parse_bool_flag("unknown"), None);
     }
 }
