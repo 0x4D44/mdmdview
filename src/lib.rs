@@ -7,6 +7,7 @@ pub mod emoji_catalog;
 /// that can be embedded in GUI applications.
 pub mod markdown_renderer;
 pub mod sample_files;
+pub mod table_support;
 pub mod window_state;
 
 pub use app::{MarkdownViewerApp, APP_TITLE_PREFIX};

@@ -17,6 +17,7 @@ A simple, standalone markdown viewer for Windows built with Rust and egui.
 - **Custom Icon** - Distinctive markdown document icon
 - **Windows Integration** - Full metadata, icon, and shell association support
 - **Perfect Formatting** - Proper inline code, tables, lists, and all markdown elements
+- **Table Wrap Overhaul** - Enabled by default with per-column resizing + virtualization; toggle via the View menu or fall back with `--no-table-wrap` if needed.
 - **Encoding Fallback** - Opens non-UTF-8 files via lossy decoding so legacy content still renders.
 - **Accent-Aware Search** - Finds matches across case and diacritics with precise inline highlighting.
 - **Live Image Refresh** - Automatically reloads textures when linked image files change on disk.
@@ -68,6 +69,12 @@ cargo run
 - Drag and drop `.md` files directly into the application
 - Use `File > Samples` to explore built-in examples
 - **Command line**: `mdmdview.exe filename.md` to open a specific file
+
+### Command-line Options
+
+- `--table-wrap` — explicitly keep the overhaul on (it’s on by default).
+- `--no-table-wrap` — temporarily fall back to the legacy renderer if you hit an issue.
+- `MDMDVIEW_TABLE_WRAP_OVERHAUL=1` (or `0`) — set the default without passing flags.
 
 ### Windows Shell Integration
 

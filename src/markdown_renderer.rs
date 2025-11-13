@@ -1,14 +1,21 @@
+use crate::table_support::{derive_column_specs, ColumnSpec, TableMetrics};
 use crate::{emoji_assets, emoji_catalog};
 use anyhow::Result;
 use crossbeam_channel::{
     bounded, Receiver as KrokiJobReceiver, Sender as KrokiJobSender, TrySendError,
 };
-use egui::{Color32, RichText, Stroke, Vec2};
+use egui::{
+    text::{Galley, LayoutJob, TextWrapping},
+    Align, Color32, FontSelection, RichText, Stroke, Vec2,
+};
+use egui_extras::TableBuilder;
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
+use std::sync::{mpsc::Receiver, Arc};
 use std::time::{Duration, SystemTime};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
@@ -85,6 +92,117 @@ pub enum InlineSpan {
         alt: String,
         title: Option<String>,
     },
+}
+
+impl InlineSpan {
+    fn text_content(&self) -> Option<&str> {
+        match self {
+            InlineSpan::Text(t)
+            | InlineSpan::Code(t)
+            | InlineSpan::Strong(t)
+            | InlineSpan::Emphasis(t)
+            | InlineSpan::Strikethrough(t) => Some(t.as_str()),
+            InlineSpan::Link { text, .. } => Some(text.as_str()),
+            InlineSpan::Image { .. } => None,
+        }
+    }
+
+    fn is_text_like(&self) -> bool {
+        !matches!(self, InlineSpan::Image { .. })
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone)]
+enum CellFragment<'a> {
+    Text(&'a [InlineSpan]),
+    Emoji(String),
+    Image(&'a InlineSpan),
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone)]
+struct LayoutJobBuild {
+    job: LayoutJob,
+    #[allow(dead_code)]
+    plain_text: String,
+    #[cfg_attr(not(test), allow(dead_code))]
+    link_ranges: Vec<LinkRange>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone)]
+struct LinkRange {
+    char_range: Range<usize>,
+    url: String,
+}
+
+const TABLE_LAYOUT_CACHE_CAPACITY: usize = 512;
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct CellLayoutKey {
+    row: Option<usize>,
+    col: usize,
+    width: u32,
+    strong: bool,
+    highlight_hash: u64,
+    content_hash: u64,
+}
+
+struct CellLayoutCache {
+    entries: HashMap<CellLayoutKey, LayoutJobBuild>,
+    order: VecDeque<CellLayoutKey>,
+    hits: u64,
+    misses: u64,
+    capacity: usize,
+}
+
+impl CellLayoutCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            hits: 0,
+            misses: 0,
+            capacity,
+        }
+    }
+
+    fn get(&mut self, key: &CellLayoutKey) -> Option<LayoutJobBuild> {
+        if let Some(build) = self.entries.get(key) {
+            self.hits += 1;
+            Some(build.clone())
+        } else {
+            self.misses += 1;
+            None
+        }
+    }
+
+    fn insert(&mut self, key: CellLayoutKey, build: LayoutJobBuild) {
+        if self.entries.len() >= self.capacity && !self.entries.contains_key(&key) {
+            while self.entries.len() >= self.capacity {
+                if let Some(old) = self.order.pop_front() {
+                    self.entries.remove(&old);
+                } else {
+                    break;
+                }
+            }
+        }
+        self.order.retain(|existing| existing != &key);
+        self.order.push_back(key.clone());
+        self.entries.insert(key, build);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.hits = 0;
+        self.misses = 0;
+    }
+
+    fn stats(&self) -> (u64, u64) {
+        (self.hits, self.misses)
+    }
 }
 
 /// Represents a rendered markdown element
@@ -175,6 +293,9 @@ pub struct MarkdownRenderer {
     mermaid_init_logged: RefCell<bool>,
     #[cfg(feature = "mermaid-quickjs")]
     mermaid_last_error: RefCell<Option<String>>,
+    table_wrap_overhaul_enabled: bool,
+    table_layout_cache: RefCell<CellLayoutCache>,
+    table_metrics: RefCell<TableMetrics>,
 }
 
 impl Default for MarkdownRenderer {
@@ -184,6 +305,359 @@ impl Default for MarkdownRenderer {
 }
 
 impl MarkdownRenderer {
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn cell_fragments<'a>(&'a self, spans: &'a [InlineSpan]) -> Vec<CellFragment<'a>> {
+        let mut fragments = Vec::new();
+        let mut run_start: Option<usize> = None;
+        let flush_run =
+            |start: &mut Option<usize>, end: usize, fragments: &mut Vec<CellFragment<'a>>| {
+                if let Some(run_begin) = start.take() {
+                    if run_begin < end {
+                        fragments.push(CellFragment::Text(&spans[run_begin..end]));
+                    }
+                }
+            };
+
+        for (idx, span) in spans.iter().enumerate() {
+            if let Some(emoji_key) = self.span_is_single_emoji(span) {
+                flush_run(&mut run_start, idx, &mut fragments);
+                fragments.push(CellFragment::Emoji(emoji_key));
+                continue;
+            }
+
+            if matches!(span, InlineSpan::Image { .. }) {
+                flush_run(&mut run_start, idx, &mut fragments);
+                fragments.push(CellFragment::Image(span));
+                continue;
+            }
+
+            if span.is_text_like() && run_start.is_none() {
+                run_start = Some(idx);
+            }
+        }
+
+        if let Some(start) = run_start {
+            fragments.push(CellFragment::Text(&spans[start..]));
+        }
+
+        fragments
+    }
+
+    fn span_is_single_emoji(&self, span: &InlineSpan) -> Option<String> {
+        let text = span.text_content()?;
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let mut graphemes = trimmed.graphemes(true);
+        let first = graphemes.next()?;
+        if graphemes.next().is_some() {
+            return None;
+        }
+        if first != trimmed {
+            return None;
+        }
+        self.emoji_key_for_grapheme(first)
+    }
+
+    fn highlight_segments<'a>(
+        &self,
+        text: &'a str,
+        highlight: Option<&str>,
+    ) -> Vec<(Range<usize>, bool)> {
+        if text.is_empty() {
+            return Vec::new();
+        }
+        let Some(needle) = highlight.filter(|h| !h.is_empty()) else {
+            return vec![(0..text.len(), false)];
+        };
+
+        let mut folded = String::new();
+        let mut folded_to_char: Vec<usize> = Vec::new();
+        let mut char_ranges: Vec<(usize, usize)> = Vec::new();
+        for (char_idx, (byte_idx, ch)) in text.char_indices().enumerate() {
+            let folded_piece: String = ch.to_string().case_fold().nfkc().collect();
+            let before = folded.len();
+            folded.push_str(&folded_piece);
+            let after = folded.len();
+            for _ in before..after {
+                folded_to_char.push(char_idx);
+            }
+            char_ranges.push((byte_idx, byte_idx + ch.len_utf8()));
+        }
+
+        if folded.is_empty() {
+            return vec![(0..text.len(), false)];
+        }
+
+        let mut segments = Vec::new();
+        let mut rendered_until = 0usize;
+        let mut search_at = 0usize;
+        while let Some(pos) = folded[search_at..].find(needle) {
+            let abs = search_at + pos;
+            if abs >= folded_to_char.len() {
+                break;
+            }
+            let start_char_idx = folded_to_char[abs];
+            let (start_byte, _) = char_ranges[start_char_idx];
+            if start_byte > rendered_until {
+                segments.push((rendered_until..start_byte, false));
+            }
+            let match_end = abs + needle.len();
+            let end_char_idx = if match_end == 0 {
+                start_char_idx
+            } else {
+                folded_to_char[match_end.saturating_sub(1)]
+            };
+            let (_, end_byte) = char_ranges[end_char_idx];
+            segments.push((start_byte..end_byte, true));
+            rendered_until = end_byte;
+            search_at = match_end;
+        }
+
+        if rendered_until < text.len() {
+            segments.push((rendered_until..text.len(), false));
+        }
+
+        if segments.is_empty() {
+            segments.push((0..text.len(), false));
+        }
+        segments
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn build_layout_job(
+        &self,
+        style: &egui::Style,
+        spans: &[InlineSpan],
+        wrap_width: f32,
+        strong_override: bool,
+    ) -> LayoutJobBuild {
+        let mut job = LayoutJob::default();
+        job.wrap = TextWrapping {
+            max_width: wrap_width.max(1.0),
+            ..Default::default()
+        };
+        job.break_on_newline = true;
+        job.halign = Align::LEFT;
+
+        let highlight = self
+            .highlight_phrase
+            .borrow()
+            .clone()
+            .filter(|s| !s.is_empty());
+
+        let mut plain_text = String::new();
+        let mut link_ranges = Vec::new();
+        let mut job_char_offset = 0usize;
+
+        for span in spans {
+            match span {
+                InlineSpan::Image { .. } => {}
+                InlineSpan::Code(code) => {
+                    job_char_offset +=
+                        self.append_code_span(style, &mut job, &mut plain_text, code);
+                }
+                InlineSpan::Link { text, url } => {
+                    let inline_style = InlineStyle {
+                        strong: strong_override,
+                        color: Some(if Self::is_external_url(url) {
+                            Color32::from_rgb(120, 190, 255)
+                        } else {
+                            Color32::LIGHT_BLUE
+                        }),
+                        ..Default::default()
+                    };
+                    let mut normalized = self.fix_unicode_chars(text);
+                    normalized = Self::expand_shortcodes(&normalized);
+                    normalized = Self::expand_superscripts(&normalized);
+                    let appended = self.append_text_sections(
+                        style,
+                        &mut job,
+                        &mut plain_text,
+                        &normalized,
+                        self.font_sizes.body,
+                        inline_style,
+                        highlight.as_deref(),
+                    );
+                    if appended > 0 {
+                        let start_char = job_char_offset;
+                        job_char_offset += appended;
+                        link_ranges.push(LinkRange {
+                            char_range: start_char..job_char_offset,
+                            url: url.clone(),
+                        });
+                    }
+                }
+                InlineSpan::Strong(text) => {
+                    job_char_offset += self.append_plain_span(
+                        style,
+                        &mut job,
+                        &mut plain_text,
+                        text,
+                        InlineStyle {
+                            strong: true,
+                            ..Default::default()
+                        },
+                        highlight.as_deref(),
+                    );
+                }
+                InlineSpan::Emphasis(text) => {
+                    job_char_offset += self.append_plain_span(
+                        style,
+                        &mut job,
+                        &mut plain_text,
+                        text,
+                        InlineStyle {
+                            italics: true,
+                            strong: strong_override,
+                            ..Default::default()
+                        },
+                        highlight.as_deref(),
+                    );
+                }
+                InlineSpan::Strikethrough(text) => {
+                    job_char_offset += self.append_plain_span(
+                        style,
+                        &mut job,
+                        &mut plain_text,
+                        text,
+                        InlineStyle {
+                            strike: true,
+                            strong: strong_override,
+                            ..Default::default()
+                        },
+                        highlight.as_deref(),
+                    );
+                }
+                InlineSpan::Text(text) => {
+                    job_char_offset += self.append_plain_span(
+                        style,
+                        &mut job,
+                        &mut plain_text,
+                        text,
+                        InlineStyle {
+                            strong: strong_override,
+                            ..Default::default()
+                        },
+                        highlight.as_deref(),
+                    );
+                }
+            }
+        }
+
+        LayoutJobBuild {
+            job,
+            plain_text,
+            link_ranges,
+        }
+    }
+
+    fn append_plain_span(
+        &self,
+        style: &egui::Style,
+        job: &mut LayoutJob,
+        plain_text: &mut String,
+        text: &str,
+        inline_style: InlineStyle,
+        highlight: Option<&str>,
+    ) -> usize {
+        if text.is_empty() {
+            return 0;
+        }
+        let mut normalized = self.fix_unicode_chars(text);
+        normalized = Self::expand_shortcodes(&normalized);
+        normalized = Self::expand_superscripts(&normalized);
+        if normalized.is_empty() {
+            return 0;
+        }
+        self.append_text_sections(
+            style,
+            job,
+            plain_text,
+            &normalized,
+            self.font_sizes.body,
+            inline_style,
+            highlight,
+        )
+    }
+
+    fn append_code_span(
+        &self,
+        style: &egui::Style,
+        job: &mut LayoutJob,
+        plain_text: &mut String,
+        code: &str,
+    ) -> usize {
+        if code.is_empty() {
+            return 0;
+        }
+        plain_text.push_str(code);
+        let visuals = &style.visuals;
+        let (bg, fg) = if visuals.dark_mode {
+            (
+                Color32::from_rgb(30, 30, 30),
+                Color32::from_rgb(180, 255, 180),
+            )
+        } else {
+            (Color32::WHITE, Color32::from_rgb(60, 80, 150))
+        };
+        let rich = RichText::new(code.to_string())
+            .size(self.font_sizes.code)
+            .monospace()
+            .background_color(bg)
+            .color(fg);
+        rich.append_to(job, style, FontSelection::Default, Align::LEFT);
+        code.chars().count()
+    }
+
+    fn append_text_sections(
+        &self,
+        style: &egui::Style,
+        job: &mut LayoutJob,
+        plain_text: &mut String,
+        text: &str,
+        font_size: f32,
+        inline_style: InlineStyle,
+        highlight: Option<&str>,
+    ) -> usize {
+        if text.is_empty() {
+            return 0;
+        }
+        plain_text.push_str(text);
+        let char_count = text.chars().count();
+        let visuals = &style.visuals;
+        let segments = self.highlight_segments(text, highlight);
+        for (range, highlighted) in segments {
+            if range.is_empty() {
+                continue;
+            }
+            let slice = &text[range];
+            let mut rich = RichText::new(slice.to_string()).size(font_size);
+            if inline_style.strong {
+                rich = rich.strong();
+            }
+            if inline_style.italics {
+                rich = rich.italics();
+            }
+            if inline_style.strike {
+                rich = rich.strikethrough();
+            }
+            let mut text_color = inline_style.color;
+            if highlighted {
+                rich = rich.background_color(visuals.selection.bg_fill);
+                if text_color.is_none() {
+                    text_color = Some(visuals.selection.stroke.color);
+                }
+            }
+            if let Some(color) = text_color {
+                rich = rich.color(color);
+            }
+            rich.append_to(job, style, FontSelection::Default, Align::LEFT);
+        }
+        char_count
+    }
+
     const MAX_KROKI_JOBS: usize = 4;
 
     /// Create a new markdown renderer
@@ -243,6 +717,9 @@ impl MarkdownRenderer {
             mermaid_init_logged: RefCell::new(false),
             #[cfg(feature = "mermaid-quickjs")]
             mermaid_last_error: RefCell::new(None),
+            table_wrap_overhaul_enabled: true,
+            table_layout_cache: RefCell::new(CellLayoutCache::new(TABLE_LAYOUT_CACHE_CAPACITY)),
+            table_metrics: RefCell::new(TableMetrics::default()),
         }
     }
 
@@ -1300,22 +1777,13 @@ impl MarkdownRenderer {
                     ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
                 }
                 if r.clicked() {
-                    if let Some(fragment) = Self::extract_fragment(url) {
-                        // Store pending anchor for the app to handle scroll
-                        *self.pending_anchor.borrow_mut() = Some(fragment);
-                    } else {
-                        self.open_url(url);
-                    }
+                    self.trigger_link(url);
                 }
 
                 // Add context menu for links
                 r.context_menu(|ui| {
                     if ui.button("🔗 Open Link").clicked() {
-                        if let Some(fragment) = Self::extract_fragment(url) {
-                            *self.pending_anchor.borrow_mut() = Some(fragment);
-                        } else {
-                            self.open_url(url);
-                        }
+                        self.trigger_link(url);
                         ui.close_menu();
                     }
                     ui.separator();
@@ -1445,62 +1913,24 @@ impl MarkdownRenderer {
         // First expand emoji shortcodes, then superscript ^...^ notation
         let expanded = Self::expand_shortcodes(segment);
         let expanded = Self::expand_superscripts(&expanded);
-        if let Some(h) = self.highlight_phrase.borrow().as_ref() {
-            if !h.is_empty() {
-                let mut folded = String::new();
-                let mut folded_to_char: Vec<usize> = Vec::new();
-                let mut char_ranges: Vec<(usize, usize)> = Vec::new();
-                for (char_idx, (byte_idx, ch)) in expanded.char_indices().enumerate() {
-                    let folded_piece: String = ch.to_string().case_fold().nfkc().collect();
-                    let before = folded.len();
-                    folded.push_str(&folded_piece);
-                    let after = folded.len();
-                    for _ in before..after {
-                        folded_to_char.push(char_idx);
-                    }
-                    char_ranges.push((byte_idx, byte_idx + ch.len_utf8()));
+        if let Some(h) = self
+            .highlight_phrase
+            .borrow()
+            .as_ref()
+            .filter(|s| !s.is_empty())
+        {
+            for (range, highlighted) in self.highlight_segments(&expanded, Some(h)) {
+                if range.is_empty() {
+                    continue;
                 }
-
-                let mut rendered_until = 0usize;
-                let mut search_at = 0usize;
-                while let Some(pos) = folded[search_at..].find(h) {
-                    let abs = search_at + pos;
-                    if abs >= folded_to_char.len() {
-                        break;
-                    }
-                    let start_char_idx = folded_to_char[abs];
-                    let (start_byte, _) = char_ranges[start_char_idx];
-                    if start_byte > rendered_until {
-                        self.render_plain_segment(
-                            ui,
-                            &expanded[rendered_until..start_byte],
-                            size,
-                            style,
-                        );
-                    }
-
-                    let match_end = abs + h.len();
-                    let end_char_idx = if match_end == 0 {
-                        start_char_idx
-                    } else {
-                        folded_to_char[match_end.saturating_sub(1)]
-                    };
-                    let (_, end_byte) = char_ranges[end_char_idx];
-                    let highlight_slice = &expanded[start_byte..end_byte];
-                    self.render_highlighted_segment(ui, highlight_slice, size, style);
-
-                    rendered_until = end_byte;
-                    search_at = match_end;
+                let slice = &expanded[range];
+                if highlighted {
+                    self.render_highlighted_segment(ui, slice, size, style);
+                } else {
+                    self.render_plain_segment(ui, slice, size, style);
                 }
-
-                if rendered_until < expanded.len() {
-                    let rest = &expanded[rendered_until..];
-                    if !rest.is_empty() {
-                        self.render_plain_segment(ui, rest, size, style);
-                    }
-                }
-                return;
             }
+            return;
         }
         self.render_plain_segment(ui, &expanded, size, style);
     }
@@ -2453,10 +2883,48 @@ impl MarkdownRenderer {
     }
 
     fn hash_str(s: &str) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
         let mut h = DefaultHasher::new();
         s.hash(&mut h);
+        h.finish()
+    }
+
+    fn hash_inline_spans(spans: &[InlineSpan]) -> u64 {
+        let mut h = DefaultHasher::new();
+        for span in spans {
+            match span {
+                InlineSpan::Text(t) => {
+                    0u8.hash(&mut h);
+                    t.hash(&mut h);
+                }
+                InlineSpan::Code(t) => {
+                    1u8.hash(&mut h);
+                    t.hash(&mut h);
+                }
+                InlineSpan::Strong(t) => {
+                    2u8.hash(&mut h);
+                    t.hash(&mut h);
+                }
+                InlineSpan::Emphasis(t) => {
+                    3u8.hash(&mut h);
+                    t.hash(&mut h);
+                }
+                InlineSpan::Strikethrough(t) => {
+                    4u8.hash(&mut h);
+                    t.hash(&mut h);
+                }
+                InlineSpan::Link { text, url } => {
+                    5u8.hash(&mut h);
+                    text.hash(&mut h);
+                    url.hash(&mut h);
+                }
+                InlineSpan::Image { src, alt, title } => {
+                    6u8.hash(&mut h);
+                    src.hash(&mut h);
+                    alt.hash(&mut h);
+                    title.hash(&mut h);
+                }
+            }
+        }
         h.finish()
     }
 
@@ -2683,6 +3151,12 @@ impl MarkdownRenderer {
             return;
         }
 
+        if self.table_wrap_overhaul_enabled {
+            self.render_table_tablebuilder(ui, headers, rows);
+            ui.add_space(8.0);
+            return;
+        }
+
         ui.add_space(8.0);
 
         const MIN_COL_MULTIPLIER: f32 = 6.0;
@@ -2716,7 +3190,17 @@ impl MarkdownRenderer {
         let available = ui.available_width().max(100.0);
         let widths = Self::resolve_table_widths(available, &min_widths, &desired_widths);
 
-        // 3) Render the table with per-column width constraints; content wraps as needed
+        self.render_table_legacy(ui, headers, rows, &widths);
+        ui.add_space(8.0);
+    }
+
+    fn render_table_legacy(
+        &self,
+        ui: &mut egui::Ui,
+        headers: &[Vec<InlineSpan>],
+        rows: &[Vec<Vec<InlineSpan>>],
+        widths: &[f32],
+    ) {
         egui::Frame::none()
             .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
             .show(ui, |ui| {
@@ -2728,9 +3212,8 @@ impl MarkdownRenderer {
                                 Vec2::new(w, 0.0),
                                 egui::Layout::top_down(egui::Align::LEFT),
                                 |ui| {
-                                    ui.set_width(w);  // Use set_width to force exact width
+                                    ui.set_width(w);
                                     ui.set_max_width(w);
-                                    // Render table cell content with proper wrapping
                                     self.render_table_cell_spans(ui, h, w, true);
                                 },
                             );
@@ -2747,9 +3230,8 @@ impl MarkdownRenderer {
                                         Vec2::new(w, 0.0),
                                         egui::Layout::top_down(egui::Align::LEFT),
                                         |ui| {
-                                            ui.set_width(w);  // Use set_width to force exact width
+                                            ui.set_width(w);
                                             ui.set_max_width(w);
-                                            // Render table cell content with proper wrapping
                                             self.render_table_cell_spans(ui, cell, w, false);
                                         },
                                     );
@@ -2760,7 +3242,244 @@ impl MarkdownRenderer {
                     }
                 });
             });
-        ui.add_space(8.0);
+    }
+
+    fn render_table_tablebuilder(
+        &self,
+        ui: &mut egui::Ui,
+        headers: &[Vec<InlineSpan>],
+        rows: &[Vec<Vec<InlineSpan>>],
+    ) {
+        const HEADER_HEIGHT: f32 = 28.0;
+
+        let mut column_specs = derive_column_specs(headers);
+        let row_max = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+        let target_cols = column_specs.len().max(row_max).max(1);
+        while column_specs.len() < target_cols {
+            column_specs.push(ColumnSpec::new(
+                format!("Column {}", column_specs.len() + 1),
+                crate::table_support::ColumnPolicy::Remainder { clip: false },
+                None,
+            ));
+        }
+
+        let mut table = TableBuilder::new(ui).striped(true);
+        for spec in &column_specs {
+            table = table.column(spec.as_column());
+        }
+
+        let fallback_row_height = self.row_height_fallback();
+        let row_heights: Vec<f32> = (0..rows.len())
+            .map(|idx| self.row_height_hint(idx))
+            .collect();
+
+        table
+            .header(HEADER_HEIGHT, |mut header| {
+                for ci in 0..column_specs.len() {
+                    header.col(|ui| {
+                        let width = ui.available_width().max(1.0);
+                        let spans = headers.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
+                        let _ = self.render_overhauled_cell(ui, spans, width, true, None, ci);
+                    });
+                }
+            })
+            .body(|body| {
+                body.heterogeneous_rows(row_heights.into_iter(), |mut row| {
+                    let idx = row.index();
+                    let row_cells = rows.get(idx);
+                    let mut row_height = fallback_row_height;
+                    for ci in 0..column_specs.len() {
+                        let mut cell_height = fallback_row_height;
+                        row.col(|ui| {
+                            let width = ui.available_width().max(1.0);
+                            let spans = row_cells
+                                .and_then(|cells| cells.get(ci))
+                                .map(|cell| cell.as_slice())
+                                .unwrap_or(&[]);
+                            cell_height =
+                                self.render_overhauled_cell(ui, spans, width, false, Some(idx), ci);
+                        });
+                        row_height = row_height.max(cell_height);
+                    }
+                    self.update_row_height(idx, row_height);
+                });
+            });
+    }
+
+    fn row_height_fallback(&self) -> f32 {
+        self.font_sizes.body * 1.6
+    }
+
+    fn row_height_hint(&self, idx: usize) -> f32 {
+        let fallback = self.row_height_fallback();
+        self.table_metrics
+            .borrow()
+            .rows
+            .get(idx)
+            .map(|m| {
+                if m.max_height > 0.0 {
+                    m.max_height
+                } else {
+                    fallback
+                }
+            })
+            .unwrap_or(fallback)
+    }
+
+    fn update_row_height(&self, idx: usize, height: f32) {
+        let clamped = height.max(self.row_height_fallback());
+        let mut metrics = self.table_metrics.borrow_mut();
+        let entry = metrics.ensure_row(idx);
+        entry.max_height = clamped;
+        entry.dirty = false;
+    }
+
+    fn render_overhauled_cell(
+        &self,
+        ui: &mut egui::Ui,
+        spans: &[InlineSpan],
+        width: f32,
+        is_header: bool,
+        row_idx: Option<usize>,
+        col_idx: usize,
+    ) -> f32 {
+        let fallback_height = self.row_height_fallback();
+        let fragments = self.cell_fragments(spans);
+        let inner = ui.allocate_ui_with_layout(
+            Vec2::new(width, 0.0),
+            egui::Layout::top_down(egui::Align::LEFT),
+            |ui| {
+                ui.set_width(width);
+                ui.set_max_width(width);
+                ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
+                if fragments.is_empty() {
+                    ui.allocate_exact_size(
+                        Vec2::new(width, self.font_sizes.body * 1.2),
+                        egui::Sense::hover(),
+                    );
+                    return;
+                }
+                for fragment in fragments {
+                    match fragment {
+                        CellFragment::Text(slice) => {
+                            let build = self.cached_layout_job(
+                                ui.style(),
+                                row_idx,
+                                col_idx,
+                                slice,
+                                width,
+                                is_header,
+                            );
+                            self.paint_table_text_job(ui, width, build);
+                        }
+                        CellFragment::Emoji(key) => {
+                            self.render_table_emoji(ui, &key);
+                        }
+                        CellFragment::Image(span) => {
+                            self.render_inline_span(ui, span, None, Some(is_header));
+                        }
+                    }
+                }
+            },
+        );
+        inner.response.rect.height().max(fallback_height)
+    }
+
+    fn paint_table_text_job(
+        &self,
+        ui: &mut egui::Ui,
+        width: f32,
+        build: LayoutJobBuild,
+    ) -> egui::Response {
+        let galley = ui.fonts(|f| f.layout_job(build.job.clone()));
+        let height = galley.size().y;
+        let (rect, mut response) =
+            ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::click());
+        let text_color = ui.visuals().text_color();
+        ui.painter_at(rect)
+            .galley(rect.left_top(), galley.clone(), text_color);
+        if galley.rows.len() > 1 {
+            response = response.on_hover_text(build.plain_text.clone());
+        }
+        response.context_menu(|ui| {
+            if ui.button("Copy Cell Text").clicked() {
+                ui.ctx().copy_text(build.plain_text.clone());
+                ui.close_menu();
+            }
+        });
+
+        if let Some(link) = self.link_at_pointer(&response, &galley, &build) {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+            response = response.on_hover_text(link.url.clone());
+            if response.clicked() {
+                self.trigger_link(&link.url);
+            }
+        }
+
+        response
+    }
+
+    fn cached_layout_job(
+        &self,
+        style: &egui::Style,
+        row_idx: Option<usize>,
+        col_idx: usize,
+        spans: &[InlineSpan],
+        width: f32,
+        is_header: bool,
+    ) -> LayoutJobBuild {
+        if !self.table_wrap_overhaul_enabled {
+            return self.build_layout_job(style, spans, width, is_header);
+        }
+        let highlight_hash = self
+            .highlight_phrase
+            .borrow()
+            .as_ref()
+            .map(|s| Self::hash_str(s))
+            .unwrap_or(0);
+        let content_hash = Self::hash_inline_spans(spans);
+        let key = CellLayoutKey {
+            row: row_idx,
+            col: col_idx,
+            width: width.round() as u32,
+            strong: is_header,
+            highlight_hash,
+            content_hash,
+        };
+        if let Some(build) = self.table_layout_cache.borrow_mut().get(&key) {
+            return build;
+        }
+        let build = self.build_layout_job(style, spans, width, is_header);
+        self.table_layout_cache
+            .borrow_mut()
+            .insert(key, build.clone());
+        build
+    }
+
+    fn link_at_pointer<'a>(
+        &self,
+        response: &egui::Response,
+        galley: &Arc<Galley>,
+        build: &'a LayoutJobBuild,
+    ) -> Option<&'a LinkRange> {
+        let pointer = response.hover_pos()?;
+        let local = pointer - response.rect.left_top();
+        let cursor = galley.cursor_from_pos(local);
+        let idx = cursor.ccursor.index as usize;
+        build
+            .link_ranges
+            .iter()
+            .find(|range| range.char_range.contains(&idx))
+    }
+
+    fn render_table_emoji(&self, ui: &mut egui::Ui, emoji: &str) {
+        let handle = self.get_or_make_emoji_texture(ui, emoji);
+        let size = self.font_sizes.body * 1.2;
+        ui.add(
+            egui::Image::new(&handle)
+                .max_size(Vec2::splat(size))
+                .sense(egui::Sense::hover()),
+        );
     }
 
     /// Render table cell spans with proper text wrapping within the given width
@@ -2773,7 +3492,7 @@ impl MarkdownRenderer {
     ) {
         // Render content with wrapping, forcing exact width to ensure wrapping occurs
         ui.vertical(|ui| {
-            ui.set_width(max_width);  // Force exact width
+            ui.set_width(max_width); // Force exact width
             ui.set_max_width(max_width);
             ui.spacing_mut().item_spacing.y = 0.0;
 
@@ -2846,6 +3565,14 @@ impl MarkdownRenderer {
         }
     }
 
+    fn trigger_link(&self, url: &str) {
+        if let Some(fragment) = Self::extract_fragment(url) {
+            *self.pending_anchor.borrow_mut() = Some(fragment);
+        } else {
+            self.open_url(url);
+        }
+    }
+
     /// Consume and return the last clicked internal anchor, if any
     pub fn take_pending_anchor(&self) -> Option<String> {
         self.pending_anchor.borrow_mut().take()
@@ -2870,6 +3597,30 @@ impl MarkdownRenderer {
         } else {
             self.highlight_phrase.borrow_mut().take();
         }
+        self.clear_table_layout_cache();
+    }
+
+    pub fn set_table_wrap_overhaul_enabled(&mut self, enabled: bool) {
+        self.table_wrap_overhaul_enabled = enabled;
+        self.clear_table_layout_cache();
+    }
+
+    pub fn table_wrap_overhaul_enabled(&self) -> bool {
+        self.table_wrap_overhaul_enabled
+    }
+
+    pub fn clear_table_layout_cache(&self) {
+        self.table_layout_cache.borrow_mut().clear();
+        self.table_metrics.borrow_mut().rows.clear();
+    }
+
+    pub fn table_layout_cache_stats(&self) -> (u64, u64) {
+        self.table_layout_cache.borrow().stats()
+    }
+
+    pub fn table_render_stats(&self) -> (usize, usize) {
+        let metrics = self.table_metrics.borrow();
+        (metrics.rendered_rows, metrics.total_rows)
     }
 
     /// Get a plain-text representation of a markdown element (for search)
@@ -3184,6 +3935,7 @@ impl MarkdownRenderer {
         self.font_sizes.h5 = (self.font_sizes.h5 * 1.1).min(28.0);
         self.font_sizes.h6 = (self.font_sizes.h6 * 1.1).min(24.0);
         self.font_sizes.code = (self.font_sizes.code * 1.1).min(20.0);
+        self.clear_table_layout_cache();
     }
 
     /// Zoom out (decrease font sizes)
@@ -3196,11 +3948,13 @@ impl MarkdownRenderer {
         self.font_sizes.h5 = (self.font_sizes.h5 * 0.9).max(10.0);
         self.font_sizes.h6 = (self.font_sizes.h6 * 0.9).max(9.0);
         self.font_sizes.code = (self.font_sizes.code * 0.9).max(8.0);
+        self.clear_table_layout_cache();
     }
 
     /// Reset zoom to default
     pub fn reset_zoom(&mut self) {
         self.font_sizes = FontSizes::default();
+        self.clear_table_layout_cache();
     }
 }
 
@@ -3549,6 +4303,123 @@ mod tests {
         let text = MarkdownRenderer::element_plain_text(&parsed[0]);
         assert!(text.contains("Diagram"));
         assert!(text.contains("Flow"));
+    }
+
+    #[test]
+    fn test_cell_fragments_split_text_and_images() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![
+            InlineSpan::Text("alpha".into()),
+            InlineSpan::Strong("beta".into()),
+            InlineSpan::Image {
+                src: "img.png".into(),
+                alt: "img".into(),
+                title: None,
+            },
+            InlineSpan::Text("gamma".into()),
+        ];
+        let fragments = renderer.cell_fragments(&spans);
+        assert_eq!(fragments.len(), 3);
+        match &fragments[0] {
+            CellFragment::Text(slice) => assert_eq!(slice.len(), 2),
+            other => panic!("expected text fragment, got {:?}", other),
+        }
+        match &fragments[1] {
+            CellFragment::Image(span) => {
+                if let InlineSpan::Image { src, .. } = span {
+                    assert_eq!(src, "img.png");
+                } else {
+                    panic!("image fragment should point to inline image span");
+                }
+            }
+            other => panic!("second fragment should be image, got {:?}", other),
+        }
+        match &fragments[2] {
+            CellFragment::Text(slice) => {
+                assert_eq!(slice.len(), 1);
+                if let InlineSpan::Text(content) = &slice[0] {
+                    assert_eq!(content, "gamma");
+                } else {
+                    panic!("expected trailing text span");
+                }
+            }
+            other => panic!("expected trailing text fragment, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_cell_fragments_detect_single_emoji_span() {
+        let renderer = MarkdownRenderer::new();
+        let rocket = crate::emoji_catalog::shortcode_map()
+            .get(":rocket:")
+            .expect("rocket shortcode");
+        let spans = vec![
+            InlineSpan::Text((*rocket).to_string()),
+            InlineSpan::Text("tail".into()),
+        ];
+        let fragments = renderer.cell_fragments(&spans);
+        assert_eq!(fragments.len(), 2);
+        assert!(matches!(
+            &fragments[0],
+            CellFragment::Emoji(e) if !e.is_empty()
+        ));
+        assert!(matches!(fragments[1], CellFragment::Text(_)));
+    }
+
+    #[test]
+    fn test_layout_job_builder_respects_wrap_width() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![InlineSpan::Text(
+            "A long column entry that should wrap neatly within the supplied width.".into(),
+        )];
+        let style = egui::Style::default();
+        let build = renderer.build_layout_job(&style, &spans, 180.0, false);
+        assert_eq!(build.job.wrap.max_width, 180.0);
+        assert!(
+            build.job.text.contains("column entry"),
+            "plain text should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_layout_job_builder_highlights_matches() {
+        let renderer = MarkdownRenderer::new();
+        renderer.set_highlight_phrase(Some("wrap"));
+        let spans = vec![InlineSpan::Text("wrap me, wrap me again".into())];
+        let style = egui::Style::default();
+        let build = renderer.build_layout_job(&style, &spans, 200.0, false);
+        let highlight_bg = style.visuals.selection.bg_fill;
+        assert!(
+            build
+                .job
+                .sections
+                .iter()
+                .any(|s| s.format.background == highlight_bg),
+            "at least one section should carry highlight background"
+        );
+    }
+
+    #[test]
+    fn test_layout_job_builder_tracks_link_ranges() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![InlineSpan::Link {
+            text: "Docs".into(),
+            url: "https://example.org/docs".into(),
+        }];
+        let style = egui::Style::default();
+        let build = renderer.build_layout_job(&style, &spans, 220.0, false);
+        assert_eq!(build.link_ranges.len(), 1);
+        let link = &build.link_ranges[0];
+        assert_eq!(link.url, "https://example.org/docs");
+        let char_len = link.char_range.end - link.char_range.start;
+        let linked_text: String = build
+            .job
+            .text
+            .chars()
+            .skip(link.char_range.start)
+            .take(char_len)
+            .collect();
+        assert_eq!(linked_text, "Docs");
     }
 
     #[test]
