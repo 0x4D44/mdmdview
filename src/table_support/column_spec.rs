@@ -112,12 +112,13 @@ fn calculate_policy_hash(ident: &str, policy: &ColumnPolicy) -> u64 {
 }
 
 pub fn derive_column_specs(headers: &[Vec<InlineSpan>]) -> Vec<ColumnSpec> {
+    let mut remainder_assigned = false;
     headers
         .iter()
         .enumerate()
         .map(|(idx, spans)| {
             let label = header_text(spans);
-            let policy = classify_column(&label, idx);
+            let policy = classify_column(&label, idx, &mut remainder_assigned);
             let tooltip = column_tooltip(&label, &policy);
             ColumnSpec::new(label, policy, tooltip)
         })
@@ -159,7 +160,7 @@ fn header_text(spans: &[InlineSpan]) -> String {
     }
 }
 
-fn classify_column(label: &str, index: usize) -> ColumnPolicy {
+fn classify_column(label: &str, index: usize, remainder_assigned: &mut bool) -> ColumnPolicy {
     let lower = label.to_ascii_lowercase();
     if matches_any(&lower, &["version", "rev", "#", "id"]) {
         return ColumnPolicy::Fixed {
@@ -186,16 +187,34 @@ fn classify_column(label: &str, index: usize) -> ColumnPolicy {
             clip: true,
         };
     }
-    if matches_any(&lower, &["notes", "changes", "description", "details"]) {
+    if matches_any(
+        &lower,
+        &["notes", "changes", "description", "details", "summary"],
+    ) {
+        *remainder_assigned = true;
         return ColumnPolicy::Remainder { clip: false };
     }
+    if matches_any(&lower, &["example", "examples", "sample"]) {
+        return ColumnPolicy::Resizable {
+            min: 140.0,
+            preferred: 200.0,
+            clip: false,
+        };
+    }
     if index == 0 {
-        ColumnPolicy::Fixed {
+        return ColumnPolicy::Fixed {
             width: 120.0,
             clip: true,
-        }
-    } else {
-        ColumnPolicy::Remainder { clip: false }
+        };
+    }
+    if !*remainder_assigned && (lower.len() > 12 || lower.contains(' ')) {
+        *remainder_assigned = true;
+        return ColumnPolicy::Remainder { clip: false };
+    }
+    ColumnPolicy::Resizable {
+        min: 110.0,
+        preferred: 160.0,
+        clip: false,
     }
 }
 
@@ -250,5 +269,18 @@ mod tests {
         let headers = vec![vec![span("Author")]];
         let specs = derive_column_specs(&headers);
         assert!(matches!(specs[0].policy, ColumnPolicy::Resizable { .. }));
+    }
+
+    #[test]
+    fn classify_examples_column() {
+        let headers = vec![
+            vec![span("Element")],
+            vec![span("Symbol")],
+            vec![span("Description")],
+            vec![span("Examples")],
+        ];
+        let specs = derive_column_specs(&headers);
+        assert!(matches!(specs[2].policy, ColumnPolicy::Remainder { .. }));
+        assert!(matches!(specs[3].policy, ColumnPolicy::Resizable { .. }));
     }
 }
