@@ -1,4 +1,7 @@
-use crate::table_support::{derive_column_specs, ColumnSpec, TableMetrics};
+use crate::table_support::{
+    compute_column_stats, derive_column_specs, ColumnSpec, ColumnStat, TableColumnContext,
+    TableMetrics,
+};
 use crate::{emoji_assets, emoji_catalog};
 use anyhow::Result;
 use crossbeam_channel::{
@@ -138,6 +141,7 @@ struct LinkRange {
 }
 
 const TABLE_LAYOUT_CACHE_CAPACITY: usize = 512;
+const COLUMN_STATS_SAMPLE_ROWS: usize = 128;
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct CellLayoutKey {
@@ -155,6 +159,12 @@ struct CellLayoutCache {
     hits: u64,
     misses: u64,
     capacity: usize,
+}
+
+#[derive(Clone)]
+struct ColumnStatsCacheEntry {
+    content_hash: u64,
+    stats: Vec<ColumnStat>,
 }
 
 impl CellLayoutCache {
@@ -296,6 +306,7 @@ pub struct MarkdownRenderer {
     table_wrap_overhaul_enabled: bool,
     table_layout_cache: RefCell<CellLayoutCache>,
     table_metrics: RefCell<TableMetrics>,
+    column_stats_cache: RefCell<HashMap<u64, ColumnStatsCacheEntry>>,
 }
 
 impl Default for MarkdownRenderer {
@@ -720,6 +731,7 @@ impl MarkdownRenderer {
             table_wrap_overhaul_enabled: true,
             table_layout_cache: RefCell::new(CellLayoutCache::new(TABLE_LAYOUT_CACHE_CAPACITY)),
             table_metrics: RefCell::new(TableMetrics::default()),
+            column_stats_cache: RefCell::new(HashMap::new()),
         }
     }
 
@@ -2928,6 +2940,65 @@ impl MarkdownRenderer {
         h.finish()
     }
 
+    fn compute_table_id(&self, headers: &[Vec<InlineSpan>], rows: &[Vec<Vec<InlineSpan>>]) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        hasher.write_usize(headers.len());
+        for header in headers {
+            hasher.write_u64(Self::hash_inline_spans(header));
+        }
+        hasher.write_usize(rows.len());
+        hasher.finish()
+    }
+
+    fn compute_table_content_hash(
+        &self,
+        headers: &[Vec<InlineSpan>],
+        rows: &[Vec<Vec<InlineSpan>>],
+    ) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        hasher.write_usize(headers.len());
+        for header in headers {
+            hasher.write_u64(Self::hash_inline_spans(header));
+        }
+        let mut counted = 0usize;
+        for row in rows {
+            for cell in row {
+                hasher.write_u64(Self::hash_inline_spans(cell));
+            }
+            counted += 1;
+            if counted >= COLUMN_STATS_SAMPLE_ROWS {
+                break;
+            }
+        }
+        hasher.finish()
+    }
+
+    fn column_stats_for_table(
+        &self,
+        table_id: u64,
+        headers: &[Vec<InlineSpan>],
+        rows: &[Vec<Vec<InlineSpan>>],
+    ) -> Vec<ColumnStat> {
+        let content_hash = self.compute_table_content_hash(headers, rows);
+        if let Some(entry) = self
+            .column_stats_cache
+            .borrow()
+            .get(&table_id)
+            .filter(|entry| entry.content_hash == content_hash)
+        {
+            return entry.stats.clone();
+        }
+        let stats = compute_column_stats(headers, rows, COLUMN_STATS_SAMPLE_ROWS);
+        self.column_stats_cache.borrow_mut().insert(
+            table_id,
+            ColumnStatsCacheEntry {
+                content_hash,
+                stats: stats.clone(),
+            },
+        );
+        stats
+    }
+
     // Drain any completed Kroki jobs and cache their results
     fn poll_kroki_results(&self) {
         loop {
@@ -3252,7 +3323,11 @@ impl MarkdownRenderer {
     ) {
         const HEADER_HEIGHT: f32 = 28.0;
 
-        let mut column_specs = derive_column_specs(headers);
+        let table_id = self.compute_table_id(headers, rows);
+        let column_stats = self.column_stats_for_table(table_id, headers, rows);
+        let ctx =
+            TableColumnContext::new(headers, rows, &column_stats, self.font_sizes.body, table_id);
+        let mut column_specs = derive_column_specs(&ctx);
         let row_max = rows.iter().map(|r| r.len()).max().unwrap_or(0);
         let target_cols = column_specs.len().max(row_max).max(1);
         while column_specs.len() < target_cols {
@@ -3270,7 +3345,7 @@ impl MarkdownRenderer {
 
         let fallback_row_height = self.row_height_fallback();
         let row_heights: Vec<f32> = (0..rows.len())
-            .map(|idx| self.row_height_hint(idx))
+            .map(|idx| self.row_height_hint(table_id, idx))
             .collect();
 
         table
@@ -3301,7 +3376,7 @@ impl MarkdownRenderer {
                         });
                         row_height = row_height.max(cell_height);
                     }
-                    self.update_row_height(idx, row_height);
+                    self.update_row_height(table_id, idx, row_height);
                 });
             });
     }
@@ -3310,12 +3385,12 @@ impl MarkdownRenderer {
         self.font_sizes.body * 1.6
     }
 
-    fn row_height_hint(&self, idx: usize) -> f32 {
+    fn row_height_hint(&self, table_id: u64, idx: usize) -> f32 {
         let fallback = self.row_height_fallback();
         self.table_metrics
             .borrow()
-            .rows
-            .get(idx)
+            .entry(table_id)
+            .and_then(|entry| entry.row(idx))
             .map(|m| {
                 if m.max_height > 0.0 {
                     m.max_height
@@ -3326,12 +3401,13 @@ impl MarkdownRenderer {
             .unwrap_or(fallback)
     }
 
-    fn update_row_height(&self, idx: usize, height: f32) {
+    fn update_row_height(&self, table_id: u64, idx: usize, height: f32) {
         let clamped = height.max(self.row_height_fallback());
         let mut metrics = self.table_metrics.borrow_mut();
-        let entry = metrics.ensure_row(idx);
-        entry.max_height = clamped;
-        entry.dirty = false;
+        let entry = metrics.entry_mut(table_id);
+        let row = entry.ensure_row(idx);
+        row.max_height = clamped;
+        row.dirty = false;
     }
 
     fn render_overhauled_cell(
@@ -3611,7 +3687,8 @@ impl MarkdownRenderer {
 
     pub fn clear_table_layout_cache(&self) {
         self.table_layout_cache.borrow_mut().clear();
-        self.table_metrics.borrow_mut().rows.clear();
+        self.table_metrics.borrow_mut().clear();
+        self.column_stats_cache.borrow_mut().clear();
     }
 
     pub fn table_layout_cache_stats(&self) -> (u64, u64) {
@@ -3619,8 +3696,7 @@ impl MarkdownRenderer {
     }
 
     pub fn table_render_stats(&self) -> (usize, usize) {
-        let metrics = self.table_metrics.borrow();
-        (metrics.rendered_rows, metrics.total_rows)
+        self.table_metrics.borrow().totals()
     }
 
     /// Get a plain-text representation of a markdown element (for search)
