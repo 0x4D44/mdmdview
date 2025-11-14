@@ -1,4 +1,4 @@
-# mdmdview
+﻿# mdmdview
 
 <div align="center">
 
@@ -12,24 +12,24 @@
 
 ---
 
-## 📖 Overview
+## ðŸ“– Overview
 
 **mdmdview** is a professional markdown viewer designed for speed, simplicity, and reliability. Built entirely in Rust with the egui framework, it delivers a native, responsive experience with zero external dependencies. Perfect for viewing documentation, notes, technical specs, or any markdown content with beautiful formatting and syntax-highlighted code blocks.
 
 ### Why mdmdview?
 
-- **🚀 Blazing Fast** - Instant startup and rendering with efficient Rust implementation
-- **📦 Single Binary** - No installation, no dependencies, just run the executable
-- **🎨 Beautiful Rendering** - Professional formatting with syntax highlighting for 100+ languages
-- **⌨️ Keyboard-First** - Comprehensive shortcuts for power users
-- **🔍 Smart Search** - Unicode-aware search with accent normalization
-- **🖼️ Live Images** - Automatic refresh when linked images change
-- **📂 Drag & Drop** - Drop files or folders to open instantly
-- **🌐 Cross-Platform** - Works on Windows, Linux, and macOS
+- **ðŸš€ Blazing Fast** - Instant startup and rendering with efficient Rust implementation
+- **ðŸ“¦ Single Binary** - No installation, no dependencies, just run the executable
+- **ðŸŽ¨ Beautiful Rendering** - Professional formatting with syntax highlighting for 100+ languages
+- **âŒ¨ï¸ Keyboard-First** - Comprehensive shortcuts for power users
+- **ðŸ” Smart Search** - Unicode-aware search with accent normalization
+- **ðŸ–¼ï¸ Live Images** - Automatic refresh when linked images change
+- **ðŸ“‚ Drag & Drop** - Drop files or folders to open instantly
+- **ðŸŒ Cross-Platform** - Works on Windows, Linux, and macOS
 
 ---
 
-## ✨ Features
+## âœ¨ Features
 
 ### Core Functionality
 
@@ -43,19 +43,19 @@
 
 ### Advanced Features
 
-- **🔄 Navigation History** - Browser-like back/forward through files and samples (`Alt+←`/`Alt+→`)
-- **🔍 Accent-Aware Search** - Finds matches across case and diacritics (e.g., "istanbul" matches "İstanbul")
-- **🖼️ Live Image Refresh** - Automatically reloads textures when linked images change on disk
-- **📝 Raw Mode with Edit** - View and edit source markdown (`Ctrl+R` to toggle, `Ctrl+E` to edit)
-- **🔗 Internal Anchors** - In-document navigation via `[link](#anchor)` syntax
-- **📊 Table Support** - Professional grid layout with headers and striped rows
-- **🧮 Table Wrap Overhaul** - Virtualized columns with per-column resizing; toggle via View > Table Wrap or fall back with the CLI/env options below.
-- **🎨 Mermaid Diagrams** - Render flowcharts, sequence diagrams, and more (Kroki or offline QuickJS)
-- **😀 Emoji Support** - Embedded Twemoji assets with shortcode expansion (`:rocket:` → 🚀)
-- **🌍 Encoding Fallback** - Opens non-UTF-8 legacy files via lossy decoding
-- **💾 Window State Persistence** - Remembers position, size, and zoom level across sessions
-- **🔆 Zoom Support** - Adjustable font sizes (`Ctrl++`/`Ctrl+-`/`Ctrl+0`)
-- **📋 Multi-File Queue** - Drag multiple files to queue them for sequential viewing
+- **ðŸ”„ Navigation History** - Browser-like back/forward through files and samples (`Alt+â†`/`Alt+â†’`)
+- **ðŸ” Accent-Aware Search** - Finds matches across case and diacritics (e.g., "istanbul" matches "Ä°stanbul")
+- **ðŸ–¼ï¸ Live Image Refresh** - Automatically reloads textures when linked images change on disk
+- **ðŸ“ Raw Mode with Edit** - View and edit source markdown (`Ctrl+R` to toggle, `Ctrl+E` to edit)
+- **ðŸ”— Internal Anchors** - In-document navigation via `[link](#anchor)` syntax
+- **ðŸ“Š Table Support** - Professional grid layout with headers and striped rows
+- **ðŸ§® Table Wrap Overhaul** - Virtualized columns with per-column resizing; toggle via View > Table Wrap or fall back with the CLI/env options below.
+- **ðŸŽ¨ Mermaid Diagrams** - Render flowcharts, sequence diagrams, and more (Kroki or offline QuickJS)
+- **ðŸ˜€ Emoji Support** - Embedded Twemoji assets with shortcode expansion (`:rocket:` â†’ ðŸš€)
+- **ðŸŒ Encoding Fallback** - Opens non-UTF-8 legacy files via lossy decoding
+- **ðŸ’¾ Window State Persistence** - Remembers position, size, and zoom level across sessions
+- **ðŸ”† Zoom Support** - Adjustable font sizes (`Ctrl++`/`Ctrl+-`/`Ctrl+0`)
+- **ðŸ“‹ Multi-File Queue** - Drag multiple files to queue them for sequential viewing
 
 ### Drag and Drop Support
 
@@ -63,8 +63,8 @@ Drop files and folders directly from your file explorer:
 
 - **Single File** - Drop a `.md` file to open it immediately
 - **Multiple Files** - Drop multiple files to open the first and queue the rest
-  - Navigate through queue with `Alt+→` / `Alt+←`
-  - Status bar shows: "📋 N files in queue"
+  - Navigate through queue with `Alt+â†’` / `Alt+â†`
+  - Status bar shows: "ðŸ“‹ N files in queue"
 - **Folders** - Drop a folder to open all markdown files within (non-recursive, top-level only)
 - **Visual Feedback** - Blue overlay appears during drag operations
 - **Supported Extensions** - `.md`, `.markdown`, `.mdown`, `.mkd`, `.txt`
@@ -72,7 +72,7 @@ Drop files and folders directly from your file explorer:
 
 ---
 
-## 🚀 Getting Started
+## ðŸš€ Getting Started
 
 ### Prerequisites
 
@@ -113,7 +113,7 @@ cargo build --release --features mermaid-quickjs
 
 ---
 
-## 📘 Usage
+## ðŸ“˜ Usage
 
 ### Opening Files
 
@@ -141,7 +141,7 @@ Associate mdmdview with `.md` files for double-click opening:
 
 1. Right-click any `.md` file in Windows Explorer
 2. Select **"Open with > Choose another app"**
-3. Click **"More apps"** → **"Look for another app on this PC"**
+3. Click **"More apps"** â†’ **"Look for another app on this PC"**
 4. Browse to `mdmdview.exe` and select it
 5. Check **"Always use this app to open .md files"**
 6. Click **OK**
@@ -156,9 +156,9 @@ Now all `.md` files will open in mdmdview by double-clicking!
 
 ### Table Wrap Controls
 
-- `--table-wrap` — explicitly enable the wrap overhaul (it is the default).
-- `--no-table-wrap` — temporarily fall back to the legacy renderer if a file misbehaves.
-- `MDMDVIEW_TABLE_WRAP_OVERHAUL=1` (or `0`) — set the default renderer without passing CLI flags.
+- `--table-wrap` â€” explicitly enable the wrap overhaul (it is the default).
+- `--no-table-wrap` â€” temporarily fall back to the legacy renderer if a file misbehaves.
+- `MDMDVIEW_TABLE_WRAP_OVERHAUL=1` (or `0`) â€” set the default renderer without passing CLI flags.
 
 The setting can also be toggled at runtime from **View > Table Wrap**.
 
@@ -166,15 +166,15 @@ The setting can also be toggled at runtime from **View > Table Wrap**.
 
 Press `Ctrl+F` to open the search panel:
 
-- **Unicode-aware matching** - Finds "resume" and "résumé" from single query
-- **Case-insensitive** - "istanbul" matches "Istanbul" and "İstanbul"
+- **Unicode-aware matching** - Finds "resume" and "rÃ©sumÃ©" from single query
+- **Case-insensitive** - "istanbul" matches "Istanbul" and "Ä°stanbul"
 - **Grapheme-aware highlighting** - Preserves emoji and accent marks
 - **Navigation** - Use `Enter`/`Shift+Enter` or `F3`/`Shift+F3` to cycle results
 - **Real-time highlighting** - Matches highlighted as you type
 
 ---
 
-## ⌨️ Keyboard Shortcuts
+## âŒ¨ï¸ Keyboard Shortcuts
 
 ### File Operations
 | Shortcut | Action |
@@ -187,13 +187,13 @@ Press `Ctrl+F` to open the search panel:
 ### Navigation
 | Shortcut | Action |
 |----------|--------|
-| `Alt+←` | Navigate back in history |
-| `Alt+→` | Navigate forward in history |
+| `Alt+â†` | Navigate back in history |
+| `Alt+â†’` | Navigate forward in history |
 | `Home` | Jump to top of document |
 | `End` | Jump to bottom of document |
 | `Page Up` | Scroll up one page (~80% viewport) |
 | `Page Down` | Scroll down one page (~80% viewport) |
-| `↑` / `↓` | Scroll up/down (small increment) |
+| `â†‘` / `â†“` | Scroll up/down (small increment) |
 
 ### View Controls
 | Shortcut | Action |
@@ -217,7 +217,7 @@ Press `Ctrl+F` to open the search panel:
 
 ---
 
-## 🎨 Markdown Support
+## ðŸŽ¨ Markdown Support
 
 mdmdview supports all CommonMark elements with professional formatting:
 
@@ -261,7 +261,7 @@ mdmdview supports all CommonMark elements with professional formatting:
 
 ---
 
-## 🔧 Configuration
+## ðŸ”§ Configuration
 
 ### Environment Variables
 
@@ -296,28 +296,28 @@ State is saved every second (throttled) and on exit.
 
 ---
 
-## 🏗️ Architecture
+## ðŸ—ï¸ Architecture
 
 ### Project Structure
 
 ```
 mdmdview/
-├── src/
-│   ├── main.rs                   # Entry point, eframe setup, CLI args
-│   ├── app.rs                    # Main app state, UI logic, shortcuts
-│   ├── markdown_renderer.rs      # Parsing, rendering, syntax highlighting
-│   ├── sample_files.rs           # Embedded markdown examples
-│   ├── window_state.rs           # Cross-platform state persistence
-│   ├── emoji_catalog.rs          # Emoji shortcode mappings
-│   ├── emoji_assets.rs           # Embedded Twemoji PNGs
-│   └── lib.rs                    # Library interface for testing
-├── build.rs                      # Windows resources, version metadata
-├── assets/
-│   ├── icon.ico                  # Application icon
-│   └── vendor/
-│       └── mermaid.min.js        # (Optional) For offline Mermaid
-├── Cargo.toml                    # Dependencies and build config
-└── README.md                     # This file
+â”œâ”€â”€ src/
+â”‚   â”œâ”€â”€ main.rs                   # Entry point, eframe setup, CLI args
+â”‚   â”œâ”€â”€ app.rs                    # Main app state, UI logic, shortcuts
+â”‚   â”œâ”€â”€ markdown_renderer.rs      # Parsing, rendering, syntax highlighting
+â”‚   â”œâ”€â”€ sample_files.rs           # Embedded markdown examples
+â”‚   â”œâ”€â”€ window_state.rs           # Cross-platform state persistence
+â”‚   â”œâ”€â”€ emoji_catalog.rs          # Emoji shortcode mappings
+â”‚   â”œâ”€â”€ emoji_assets.rs           # Embedded Twemoji PNGs
+â”‚   â””â”€â”€ lib.rs                    # Library interface for testing
+â”œâ”€â”€ build.rs                      # Windows resources, version metadata
+â”œâ”€â”€ assets/
+â”‚   â”œâ”€â”€ icon.ico                  # Application icon
+â”‚   â””â”€â”€ vendor/
+â”‚       â””â”€â”€ mermaid.min.js        # (Optional) For offline Mermaid
+â”œâ”€â”€ Cargo.toml                    # Dependencies and build config
+â””â”€â”€ README.md                     # This file
 ```
 
 ### Core Components
@@ -370,7 +370,7 @@ mdmdview/
 
 ---
 
-## 🛠️ Development
+## ðŸ› ï¸ Development
 
 ### Building
 
@@ -446,7 +446,7 @@ This triggers the `Release` workflow which:
 3. Attaches artifacts to GitHub release
 
 **Manual Release:**
-- Go to Actions → Release → Run workflow
+- Go to Actions â†’ Release â†’ Run workflow
 - Choose toolchain (`stable`, `beta`, or `nightly`)
 
 ### File Metadata (Windows)
@@ -462,7 +462,7 @@ Update `Cargo.toml` before release, then rebuild to refresh metadata.
 
 ---
 
-## 🤝 Contributing
+## ðŸ¤ Contributing
 
 Contributions are welcome! Please follow these guidelines:
 
@@ -500,7 +500,7 @@ Contributions are welcome! Please follow these guidelines:
 
 ---
 
-## 📝 Supported File Types
+## ðŸ“ Supported File Types
 
 mdmdview recognizes these file extensions:
 
@@ -514,7 +514,7 @@ All files are processed as UTF-8 with lossy fallback for legacy encodings.
 
 ---
 
-## 🐛 Troubleshooting
+## ðŸ› Troubleshooting
 
 ### Images Not Displaying
 
@@ -561,7 +561,7 @@ Try breaking large documents into smaller files.
 
 ---
 
-## 🔒 Security Considerations
+## ðŸ”’ Security Considerations
 
 ### Safe Markdown Rendering
 
@@ -584,14 +584,14 @@ Try breaking large documents into smaller files.
 
 ---
 
-## 📜 License
+## ðŸ“œ License
 
 This project is provided as-is for demonstration purposes.
 
 ### Third-Party Assets
 
 **Emoji Graphics:**
-© 2020 Twitter, Inc and other contributors
+Â© 2020 Twitter, Inc and other contributors
 Licensed under CC-BY 4.0 (Twemoji)
 See https://github.com/twitter/twemoji for details
 Images embedded in executable for offline use
@@ -602,7 +602,7 @@ All Rust crates used are listed in `Cargo.toml` with their respective licenses (
 
 ---
 
-## 🙏 Acknowledgments
+## ðŸ™ Acknowledgments
 
 - **egui** - Excellent immediate-mode GUI framework
 - **pulldown-cmark** - Fast, CommonMark-compliant parser
@@ -612,7 +612,7 @@ All Rust crates used are listed in `Cargo.toml` with their respective licenses (
 
 ---
 
-## 📬 Contact & Support
+## ðŸ“¬ Contact & Support
 
 - **Issues**: [GitHub Issues](https://github.com/0x4D44/mdmdview/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/0x4D44/mdmdview/discussions)
@@ -622,8 +622,11 @@ All Rust crates used are listed in `Cargo.toml` with their respective licenses (
 
 <div align="center">
 
-**Made with ❤️ and Rust**
+**Made with â¤ï¸ and Rust**
 
-[⬆ Back to Top](#mdmdview)
+[â¬† Back to Top](#mdmdview)
 
 </div>
+
+
+
