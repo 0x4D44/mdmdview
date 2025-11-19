@@ -1511,11 +1511,7 @@ impl MarkdownViewerApp {
     fn handle_drag_drop_events(&mut self, ctx: &Context) {
         ctx.input(|i| {
             // Check if files are being hovered
-            if !i.raw.hovered_files.is_empty() {
-                self.drag_hover = true;
-            } else {
-                self.drag_hover = false;
-            }
+            self.drag_hover = !i.raw.hovered_files.is_empty();
 
             // Check if files were dropped
             if !i.raw.dropped_files.is_empty() {
