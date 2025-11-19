@@ -49,7 +49,7 @@
 - **ðŸ“ Raw Mode with Edit** - View and edit source markdown (`Ctrl+R` to toggle, `Ctrl+E` to edit)
 - **ðŸ”— Internal Anchors** - In-document navigation via `[link](#anchor)` syntax
 - **ðŸ“Š Table Support** - Professional grid layout with headers and striped rows
-- **ðŸ§® Table Wrap Overhaul** - Virtualized columns with per-column resizing; toggle via View > Table Wrap or fall back with the CLI/env options below.
+- **ðŸ§® Table Wrap Overhaul** - Virtualized columns with per-column resizing; toggle via View > Table Wrap or fall back with the CLI/env options below. Columns now apply semantic stats (Examples keep the remainder, Description stays moderate) with persisted user adjustments, and the renderer paints deterministic dividers/borders. Open `examples/regressions/table-threat-model.md` to verify the layout before/after resizing or changing DPI.
 - **ðŸŽ¨ Mermaid Diagrams** - Render flowcharts, sequence diagrams, and more (Kroki or offline QuickJS)
 - **ðŸ˜€ Emoji Support** - Embedded Twemoji assets with shortcode expansion (`:rocket:` â†’ ðŸš€)
 - **ðŸŒ Encoding Fallback** - Opens non-UTF-8 legacy files via lossy decoding

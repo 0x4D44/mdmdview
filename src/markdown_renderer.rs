@@ -1,6 +1,6 @@
 use crate::table_support::{
-    compute_column_stats, derive_column_specs, ColumnSpec, ColumnStat, TableColumnContext,
-    TableMetrics,
+    compute_column_stats, derive_column_specs, ColumnPolicy, ColumnSpec, ColumnStat,
+    TableColumnContext, TableMetrics, WidthChange,
 };
 use crate::{emoji_assets, emoji_catalog};
 use anyhow::Result;
@@ -9,7 +9,7 @@ use crossbeam_channel::{
 };
 use egui::{
     text::{Galley, LayoutJob, TextWrapping},
-    Align, Color32, FontSelection, RichText, Stroke, Vec2,
+    Align, Color32, Context, FontSelection, Painter, RichText, Stroke, Vec2, Visuals,
 };
 use egui_extras::TableBuilder;
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
@@ -371,11 +371,7 @@ impl MarkdownRenderer {
         self.emoji_key_for_grapheme(first)
     }
 
-    fn highlight_segments<'a>(
-        &self,
-        text: &'a str,
-        highlight: Option<&str>,
-    ) -> Vec<(Range<usize>, bool)> {
+    fn highlight_segments(&self, text: &str, highlight: Option<&str>) -> Vec<(Range<usize>, bool)> {
         if text.is_empty() {
             return Vec::new();
         }
@@ -444,13 +440,15 @@ impl MarkdownRenderer {
         wrap_width: f32,
         strong_override: bool,
     ) -> LayoutJobBuild {
-        let mut job = LayoutJob::default();
-        job.wrap = TextWrapping {
-            max_width: wrap_width.max(1.0),
+        let mut job = LayoutJob {
+            wrap: TextWrapping {
+                max_width: wrap_width.max(1.0),
+                ..Default::default()
+            },
+            break_on_newline: true,
+            halign: Align::LEFT,
             ..Default::default()
         };
-        job.break_on_newline = true;
-        job.halign = Align::LEFT;
 
         let highlight = self
             .highlight_phrase
@@ -622,6 +620,7 @@ impl MarkdownRenderer {
         code.chars().count()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn append_text_sections(
         &self,
         style: &egui::Style,
@@ -2942,11 +2941,10 @@ impl MarkdownRenderer {
 
     fn compute_table_id(&self, headers: &[Vec<InlineSpan>], rows: &[Vec<Vec<InlineSpan>>]) -> u64 {
         let mut hasher = DefaultHasher::new();
-        hasher.write_usize(headers.len());
-        for header in headers {
-            hasher.write_u64(Self::hash_inline_spans(header));
+        if let Some(base) = self.base_dir.borrow().as_ref() {
+            base.hash(&mut hasher);
         }
-        hasher.write_usize(rows.len());
+        hasher.write_u64(self.compute_table_content_hash(headers, rows));
         hasher.finish()
     }
 
@@ -3315,6 +3313,21 @@ impl MarkdownRenderer {
             });
     }
 
+    fn extend_table_rect(target: &mut Option<egui::Rect>, rect: egui::Rect) {
+        if rect.min.x.is_nan() || rect.min.y.is_nan() || rect.max.x.is_nan() || rect.max.y.is_nan()
+        {
+            return;
+        }
+        if let Some(existing) = target {
+            existing.min.x = existing.min.x.min(rect.min.x);
+            existing.min.y = existing.min.y.min(rect.min.y);
+            existing.max.x = existing.max.x.max(rect.max.x);
+            existing.max.y = existing.max.y.max(rect.max.y);
+        } else {
+            *target = Some(rect);
+        }
+    }
+
     fn render_table_tablebuilder(
         &self,
         ui: &mut egui::Ui,
@@ -3337,6 +3350,13 @@ impl MarkdownRenderer {
                 None,
             ));
         }
+        self.begin_table_pass(table_id, rows.len());
+        self.apply_persisted_widths(table_id, &mut column_specs);
+
+        let prev_spacing = ui.spacing().item_spacing;
+        if prev_spacing.x < 6.0 {
+            ui.spacing_mut().item_spacing.x = 6.0;
+        }
 
         let mut table = TableBuilder::new(ui).striped(true);
         for spec in &column_specs {
@@ -3348,13 +3368,28 @@ impl MarkdownRenderer {
             .map(|idx| self.row_height_hint(table_id, idx))
             .collect();
 
+        let mut column_widths = vec![0.0f32; column_specs.len()];
+        let mut table_rect: Option<egui::Rect> = None;
+        let mut clip_rect: Option<egui::Rect> = None;
+        let mut painter: Option<Painter> = None;
+        let mut visuals: Option<Visuals> = None;
+        let mut ctx_snapshot: Option<Context> = None;
+
         table
             .header(HEADER_HEIGHT, |mut header| {
-                for ci in 0..column_specs.len() {
+                for (ci, _) in column_specs.iter().enumerate() {
                     header.col(|ui| {
                         let width = ui.available_width().max(1.0);
                         let spans = headers.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
                         let _ = self.render_overhauled_cell(ui, spans, width, true, None, ci);
+                        column_widths[ci] = ui.min_rect().width();
+                        Self::extend_table_rect(&mut table_rect, ui.min_rect());
+                        if clip_rect.is_none() {
+                            clip_rect = Some(ui.clip_rect());
+                            painter = Some(ui.painter().clone());
+                            visuals = Some(ui.visuals().clone());
+                            ctx_snapshot = Some(ui.ctx().clone());
+                        }
                     });
                 }
             })
@@ -3363,7 +3398,7 @@ impl MarkdownRenderer {
                     let idx = row.index();
                     let row_cells = rows.get(idx);
                     let mut row_height = fallback_row_height;
-                    for ci in 0..column_specs.len() {
+                    for (ci, _) in column_specs.iter().enumerate() {
                         let mut cell_height = fallback_row_height;
                         row.col(|ui| {
                             let width = ui.available_width().max(1.0);
@@ -3373,12 +3408,34 @@ impl MarkdownRenderer {
                                 .unwrap_or(&[]);
                             cell_height =
                                 self.render_overhauled_cell(ui, spans, width, false, Some(idx), ci);
+                            Self::extend_table_rect(&mut table_rect, ui.min_rect());
+                            if clip_rect.is_none() {
+                                clip_rect = Some(ui.clip_rect());
+                                painter = Some(ui.painter().clone());
+                                visuals = Some(ui.visuals().clone());
+                                ctx_snapshot = Some(ui.ctx().clone());
+                            }
                         });
                         row_height = row_height.max(cell_height);
                     }
                     self.update_row_height(table_id, idx, row_height);
+                    self.note_row_rendered(table_id);
                 });
             });
+
+        ui.spacing_mut().item_spacing = prev_spacing;
+
+        if let (Some(rect), Some(clip_rect), Some(painter), Some(visuals), Some(ctx)) =
+            (table_rect, clip_rect, painter, visuals, ctx_snapshot)
+        {
+            if column_specs.len() == column_widths.len() && column_widths.iter().any(|w| *w > 0.0) {
+                let frame_id = ctx.frame_nr();
+                let change = self.record_resolved_widths(table_id, frame_id, &column_widths);
+                self.persist_resizable_widths(table_id, &column_specs, &column_widths);
+                self.handle_width_change(&ctx, table_id, change);
+                self.paint_table_dividers(&painter, &visuals, rect, clip_rect, &column_widths);
+            }
+        }
     }
 
     fn row_height_fallback(&self) -> f32 {
@@ -3408,6 +3465,94 @@ impl MarkdownRenderer {
         let row = entry.ensure_row(idx);
         row.max_height = clamped;
         row.dirty = false;
+    }
+
+    fn begin_table_pass(&self, table_id: u64, total_rows: usize) {
+        let mut metrics = self.table_metrics.borrow_mut();
+        metrics.entry_mut(table_id).begin_pass(total_rows);
+    }
+
+    fn note_row_rendered(&self, table_id: u64) {
+        let mut metrics = self.table_metrics.borrow_mut();
+        metrics.entry_mut(table_id).note_row_rendered();
+    }
+
+    fn apply_persisted_widths(&self, table_id: u64, specs: &mut [ColumnSpec]) {
+        if specs.is_empty() {
+            return;
+        }
+        let mut metrics = self.table_metrics.borrow_mut();
+        let entry = metrics.entry_mut(table_id);
+        for spec in specs.iter_mut() {
+            if let Some(width) = entry.persisted_width(spec.policy_hash) {
+                spec.apply_preferred_width(width);
+            }
+        }
+    }
+
+    fn persist_resizable_widths(&self, table_id: u64, specs: &[ColumnSpec], widths: &[f32]) {
+        if specs.is_empty() || widths.is_empty() {
+            return;
+        }
+        let mut metrics = self.table_metrics.borrow_mut();
+        let entry = metrics.entry_mut(table_id);
+        for (spec, width) in specs.iter().zip(widths.iter()) {
+            if let ColumnPolicy::Resizable { .. } = spec.policy {
+                let stored = entry.persisted_width(spec.policy_hash).unwrap_or(-1.0);
+                if stored < 0.0 || (stored - width).abs() > 0.5 {
+                    entry.set_persisted_width(spec.policy_hash, *width);
+                }
+            }
+        }
+    }
+
+    fn record_resolved_widths(&self, table_id: u64, frame_id: u64, widths: &[f32]) -> WidthChange {
+        if widths.is_empty() {
+            return WidthChange::None;
+        }
+        let mut metrics = self.table_metrics.borrow_mut();
+        metrics.entry_mut(table_id).update_widths(widths, frame_id)
+    }
+
+    fn handle_width_change(&self, ctx: &Context, table_id: u64, change: WidthChange) {
+        if matches!(change, WidthChange::Large) {
+            let frame_id = ctx.frame_nr();
+            let mut metrics = self.table_metrics.borrow_mut();
+            let entry = metrics.entry_mut(table_id);
+            if entry.last_discard_frame != Some(frame_id) {
+                ctx.request_repaint();
+                entry.last_discard_frame = Some(frame_id);
+            }
+        }
+    }
+
+    fn paint_table_dividers(
+        &self,
+        painter: &Painter,
+        visuals: &Visuals,
+        rect: egui::Rect,
+        clip_rect: egui::Rect,
+        widths: &[f32],
+    ) {
+        if widths.len() <= 1 {
+            return;
+        }
+        let separator_color = visuals
+            .widgets
+            .noninteractive
+            .bg_stroke
+            .color
+            .gamma_multiply(0.9);
+        let separator_stroke = Stroke::new(1.0, separator_color);
+        let border_stroke = visuals.window_stroke();
+        let painter = painter.with_clip_rect(clip_rect);
+        let mut x = rect.left();
+        for width in widths.iter().take(widths.len().saturating_sub(1)) {
+            x += *width;
+            let x_pos = (x.round() + 0.5).clamp(rect.left(), rect.right());
+            painter.vline(x_pos, rect.y_range(), separator_stroke);
+        }
+        painter.rect_stroke(rect, 0.0, border_stroke);
     }
 
     fn render_overhauled_cell(
@@ -3541,7 +3686,7 @@ impl MarkdownRenderer {
         let pointer = response.hover_pos()?;
         let local = pointer - response.rect.left_top();
         let cursor = galley.cursor_from_pos(local);
-        let idx = cursor.ccursor.index as usize;
+        let idx = cursor.ccursor.index;
         build
             .link_ranges
             .iter()

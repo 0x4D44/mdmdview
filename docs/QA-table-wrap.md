@@ -33,7 +33,8 @@ Include in the QA report:
 1. Open `examples/regressions/table-threat-model.md` with table wrap enabled.
 2. Verify Description stays moderate while Examples expands to accommodate the longest entries.
 3. Resize the window and test DPI 100/125/150% to ensure column widths adapt smoothly (no clipping or stray lines).
-4. Toggle View > Table Wrap off/on to confirm legacy grid still renders without virtualization while the overhaul restores wrapping.
-5. Drag-resize the Examples column; restart mdmdview and confirm the new width persists.
-6. Capture before/after screenshots for the QA report.
+4. Watch the custom vertical dividers/border while resizing; they should stay aligned to column boundaries without drawing through cell text.
+5. Toggle View > Table Wrap off/on to confirm legacy grid still renders without virtualization while the overhaul restores wrapping.
+6. Drag-resize the Examples column; restart mdmdview and confirm the new width persists.
+7. Capture before/after screenshots for the QA report.
 

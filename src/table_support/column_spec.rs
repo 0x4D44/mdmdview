@@ -189,6 +189,8 @@ fn calculate_policy_hash(ident: &str, policy: &ColumnPolicy) -> u64 {
 
 pub fn derive_column_specs(ctx: &TableColumnContext) -> Vec<ColumnSpec> {
     let mut remainder_assigned = false;
+    let mut fallback_idx: Option<usize> = None;
+    let mut fallback_score: usize = 0;
 
     let mut specs: Vec<ColumnSpec> = ctx
         .headers
@@ -197,6 +199,24 @@ pub fn derive_column_specs(ctx: &TableColumnContext) -> Vec<ColumnSpec> {
         .map(|(idx, spans)| {
             let label = header_text(spans);
             let stat = ctx.column_stat(idx);
+
+            let candidate_score = stat
+                .map(|s| {
+                    let mut score = s.max_graphemes + s.longest_word * 2;
+                    if s.rich_content.has_image {
+                        score += 50;
+                    }
+                    if s.rich_content.has_link {
+                        score += 25;
+                    }
+                    score
+                })
+                .unwrap_or_else(|| label.len());
+            if candidate_score > fallback_score {
+                fallback_score = candidate_score;
+                fallback_idx = Some(idx);
+            }
+
             let policy =
                 classify_column(&label, idx, &mut remainder_assigned, stat, ctx.body_font_px);
             let tooltip = column_tooltip(&label, &policy);
@@ -205,27 +225,23 @@ pub fn derive_column_specs(ctx: &TableColumnContext) -> Vec<ColumnSpec> {
         .collect();
 
     if !remainder_assigned {
-        let mut candidate_idx: Option<usize> = None;
-        let mut candidate_score: usize = 0;
-        for (idx, spec) in specs.iter().enumerate() {
-            if matches!(spec.policy, ColumnPolicy::Fixed { .. }) {
-                continue;
-            }
-            let score = ctx
-                .column_stat(idx)
-                .map(|stat| stat.max_graphemes + stat.longest_word * 2)
-                .unwrap_or(0);
-            if candidate_idx.is_none() || score > candidate_score {
-                candidate_idx = Some(idx);
-                candidate_score = score;
+        let mut candidate = fallback_idx;
+        if let Some(idx) = candidate {
+            if matches!(specs[idx].policy, ColumnPolicy::Fixed { .. }) {
+                candidate = None;
             }
         }
-        if let Some(idx) = candidate_idx {
+        if candidate.is_none() {
+            candidate = specs
+                .iter()
+                .enumerate()
+                .find(|(_, spec)| !matches!(spec.policy, ColumnPolicy::Fixed { .. }))
+                .map(|(idx, _)| idx);
+        }
+        if let Some(idx) = candidate {
             if let Some(spec) = specs.get_mut(idx) {
                 spec.set_policy(ColumnPolicy::Remainder { clip: false });
             }
-        } else if let Some(last) = specs.last_mut() {
-            last.set_policy(ColumnPolicy::Remainder { clip: false });
         }
     }
 
