@@ -78,6 +78,14 @@ for grapheme in text.graphemes(true) {
 }
 ```
 
+## mdmdview Table Wrap Overhaul Notes (2025-11-20)
+- Header height is now estimated per-table from header text (wrap-aware) instead of a fixed 28 px.
+- Row heights grow when rendered content exceeds the prior hint; a repaint is requested to avoid clipping.
+- Column stats sample all effective columns (including extra trailing cells) and use `unicode-width` to size CJK/fullwidth text.
+- Up to two columns can be marked as remainder when stats show long or rich content; Examples/notes stay remainder-first, IDs/dates remain fixed.
+- Table instance identity now includes the element index, so persisted widths do not bleed between identical tables.
+- Legacy renderer caps image width estimates to a thumbnail so images no longer blow up width resolution.
+
 ## Constraint Hierarchy
 
 1. **Fixed constraints** (must be exact)

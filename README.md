@@ -160,7 +160,12 @@ Now all `.md` files will open in mdmdview by double-clicking!
 - `--no-table-wrap` â€” temporarily fall back to the legacy renderer if a file misbehaves.
 - `MDMDVIEW_TABLE_WRAP_OVERHAUL=1` (or `0`) â€” set the default renderer without passing CLI flags.
 
-The setting can also be toggled at runtime from **View > Table Wrap**.
+  The setting can also be toggled at runtime from **View > Table Wrap**.
+
+  Recent behavior (2025-11-20):
+  - Header rows auto-size from wrapped text; row heights grow on repaint to avoid clipping.
+  - Column sizing uses Unicode display width (better for CJK/fullwidth) and can designate up to two remainder columns when content is long.
+  - Table state (widths/heights) is scoped per table instance, so identical tables no longer share cached widths.
 
 ### Search Functionality
 

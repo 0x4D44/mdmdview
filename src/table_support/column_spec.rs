@@ -3,8 +3,11 @@ use std::hash::{Hash, Hasher};
 
 use egui_extras::Column;
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::markdown_renderer::InlineSpan;
+
+const MAX_REMAINDER_COLUMNS: usize = 2;
 
 fn normalize_body_font_px(body: f32) -> f32 {
     if body.is_finite() && body > 4.0 {
@@ -188,15 +191,20 @@ fn calculate_policy_hash(ident: &str, policy: &ColumnPolicy) -> u64 {
 }
 
 pub fn derive_column_specs(ctx: &TableColumnContext) -> Vec<ColumnSpec> {
-    let mut remainder_assigned = false;
+    let mut remainder_assigned = 0usize;
     let mut fallback_idx: Option<usize> = None;
     let mut fallback_score: usize = 0;
+    let column_count = ctx
+        .stats
+        .len()
+        .max(ctx.headers.len())
+        .max(ctx.rows.iter().map(|r| r.len()).max().unwrap_or(0));
 
-    let mut specs: Vec<ColumnSpec> = ctx
-        .headers
-        .iter()
-        .enumerate()
-        .map(|(idx, spans)| {
+    let mut scored_indices: Vec<(usize, usize)> = Vec::with_capacity(column_count);
+
+    let mut specs: Vec<ColumnSpec> = (0..column_count)
+        .map(|idx| {
+            let spans = ctx.headers.get(idx).map(|v| v.as_slice()).unwrap_or(&[]);
             let label = header_text(spans);
             let stat = ctx.column_stat(idx);
 
@@ -216,6 +224,7 @@ pub fn derive_column_specs(ctx: &TableColumnContext) -> Vec<ColumnSpec> {
                 fallback_score = candidate_score;
                 fallback_idx = Some(idx);
             }
+            scored_indices.push((idx, candidate_score));
 
             let policy =
                 classify_column(&label, idx, &mut remainder_assigned, stat, ctx.body_font_px);
@@ -224,7 +233,8 @@ pub fn derive_column_specs(ctx: &TableColumnContext) -> Vec<ColumnSpec> {
         })
         .collect();
 
-    if !remainder_assigned {
+    // Ensure at least one remainder if none assigned and available
+    if remainder_assigned == 0 {
         let mut candidate = fallback_idx;
         if let Some(idx) = candidate {
             if matches!(specs[idx].policy, ColumnPolicy::Fixed { .. }) {
@@ -241,6 +251,23 @@ pub fn derive_column_specs(ctx: &TableColumnContext) -> Vec<ColumnSpec> {
         if let Some(idx) = candidate {
             if let Some(spec) = specs.get_mut(idx) {
                 spec.set_policy(ColumnPolicy::Remainder { clip: false });
+                remainder_assigned += 1;
+            }
+        }
+    }
+
+    // Promote additional wide columns to remainder up to the cap
+    scored_indices.sort_by(|a, b| b.1.cmp(&a.1));
+    for (idx, _) in scored_indices {
+        if remainder_assigned >= MAX_REMAINDER_COLUMNS {
+            break;
+        }
+        if let Some(spec) = specs.get_mut(idx) {
+            if matches!(spec.policy, ColumnPolicy::Resizable { .. })
+                && column_needs_remainder(ctx.column_stat(idx))
+            {
+                spec.set_policy(ColumnPolicy::Remainder { clip: false });
+                remainder_assigned += 1;
             }
         }
     }
@@ -286,7 +313,7 @@ fn header_text(spans: &[InlineSpan]) -> String {
 fn classify_column(
     label: &str,
     index: usize,
-    remainder_assigned: &mut bool,
+    remainder_assigned: &mut usize,
     stat: Option<&ColumnStat>,
     body_font_px: f32,
 ) -> ColumnPolicy {
@@ -330,17 +357,23 @@ fn classify_column(
         &lower,
         &["example", "examples", "sample", "use case", "use cases"],
     ) {
-        *remainder_assigned = true;
+        *remainder_assigned += 1;
         return ColumnPolicy::Remainder { clip: false };
     }
     if index == 0 {
-        return ColumnPolicy::Fixed {
-            width: px(body_font_px, 7.8).clamp(90.0, 200.0),
-            clip: true,
-        };
+        // First column typically identifiers; keep fixed only for short labels.
+        if stat
+            .map(|s| s.max_graphemes <= 18 && s.longest_word <= 12)
+            .unwrap_or_else(|| label.len() <= 12)
+        {
+            return ColumnPolicy::Fixed {
+                width: px(body_font_px, 7.0).clamp(80.0, 180.0),
+                clip: true,
+            };
+        }
     }
-    if !*remainder_assigned && column_needs_remainder(stat) {
-        *remainder_assigned = true;
+    if *remainder_assigned < MAX_REMAINDER_COLUMNS && column_needs_remainder(stat) {
+        *remainder_assigned += 1;
         return ColumnPolicy::Remainder { clip: false };
     }
     ColumnPolicy::Resizable {
@@ -443,10 +476,11 @@ fn accumulate_stats_for_cell(spans: &[InlineSpan], stat: &mut ColumnStat) {
     let text = spans_to_text(spans);
     if !text.is_empty() {
         let graphemes = text.graphemes(true).count();
-        stat.max_graphemes = stat.max_graphemes.max(graphemes);
+        let display_width = UnicodeWidthStr::width(text.as_str());
+        stat.max_graphemes = stat.max_graphemes.max(display_width.max(graphemes));
 
         for word in text.split_whitespace() {
-            let word_len = word.graphemes(true).count();
+            let word_len = UnicodeWidthStr::width(word).max(word.graphemes(true).count());
             stat.longest_word = stat.longest_word.max(word_len);
         }
 
@@ -599,5 +633,42 @@ mod tests {
         let specs = derive_column_specs(&ctx);
         assert!(matches!(specs[0].policy, ColumnPolicy::Remainder { .. }));
         assert!(matches!(specs[1].policy, ColumnPolicy::Resizable { .. }));
+    }
+
+    #[test]
+    fn multiple_remainder_columns_allowed() {
+        let headers = vec![
+            vec![span("Summary")],
+            vec![span("Details")],
+            vec![span("Examples")],
+        ];
+        let rows = vec![vec![
+            vec![span("short")],
+            vec![span(
+                "Long content that should trigger a remainder column due to its width and words.",
+            )],
+            vec![span(
+                "Another large column with links https://example.com and more text.",
+            )],
+        ]];
+        let stats = compute_column_stats(&headers, &rows, 32);
+        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
+        let specs = derive_column_specs(&ctx);
+        let remainder_count = specs
+            .iter()
+            .filter(|s| matches!(s.policy, ColumnPolicy::Remainder { .. }))
+            .count();
+        assert!(
+            remainder_count >= 2,
+            "should allow multiple remainder columns, got {remainder_count}"
+        );
+    }
+
+    #[test]
+    fn cjk_widths_increase_stat_estimates() {
+        let headers = vec![vec![span("列")], vec![span("Column")]];
+        let rows = vec![vec![vec![span("长内容长内容长内容")], vec![span("short")]]];
+        let stats = compute_column_stats(&headers, &rows, 32);
+        assert!(stats[0].max_graphemes > stats[1].max_graphemes);
     }
 }
