@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "mdmdview"
 version = "0.3.3"
 edition = "2021"
@@ -24,6 +24,7 @@ image = { version = "0.24", default-features = false, features = ["png", "jpeg",
 unicode-segmentation = "1"
 unicode-normalization = "0.1"
 unicode-casefold = "0.2"
+unicode-width = "0.1"
 usvg = { version = "0.43", default-features = false, features = ["text"] }
 resvg = "0.43"
 tiny-skia = "0.11"
@@ -55,4 +56,3 @@ mermaid-quickjs = ["dep:rquickjs"]
 [dependencies.rquickjs]
 version = "0.6"
 optional = true
-

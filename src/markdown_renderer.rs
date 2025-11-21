@@ -922,7 +922,7 @@ impl MarkdownRenderer {
     /// Extract plain text from all markdown elements
     pub fn elements_to_plain_text(elements: &[MarkdownElement]) -> String {
         let mut result = String::new();
-        for element in elements {
+        for (_element_idx, element) in elements.iter().enumerate() {
             match element {
                 MarkdownElement::Paragraph(spans) | MarkdownElement::Header { spans, .. } => {
                     if !result.is_empty() {
@@ -1408,58 +1408,6 @@ impl MarkdownRenderer {
         let mut rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
         let mut i = start;
 
-        // Parse inline spans within a table cell until End(TableCell)
-        fn collect_cell_spans(
-            this: &MarkdownRenderer,
-            events: &[Event],
-            mut j: usize,
-        ) -> (Vec<InlineSpan>, usize) {
-            let mut spans: Vec<InlineSpan> = Vec::new();
-            while j < events.len() {
-                match &events[j] {
-                    Event::End(Tag::TableCell) => return (spans, j + 1),
-                    Event::Text(t) => spans.push(InlineSpan::Text(t.to_string())),
-                    Event::Code(t) => spans.push(InlineSpan::Code(t.to_string())),
-                    Event::Start(Tag::Emphasis) => {
-                        let (inner, next) = this
-                            .collect_until_tag_end(events, j + 1, Tag::Emphasis)
-                            .unwrap_or_default();
-                        spans.push(InlineSpan::Emphasis(inner));
-                        j = next - 1; // -1 to offset j+=1 below
-                    }
-                    Event::Start(Tag::Strong) => {
-                        let (inner, next) = this
-                            .collect_until_tag_end(events, j + 1, Tag::Strong)
-                            .unwrap_or_default();
-                        spans.push(InlineSpan::Strong(inner));
-                        j = next - 1;
-                    }
-                    Event::Start(Tag::Strikethrough) => {
-                        let (inner, next) = this
-                            .collect_until_tag_end(events, j + 1, Tag::Strikethrough)
-                            .unwrap_or_default();
-                        spans.push(InlineSpan::Strikethrough(inner));
-                        j = next - 1;
-                    }
-                    Event::Start(Tag::Link(_, url, _)) => {
-                        let url_str = url.to_string();
-                        let (text, next) = this
-                            .collect_until_tag_end(
-                                events,
-                                j + 1,
-                                Tag::Link(LinkType::Inline, "".into(), "".into()),
-                            )
-                            .unwrap_or_default();
-                        spans.push(InlineSpan::Link { text, url: url_str });
-                        j = next - 1;
-                    }
-                    _ => {}
-                }
-                j += 1;
-            }
-            (spans, j)
-        }
-
         while i < events.len() {
             match &events[i] {
                 Event::Start(Tag::TableHead) => {
@@ -1467,9 +1415,14 @@ impl MarkdownRenderer {
                     while i < events.len() {
                         match &events[i] {
                             Event::Start(Tag::TableCell) => {
-                                let (spans, next) = collect_cell_spans(self, events, i + 1);
+                                let (spans, next_idx) = self.parse_inline_spans_with_breaks(
+                                    events,
+                                    i + 1,
+                                    Tag::TableCell,
+                                    true,
+                                )?;
                                 headers.push(spans);
-                                i = next;
+                                i = next_idx;
                             }
                             Event::End(Tag::TableHead) => {
                                 i += 1;
@@ -1485,9 +1438,14 @@ impl MarkdownRenderer {
                     while i < events.len() {
                         match &events[i] {
                             Event::Start(Tag::TableCell) => {
-                                let (spans, next) = collect_cell_spans(self, events, i + 1);
+                                let (spans, next_idx) = self.parse_inline_spans_with_breaks(
+                                    events,
+                                    i + 1,
+                                    Tag::TableCell,
+                                    true,
+                                )?;
                                 row.push(spans);
-                                i = next;
+                                i = next_idx;
                             }
                             Event::End(Tag::TableRow) => {
                                 i += 1;
@@ -1515,7 +1473,7 @@ impl MarkdownRenderer {
         *self.link_counter.borrow_mut() = 0;
         // Reset per-frame element rects
         self.element_rects.borrow_mut().clear();
-        for element in elements {
+        for (element_idx, element) in elements.iter().enumerate() {
             // Wrap each element in a no-op frame to capture its rect
             let ir = egui::Frame::none().show(ui, |ui| {
                 match element {
@@ -1607,7 +1565,7 @@ impl MarkdownRenderer {
                         ui.add_space(8.0);
                     }
                     MarkdownElement::Table { headers, rows } => {
-                        self.render_table(ui, headers, rows);
+                        self.render_table(ui, headers, rows, element_idx);
                     }
                 }
             });
@@ -2098,10 +2056,16 @@ impl MarkdownRenderer {
                         let galley = fonts.layout_no_wrap(code.to_string(), mono, Color32::WHITE);
                         width += galley.size().x + 6.0; // small padding for code background
                     }
-                    InlineSpan::Image { .. } => {
-                        // Approximate: image width at current scale, capped by available width
-                        // We don't have the natural width here; approximate with available width.
-                        width += ui.available_width();
+                    InlineSpan::Image { src, .. } => {
+                        // Use cached texture size if available; otherwise a conservative thumbnail.
+                        let cap = (ui.available_width() * 0.6).max(48.0);
+                        let cached = self
+                            .image_textures
+                            .borrow()
+                            .get(src)
+                            .map(|entry| entry.size[0] as f32 * self.ui_scale());
+                        let approx = cached.unwrap_or(self.font_sizes.body * 12.0);
+                        width += approx.min(cap);
                     }
                 }
                 width += 4.0; // spacing between spans
@@ -2939,11 +2903,17 @@ impl MarkdownRenderer {
         h.finish()
     }
 
-    fn compute_table_id(&self, headers: &[Vec<InlineSpan>], rows: &[Vec<Vec<InlineSpan>>]) -> u64 {
+    fn compute_table_id(
+        &self,
+        headers: &[Vec<InlineSpan>],
+        rows: &[Vec<Vec<InlineSpan>>],
+        element_index: usize,
+    ) -> u64 {
         let mut hasher = DefaultHasher::new();
         if let Some(base) = self.base_dir.borrow().as_ref() {
             base.hash(&mut hasher);
         }
+        hasher.write_usize(element_index);
         hasher.write_u64(self.compute_table_content_hash(headers, rows));
         hasher.finish()
     }
@@ -3215,13 +3185,14 @@ impl MarkdownRenderer {
         ui: &mut egui::Ui,
         headers: &[Vec<InlineSpan>],
         rows: &[Vec<Vec<InlineSpan>>],
+        element_index: usize,
     ) {
         if headers.is_empty() {
             return;
         }
 
         if self.table_wrap_overhaul_enabled {
-            self.render_table_tablebuilder(ui, headers, rows);
+            self.render_table_tablebuilder(ui, headers, rows, element_index);
             ui.add_space(8.0);
             return;
         }
@@ -3333,10 +3304,9 @@ impl MarkdownRenderer {
         ui: &mut egui::Ui,
         headers: &[Vec<InlineSpan>],
         rows: &[Vec<Vec<InlineSpan>>],
+        element_index: usize,
     ) {
-        const HEADER_HEIGHT: f32 = 28.0;
-
-        let table_id = self.compute_table_id(headers, rows);
+        let table_id = self.compute_table_id(headers, rows, element_index);
         let column_stats = self.column_stats_for_table(table_id, headers, rows);
         let ctx =
             TableColumnContext::new(headers, rows, &column_stats, self.font_sizes.body, table_id);
@@ -3358,6 +3328,24 @@ impl MarkdownRenderer {
             ui.spacing_mut().item_spacing.x = 6.0;
         }
 
+        // Rough header height estimation using equally divided width; refines on next frame via cache.
+        let mut header_height = self.row_height_fallback();
+        if !column_specs.is_empty() {
+            let approx_width = (ui.available_width() / column_specs.len() as f32)
+                .max(self.font_sizes.body * 6.0)
+                .max(48.0);
+            let style = ui.style().clone();
+            header_height = headers
+                .iter()
+                .enumerate()
+                .map(|(ci, spans)| {
+                    let build = self.cached_layout_job(&style, None, ci, spans, approx_width, true);
+                    ui.fonts(|f| f.layout_job(build.job.clone()).size().y + 6.0)
+                })
+                .fold(header_height, |acc, h| acc.max(h));
+            header_height = header_height.min(self.row_height_fallback() * 3.0);
+        }
+
         let mut table = TableBuilder::new(ui).striped(true);
         for spec in &column_specs {
             table = table.column(spec.as_column());
@@ -3375,8 +3363,9 @@ impl MarkdownRenderer {
         let mut visuals: Option<Visuals> = None;
         let mut ctx_snapshot: Option<Context> = None;
 
+        let mut height_growth = false;
         table
-            .header(HEADER_HEIGHT, |mut header| {
+            .header(header_height, |mut header| {
                 for (ci, _) in column_specs.iter().enumerate() {
                     header.col(|ui| {
                         let width = ui.available_width().max(1.0);
@@ -3394,7 +3383,8 @@ impl MarkdownRenderer {
                 }
             })
             .body(|body| {
-                body.heterogeneous_rows(row_heights.into_iter(), |mut row| {
+                let row_height_hints = row_heights.clone();
+                body.heterogeneous_rows(row_height_hints.into_iter(), |mut row| {
                     let idx = row.index();
                     let row_cells = rows.get(idx);
                     let mut row_height = fallback_row_height;
@@ -3417,6 +3407,9 @@ impl MarkdownRenderer {
                             }
                         });
                         row_height = row_height.max(cell_height);
+                        if cell_height > row_heights[idx] + 0.5 {
+                            height_growth = true;
+                        }
                     }
                     self.update_row_height(table_id, idx, row_height);
                     self.note_row_rendered(table_id);
@@ -3434,6 +3427,9 @@ impl MarkdownRenderer {
                 self.persist_resizable_widths(table_id, &column_specs, &column_widths);
                 self.handle_width_change(&ctx, table_id, change);
                 self.paint_table_dividers(&painter, &visuals, rect, clip_rect, &column_widths);
+                if height_growth {
+                    ctx.request_repaint();
+                }
             }
         }
     }
@@ -4681,5 +4677,60 @@ mod tests {
             (sum - 260.0).abs() < 0.5,
             "Widths should sum to available space even under tight constraints"
         );
+    }
+
+    #[test]
+    fn table_cells_keep_images_and_formatting() {
+        let renderer = MarkdownRenderer::new();
+        let md = "\
+| H1 | H2 |
+| --- | --- |
+| text ![Alt](img.png) | **bold** and [link](https://example.com) |";
+        let elements = renderer.parse(md).expect("parse ok");
+        let table = elements
+            .iter()
+            .find_map(|el| match el {
+                MarkdownElement::Table { headers: _, rows } => Some(rows),
+                _ => None,
+            })
+            .expect("table present");
+        assert_eq!(table.len(), 1);
+        let row = &table[0];
+        assert!(row[0]
+            .iter()
+            .any(|span| matches!(span, InlineSpan::Image { src, .. } if src == "img.png")));
+        assert!(row[1]
+            .iter()
+            .any(|span| matches!(span, InlineSpan::Strong(text) if text.contains("bold"))));
+        assert!(row[1].iter().any(|span| matches!(
+            span,
+            InlineSpan::Link { url, .. } if url == "https://example.com"
+        )));
+    }
+
+    #[test]
+    fn table_ids_are_unique_per_position() {
+        let renderer = MarkdownRenderer::new();
+        let md = "\
+| H |
+| - |
+| a |
+
+| H |
+| - |
+| a |";
+        let elements = renderer.parse(md).expect("parse ok");
+        let tables: Vec<_> = elements
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, el)| match el {
+                MarkdownElement::Table { headers, rows } => {
+                    Some(renderer.compute_table_id(headers, rows, idx))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tables.len(), 2);
+        assert_ne!(tables[0], tables[1], "table ids should differ by position");
     }
 }

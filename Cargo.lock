@@ -2223,6 +2223,7 @@ dependencies = [
  "unicode-casefold",
  "unicode-normalization",
  "unicode-segmentation",
+ "unicode-width 0.1.14",
  "ureq",
  "usvg",
  "webbrowser",
