@@ -412,14 +412,9 @@ impl MarkdownViewerApp {
 
         // Handle valid files
         if !valid_files.is_empty() {
-            // Push current state to history if we have content
-            if !self.current_content.is_empty() {
-                self.push_history();
-            }
-
             // Open first file immediately
             let first_file = valid_files.remove(0);
-            if let Err(e) = self.load_file(first_file) {
+            if let Err(e) = self.load_file(first_file, true) {
                 self.error_message = Some(format!("Failed to load file: {}", e));
                 return;
             }
@@ -430,7 +425,7 @@ impl MarkdownViewerApp {
             // Show info message if multiple files
             if !self.pending_files.is_empty() {
                 eprintln!(
-                    "Queued {} files. Use Alt+Ã¢â€ â€™ to navigate to next file.",
+                    "Queued {} files. Use Alt+Right to navigate to the next file.",
                     self.pending_files.len()
                 );
             }
@@ -508,9 +503,9 @@ impl MarkdownViewerApp {
     }
 
     /// Load markdown content from a file path
-    pub fn load_file(&mut self, path: PathBuf) -> Result<()> {
+    pub fn load_file(&mut self, path: PathBuf, record_history: bool) -> Result<()> {
         // Push current state to history before loading new file
-        if !self.current_content.is_empty() {
+        if record_history && !self.current_content.is_empty() {
             self.push_history();
         }
 
@@ -693,13 +688,8 @@ impl MarkdownViewerApp {
     fn navigate_forward(&mut self) -> bool {
         // First try pending files queue
         if let Some(next_file) = self.pending_files.pop_front() {
-            // Push current state to history
-            if !self.current_content.is_empty() {
-                self.push_history();
-            }
-
             // Load next file from queue
-            if let Err(e) = self.load_file(next_file) {
+            if let Err(e) = self.load_file(next_file, true) {
                 self.error_message = Some(format!("Failed to load file: {}", e));
             }
             return true;
@@ -772,7 +762,7 @@ impl MarkdownViewerApp {
         } else {
             bail!("No file loaded to reload");
         };
-        self.load_file(path)
+        self.load_file(path, false)
     }
 
     /// Load a sample file by name
@@ -814,7 +804,7 @@ impl MarkdownViewerApp {
             .set_title("Open Markdown File")
             .pick_file()
         {
-            if let Err(e) = self.load_file(path) {
+            if let Err(e) = self.load_file(path, true) {
                 self.error_message = Some(format!("Failed to open file: {}", e));
             }
         }
@@ -995,7 +985,7 @@ impl MarkdownViewerApp {
                     self.error_message = Some(format!("Failed to save: {}", e));
                 }
             }
-            // Note: No global Alt+R to avoid conflict (FileÃ¢â€ â€™Reload vs ViewÃ¢â€ â€™Raw)
+            // Note: No global Alt+R to avoid conflict (File > Reload vs View > Raw)
 
             // F11 - Toggle fullscreen (set flag to handle outside input context)
             if i.consume_key(egui::Modifiers::NONE, egui::Key::F11) {
@@ -1072,7 +1062,7 @@ impl MarkdownViewerApp {
                         ui.horizontal(|ui| {
                             if ui
                                 .add(egui::Button::new(Self::menu_text_with_mnemonic(
-                                    Some("Ã°Å¸â€œÂ "),
+                                    None,
                                     "Open...",
                                     'O',
                                     alt_pressed,
@@ -1091,13 +1081,12 @@ impl MarkdownViewerApp {
                             );
                         });
 
-                        // Save
                         ui.horizontal(|ui| {
                             let enabled = !self.current_content.is_empty();
                             let button = ui.add_enabled(
                                 enabled,
                                 egui::Button::new(Self::menu_text_with_mnemonic(
-                                    Some("Ã°Å¸â€™Â¾ "),
+                                    None,
                                     "Save",
                                     'S',
                                     alt_pressed,
@@ -1121,7 +1110,7 @@ impl MarkdownViewerApp {
                         ui.horizontal(|ui| {
                             if ui
                                 .add(egui::Button::new(Self::menu_text_with_mnemonic(
-                                    Some("Ã°Å¸â€œâ€ž "),
+                                    None,
                                     "Close",
                                     'C',
                                     alt_pressed,
@@ -1145,7 +1134,7 @@ impl MarkdownViewerApp {
                             let button = ui.add_enabled(
                                 enabled,
                                 egui::Button::new(Self::menu_text_with_mnemonic(
-                                    Some("Ã°Å¸â€â€ž "),
+                                    None,
                                     "Reload",
                                     'R',
                                     alt_pressed,
@@ -1164,11 +1153,10 @@ impl MarkdownViewerApp {
                             );
                         });
 
-                        // Find...
                         ui.horizontal(|ui| {
                             if ui
                                 .add(egui::Button::new(Self::menu_text_with_mnemonic(
-                                    Some("Ã°Å¸â€Å½ "),
+                                    None,
                                     "Find...",
                                     'F',
                                     alt_pressed,
@@ -1190,10 +1178,9 @@ impl MarkdownViewerApp {
 
                         ui.separator();
 
-                        // Samples submenu
                         ui.menu_button(
                             Self::menu_text_with_mnemonic(
-                                Some("Ã°Å¸â€œÅ¡ "),
+                                None,
                                 "Samples",
                                 'S',
                                 alt_pressed,
@@ -1208,29 +1195,6 @@ impl MarkdownViewerApp {
                                 }
                             },
                         );
-
-                        ui.separator();
-
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add(egui::Button::new(Self::menu_text_with_mnemonic(
-                                    Some("Ã¢ÂÅ’ "),
-                                    "Exit",
-                                    'E',
-                                    alt_pressed,
-                                    menu_text_color,
-                                )))
-                                .clicked()
-                            {
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                            }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    ui.label(RichText::new("Ctrl+Q").color(menu_text_color));
-                                },
-                            );
-                        });
                     },
                 );
 
@@ -1238,11 +1202,10 @@ impl MarkdownViewerApp {
                 ui.menu_button(
                     Self::menu_text_with_mnemonic(None, "View", 'V', alt_pressed, menu_text_color),
                     |ui| {
-                        // Back navigation
                         ui.horizontal(|ui| {
                             let enabled = self.can_navigate_back();
                             if ui
-                                .add_enabled(enabled, egui::Button::new("Ã¢â€ Â Back"))
+                                .add_enabled(enabled, egui::Button::new("<- Back"))
                                 .clicked()
                             {
                                 self.navigate_back();
@@ -1251,16 +1214,15 @@ impl MarkdownViewerApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.label(RichText::new("Alt+Ã¢â€ Â").color(menu_text_color));
+                                    ui.label(RichText::new("Alt+Left").color(menu_text_color));
                                 },
                             );
                         });
 
-                        // Forward navigation
                         ui.horizontal(|ui| {
                             let enabled = self.can_navigate_forward();
                             if ui
-                                .add_enabled(enabled, egui::Button::new("Ã¢â€ â€™ Forward"))
+                                .add_enabled(enabled, egui::Button::new("Forward ->"))
                                 .clicked()
                             {
                                 self.navigate_forward();
@@ -1269,21 +1231,20 @@ impl MarkdownViewerApp {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
-                                    ui.label(RichText::new("Alt+Ã¢â€ â€™").color(menu_text_color));
+                                    ui.label(RichText::new("Alt+Right").color(menu_text_color));
                                 },
                             );
                         });
 
                         ui.separator();
 
-                        // Raw view toggle
                         ui.horizontal(|ui| {
                             let selected = matches!(self.view_mode, ViewMode::Raw);
                             if ui
                                 .add(egui::SelectableLabel::new(
                                     selected,
                                     Self::menu_text_with_mnemonic(
-                                        Some("Ã°Å¸â€œÂ "),
+                                        None,
                                         "Raw Markdown",
                                         'R',
                                         alt_pressed,
@@ -1303,14 +1264,13 @@ impl MarkdownViewerApp {
                             );
                         });
 
-                        // Write mode toggle (raw window editing)
                         ui.horizontal(|ui| {
                             let selected = self.write_enabled;
                             if ui
                                 .add(egui::SelectableLabel::new(
                                     selected,
                                     Self::menu_text_with_mnemonic(
-                                        Some("Ã¢Å“Â "),
+                                        None,
                                         "Write Mode",
                                         'W',
                                         alt_pressed,
@@ -1330,10 +1290,9 @@ impl MarkdownViewerApp {
                             );
                         });
 
-                        // Wrap option for raw view
                         ui.horizontal(|ui| {
                             if ui
-                                .selectable_label(self.wrap_raw, "Ã¢â€ Âª Wrap Raw Lines")
+                                .selectable_label(self.wrap_raw, "Wrap Raw Lines")
                                 .clicked()
                             {
                                 self.wrap_raw = !self.wrap_raw;
@@ -1342,9 +1301,9 @@ impl MarkdownViewerApp {
 
                         ui.horizontal(|ui| {
                             let label = if self.table_wrap_overhaul_enabled {
-                                "Ã¢Å“â€¦ Table Wrap Overhaul"
+                                "Table Wrap Overhaul (new)"
                             } else {
-                                "Ã¢Â¬Å“ Table Wrap Overhaul"
+                                "Table Wrap Overhaul (legacy)"
                             };
                             if ui
                                 .selectable_label(self.table_wrap_overhaul_enabled, label)
@@ -1356,7 +1315,7 @@ impl MarkdownViewerApp {
                         });
 
                         ui.horizontal(|ui| {
-                            if ui.button("Ã°Å¸â€Â Zoom In").clicked() {
+                            if ui.button("Zoom In").clicked() {
                                 self.renderer.zoom_in();
                                 ui.close_menu();
                             }
@@ -1369,7 +1328,7 @@ impl MarkdownViewerApp {
                         });
 
                         ui.horizontal(|ui| {
-                            if ui.button("Ã°Å¸â€Â Zoom Out").clicked() {
+                            if ui.button("Zoom Out").clicked() {
                                 self.renderer.zoom_out();
                                 ui.close_menu();
                             }
@@ -1382,7 +1341,7 @@ impl MarkdownViewerApp {
                         });
 
                         ui.horizontal(|ui| {
-                            if ui.button("Ã¢â€ Â© Reset Zoom").clicked() {
+                            if ui.button("Reset Zoom").clicked() {
                                 self.renderer.reset_zoom();
                                 ui.close_menu();
                             }
@@ -1397,7 +1356,7 @@ impl MarkdownViewerApp {
                         ui.separator();
 
                         ui.horizontal(|ui| {
-                            if ui.button("Ã¢â€ºÂ¶ Toggle Fullscreen").clicked() {
+                            if ui.button("Toggle Fullscreen").clicked() {
                                 let is_fullscreen =
                                     ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
@@ -1415,16 +1374,15 @@ impl MarkdownViewerApp {
                     },
                 );
 
-                // Help menu
                 ui.menu_button("Help", |ui| {
-                    if ui.button("Ã°Å¸â€œâ€“ Usage Instructions").clicked() {
+                    if ui.button("Usage Instructions").clicked() {
                         if let Some(usage) = SAMPLE_FILES.iter().find(|f| f.name == "usage.md") {
                             self.load_sample(usage);
                         }
                         ui.close_menu();
                     }
 
-                    if ui.button("Ã¢â€žÂ¹ About").clicked() {
+                    if ui.button("About").clicked() {
                         if let Some(welcome) = SAMPLE_FILES.iter().find(|f| f.name == "welcome.md")
                         {
                             self.load_sample(welcome);
@@ -1437,30 +1395,29 @@ impl MarkdownViewerApp {
 
         // No programmatic overlay menus; rely on pointer to open egui menus.
     }
-
     /// Render the status bar
     fn render_status_bar(&self, ctx: &Context) {
         TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 // Current file info
                 if let Some(path) = &self.current_file {
-                    ui.label(format!("Ã°Å¸â€œâ€ž {}", path.display()));
+                    ui.label(format!("File: {}", path.display()));
                 } else if !self.parsed_elements.is_empty() {
-                    ui.label("Ã°Å¸â€œâ€ž Sample file");
+                    ui.label("Sample file");
                 } else {
-                    ui.label("Ã°Å¸â€œâ€ž No file loaded");
+                    ui.label("No file loaded");
                 }
 
                 // Show pending file count if files are queued
                 if !self.pending_files.is_empty() {
                     ui.separator();
                     ui.label(
-                        RichText::new(format!("Ã°Å¸â€œâ€¹ {} files in queue", self.pending_files.len()))
+                        RichText::new(format!("{} files in queue", self.pending_files.len()))
                             .color(egui::Color32::from_rgb(100, 150, 255)),
                     );
 
                     ui.label(
-                        RichText::new("(Alt+Ã¢â€ â€™ for next)")
+                        RichText::new("(Alt+Right for next)")
                             .color(egui::Color32::GRAY)
                             .italics(),
                     );
@@ -1482,7 +1439,8 @@ impl MarkdownViewerApp {
                         ui.label(format!("Version: {}", BUILD_VERSION));
                         ui.label(format!("Built: {}", BUILD_TIMESTAMP));
                     });
-                                                            let wrap_label = if self.table_wrap_overhaul_enabled {
+
+                    let wrap_label = if self.table_wrap_overhaul_enabled {
                         RichText::new("Wrap: Overhaul").color(Color32::from_rgb(120, 200, 255))
                     } else {
                         RichText::new("Wrap: Legacy").color(Color32::from_rgb(140, 140, 140))
@@ -1491,7 +1449,8 @@ impl MarkdownViewerApp {
                         let (hits, misses) = self.renderer.table_layout_cache_stats();
                         let (rendered_rows, total_rows) = self.renderer.table_render_stats();
                         let row_info = if total_rows > 0 {
-                            format!("\nRows rendered this frame: {} / {}", rendered_rows, total_rows)
+                            format!("
+Rows rendered this frame: {} / {}", rendered_rows, total_rows)
                         } else {
                             String::new()
                         };
@@ -1500,7 +1459,7 @@ impl MarkdownViewerApp {
                             hits, misses, row_info
                         )
                     } else {
-                        "Legacy table renderer active. Toggle via View ▸ Table Wrap Overhaul or CLI flag.".to_string()
+                        "Legacy table renderer active. Toggle via View > Table Wrap Overhaul or CLI flag.".to_string()
                     };
                     ui.label(wrap_label).on_hover_text(cache_tip);
                 });
@@ -1557,9 +1516,9 @@ impl MarkdownViewerApp {
                     ui.vertical_centered(|ui| {
                         ui.add_space(screen_rect.height() / 2.0 - 80.0);
 
-                        // Main message with file emoji
+                        // Main message
                         ui.label(
-                            RichText::new("Ã°Å¸â€œâ€ž Drop files to open")
+                            RichText::new("Drop files to open")
                                 .size(36.0)
                                 .color(egui::Color32::WHITE)
                                 .strong(),
@@ -1680,7 +1639,7 @@ impl eframe::App for MarkdownViewerApp {
         let central_response = CentralPanel::default().show(ctx, |ui| {
             // Show error message if any
             if let Some(ref error) = self.error_message {
-                ui.colored_label(Color32::RED, format!("Ã¢Å¡Â  Error: {}", error));
+                ui.colored_label(Color32::RED, format!("Error: {}", error));
                 ui.separator();
             }
 
@@ -1736,7 +1695,7 @@ impl eframe::App for MarkdownViewerApp {
                             ui.label("Open a markdown file or select a sample to get started.");
                             ui.add_space(20.0);
 
-                            if ui.button("Ã°Å¸â€œÂ Open File").clicked() {
+                            if ui.button("Open File").clicked() {
                                 self.open_file_dialog();
                             }
                         });
@@ -1855,18 +1814,18 @@ impl eframe::App for MarkdownViewerApp {
 
         // Add context menu for the main panel
         central_response.response.context_menu(|ui| {
-            ui.label("Ã°Å¸â€™Â¡ Select text, then use Ctrl+C to copy");
+            ui.label("Select text, then use Ctrl+C to copy");
             ui.separator();
 
             // Copy All Text option
-            if ui.button("Ã°Å¸â€œâ€¹ Copy All Text").clicked() {
+            if ui.button("Copy All Text").clicked() {
                 let all_text = MarkdownRenderer::elements_to_plain_text(&self.parsed_elements);
                 ui.ctx().copy_text(all_text);
                 ui.close_menu();
             }
 
             // Copy as Markdown (Raw) option
-            if ui.button("Ã°Å¸â€œâ€¹ Copy as Markdown").clicked() {
+            if ui.button("Copy as Markdown").clicked() {
                 ui.ctx().copy_text(self.current_content.clone());
                 ui.close_menu();
             }
@@ -1874,12 +1833,12 @@ impl eframe::App for MarkdownViewerApp {
             ui.separator();
 
             // Navigation shortcuts
-            if ui.button("Ã¢Â¬â€  Go to Top").clicked() {
+            if ui.button("Go to Top").clicked() {
                 self.nav_request = Some(NavigationRequest::Top);
                 ui.close_menu();
             }
 
-            if ui.button("Ã¢Â¬â€¡ Go to Bottom").clicked() {
+            if ui.button("Go to Bottom").clicked() {
                 self.nav_request = Some(NavigationRequest::Bottom);
                 ui.close_menu();
             }
@@ -2135,7 +2094,7 @@ mod tests {
         temp_file.write_all(b"Line 1\r\nLine 2\r\n\r\nParagraph text")?;
         temp_file.flush()?;
 
-        app.load_file(temp_file.path().to_path_buf())?;
+        app.load_file(temp_file.path().to_path_buf(), true)?;
 
         // Should not contain any \r characters after normalization
         assert!(!app.current_content.contains('\r'));
@@ -2153,7 +2112,7 @@ mod tests {
         temp_file.write_all(b"Line 1\r\nLine 2\nLine 3\rLine 4")?;
         temp_file.flush()?;
 
-        app.load_file(temp_file.path().to_path_buf())?;
+        app.load_file(temp_file.path().to_path_buf(), true)?;
 
         // All should be normalized to \n
         assert!(!app.current_content.contains('\r'));
@@ -2224,7 +2183,7 @@ mod tests {
         temp_file.flush()?;
 
         let path = temp_file.path().to_path_buf();
-        app.load_file(path.clone())?;
+        app.load_file(path.clone(), true)?;
 
         assert_eq!(app.current_content, content);
         assert_eq!(app.current_file, Some(path));
@@ -2263,7 +2222,7 @@ mod tests {
         let mut app = MarkdownViewerApp::new();
         let fake_path = PathBuf::from("/nonexistent/file.md");
 
-        let result = app.load_file(fake_path);
+        let result = app.load_file(fake_path, true);
         assert!(result.is_err());
     }
 
@@ -2278,7 +2237,7 @@ mod tests {
         temp_file.flush()?;
 
         let path = temp_file.path().to_path_buf();
-        app.load_file(path.clone())?;
+        app.load_file(path.clone(), true)?;
         assert!(app.current_content.contains("Version 1"));
 
         // Update file content
@@ -2301,7 +2260,7 @@ mod tests {
         temp_file.write_all(bytes)?;
         temp_file.flush()?;
 
-        app.load_file(temp_file.path().to_path_buf())?;
+        app.load_file(temp_file.path().to_path_buf(), true)?;
 
         assert!(app.current_content.contains('\u{FFFD}'));
         assert!(!app.parsed_elements.is_empty());
@@ -2722,7 +2681,7 @@ The end.
         std::fs::write(&file2, "# File 2")?;
 
         // Load first file and queue second
-        app.load_file(file1.clone())?;
+        app.load_file(file1.clone(), true)?;
         app.pending_files.push_back(file2.clone());
 
         assert!(app.can_navigate_forward());

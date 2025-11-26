@@ -1370,7 +1370,7 @@ impl MarkdownRenderer {
                                     let marker = if ordered_child {
                                         format!("{}.", idx + 1)
                                     } else {
-                                        "•".to_string()
+                                        "-".to_string()
                                     };
                                     spans.push(InlineSpan::Text(format!("{}{} ", indent, marker)));
                                     spans.extend(child);
@@ -1688,7 +1688,7 @@ impl MarkdownRenderer {
 
                 // Add context menu for code
                 response.context_menu(|ui| {
-                    if ui.button("📋 Copy Code").clicked() {
+                    if ui.button("Copy Code").clicked() {
                         ui.ctx().copy_text(code.clone());
                         ui.close_menu();
                     }
@@ -1751,16 +1751,16 @@ impl MarkdownRenderer {
 
                 // Add context menu for links
                 r.context_menu(|ui| {
-                    if ui.button("🔗 Open Link").clicked() {
+                    if ui.button("Open Link").clicked() {
                         self.trigger_link(url);
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("📋 Copy Link Text").clicked() {
+                    if ui.button("Copy Link Text").clicked() {
                         ui.ctx().copy_text(text.clone());
                         ui.close_menu();
                     }
-                    if ui.button("📋 Copy Link URL").clicked() {
+                    if ui.button("Copy Link URL").clicked() {
                         ui.ctx().copy_text(url.clone());
                         ui.close_menu();
                     }
@@ -1927,11 +1927,11 @@ impl MarkdownRenderer {
         // Note: Due to egui limitations, selection is cleared on right-click
         // As a workaround, we provide "Copy Text" for the segment
         response.context_menu(|ui| {
-            if ui.button("📋 Copy Text").clicked() {
+            if ui.button("Copy Text").clicked() {
                 ui.ctx().copy_text(text.to_string());
                 ui.close_menu();
             }
-            ui.label("💡 Tip: Use Ctrl+C to copy selected text");
+            ui.label("Tip: Use Ctrl+C to copy selected text");
         });
     }
 
@@ -1970,11 +1970,11 @@ impl MarkdownRenderer {
 
         // Add context menu for highlighted text
         response.context_menu(|ui| {
-            if ui.button("📋 Copy Text").clicked() {
+            if ui.button("Copy Text").clicked() {
                 ui.ctx().copy_text(text.to_string());
                 ui.close_menu();
             }
-            ui.label("💡 Tip: Use Ctrl+C to copy selected text");
+            ui.label("Tip: Use Ctrl+C to copy selected text");
         });
     }
 
@@ -2077,23 +2077,24 @@ impl MarkdownRenderer {
     fn is_known_emoji(c: char) -> bool {
         matches!(
             c,
-            '🎉' | '✅'
-                | '🚀'
-                | '🙂'
-                | '😀'
-                | '😉'
-                | '⭐'
-                | '🔥'
-                | '👍'
-                | '👎'
-                | '💡'
-                | '❓'
-                | '❗'
-                | '📝'
-                | '🧠'
-                | '🧪'
-                | '📦'
-                | '🔧'
+            '\u{1f389}' // 🎉
+                | '\u{2705}' // ✅
+                | '\u{1f680}' // 🚀
+                | '\u{1f642}' // 🙂
+                | '\u{1f600}' // 😀
+                | '\u{1f609}' // 😉
+                | '\u{2b50}'  // ⭐
+                | '\u{1f525}' // 🔥
+                | '\u{1f44d}' // 👍
+                | '\u{1f44e}' // 👎
+                | '\u{1f4a1}' // 💡
+                | '\u{2753}'  // ❓
+                | '\u{2757}'  // ❗
+                | '\u{1f4dd}' // 📝
+                | '\u{1f9e0}' // 🧠
+                | '\u{1f9ea}' // 🧪
+                | '\u{1f4e6}' // 📦
+                | '\u{1f527}' // 🔧
         )
     }
 
@@ -2127,7 +2128,7 @@ impl MarkdownRenderer {
     }
 
     // Expand ^...^ segments into Unicode superscript characters when available.
-    // Example: "5^th^" -> "5ᵗʰ"
+    // Example: "5^th^" -> "5??"
     fn expand_superscripts(s: &str) -> String {
         if !s.contains('^') {
             return s.to_string();
@@ -2136,8 +2137,7 @@ impl MarkdownRenderer {
         let mut chars = s.chars().peekable();
         while let Some(c) = chars.next() {
             if c == '^' {
-                // Look ahead to see if there's a matching closing caret
-                // within reasonable bounds (max 10 chars for superscript)
+                // Look ahead to see if there's a matching closing caret within reasonable bounds
                 let mut buf = String::new();
                 let mut found_closing = false;
                 let mut temp_chars = chars.clone();
@@ -2148,11 +2148,9 @@ impl MarkdownRenderer {
                         found_closing = true;
                         break;
                     }
-                    // Only allow alphanumeric and basic symbols in superscript
                     if !nc.is_alphanumeric() && !matches!(nc, '+' | '-' | '=' | '(' | ')') {
                         break;
                     }
-                    // Limit superscript length to something reasonable
                     if char_count >= 10 {
                         break;
                     }
@@ -2161,7 +2159,6 @@ impl MarkdownRenderer {
                 }
 
                 if found_closing && char_count > 0 {
-                    // We have a valid pair, collect the content
                     for _ in 0..char_count {
                         if let Some(nc) = chars.next() {
                             buf.push(nc);
@@ -2171,7 +2168,6 @@ impl MarkdownRenderer {
                     chars.next();
                     out.push_str(&Self::to_superscript(&buf));
                 } else {
-                    // No valid pair, keep the caret as-is
                     out.push('^');
                 }
             } else {
@@ -2184,47 +2180,47 @@ impl MarkdownRenderer {
     fn to_superscript(s: &str) -> String {
         s.chars()
             .map(|c| match c {
-                '0' => '⁰',
-                '1' => '¹',
-                '2' => '²',
-                '3' => '³',
-                '4' => '⁴',
-                '5' => '⁵',
-                '6' => '⁶',
-                '7' => '⁷',
-                '8' => '⁸',
-                '9' => '⁹',
-                '+' => '⁺',
-                '-' => '⁻',
-                '=' => '⁼',
-                '(' => '⁽',
-                ')' => '⁾',
-                'a' | 'A' => 'ᵃ',
-                'b' | 'B' => 'ᵇ',
-                'c' | 'C' => 'ᶜ',
-                'd' | 'D' => 'ᵈ',
-                'e' | 'E' => 'ᵉ',
-                'f' | 'F' => 'ᶠ',
-                'g' | 'G' => 'ᵍ',
-                'h' | 'H' => 'ʰ',
-                'i' | 'I' => 'ⁱ',
-                'j' | 'J' => 'ʲ',
-                'k' | 'K' => 'ᵏ',
-                'l' | 'L' => 'ˡ',
-                'm' | 'M' => 'ᵐ',
-                'n' | 'N' => 'ⁿ',
-                'o' | 'O' => 'ᵒ',
-                'p' | 'P' => 'ᵖ',
-                'q' | 'Q' => 'ᑫ', // fallback; approximate
-                'r' | 'R' => 'ʳ',
-                's' | 'S' => 'ˢ',
-                't' | 'T' => 'ᵗ',
-                'u' | 'U' => 'ᵘ',
-                'v' | 'V' => 'ᵛ',
-                'w' | 'W' => 'ʷ',
-                'x' | 'X' => 'ˣ',
-                'y' | 'Y' => 'ʸ',
-                'z' | 'Z' => 'ᶻ',
+                '0' => '\u{2070}',
+                '1' => '\u{00b9}',
+                '2' => '\u{00b2}',
+                '3' => '\u{00b3}',
+                '4' => '\u{2074}',
+                '5' => '\u{2075}',
+                '6' => '\u{2076}',
+                '7' => '\u{2077}',
+                '8' => '\u{2078}',
+                '9' => '\u{2079}',
+                '+' => '\u{207a}',
+                '-' => '\u{207b}',
+                '=' => '\u{207c}',
+                '(' => '\u{207d}',
+                ')' => '\u{207e}',
+                'a' | 'A' => '\u{1d43}',
+                'b' | 'B' => '\u{1d47}',
+                'c' | 'C' => '\u{1d9c}',
+                'd' | 'D' => '\u{1d48}',
+                'e' | 'E' => '\u{1d49}',
+                'f' | 'F' => '\u{1da0}',
+                'g' | 'G' => '\u{1d4d}',
+                'h' | 'H' => '\u{02b0}',
+                'i' | 'I' => '\u{2071}',
+                'j' | 'J' => '\u{02b2}',
+                'k' | 'K' => '\u{1d4f}',
+                'l' | 'L' => '\u{02e1}',
+                'm' | 'M' => '\u{1d50}',
+                'n' | 'N' => '\u{207f}',
+                'o' | 'O' => '\u{1d52}',
+                'p' | 'P' => '\u{1d56}',
+                'q' | 'Q' => '\u{1d56}',
+                'r' | 'R' => '\u{02b3}',
+                's' | 'S' => '\u{02e2}',
+                't' | 'T' => '\u{1d57}',
+                'u' | 'U' => '\u{1d58}',
+                'v' | 'V' => '\u{1d5b}',
+                'w' | 'W' => '\u{02b7}',
+                'x' | 'X' => '\u{02e3}',
+                'y' | 'Y' => '\u{02b8}',
+                'z' | 'Z' => '\u{1dbb}',
                 other => other,
             })
             .collect()
@@ -2232,7 +2228,6 @@ impl MarkdownRenderer {
 
     fn generate_emoji_image(&self, emoji: &str, size: usize) -> egui::ColorImage {
         // Simple procedural placeholder icons to keep binary small and avoid external assets
-        // Each emoji gets a colored circle and a simple accent
         use egui::Color32 as C;
         let mut img = egui::ColorImage::new([size, size], C::TRANSPARENT);
         let cx = (size as i32) / 2;
@@ -2240,12 +2235,22 @@ impl MarkdownRenderer {
         let r = (size as i32) / 2 - 2;
 
         let (base, accent) = match emoji {
-            "🎉" => (C::from_rgb(255, 215, 0), C::from_rgb(255, 80, 80)),
-            "✅" => (C::from_rgb(30, 150, 30), C::WHITE),
-            "🚀" => (C::from_rgb(70, 70, 200), C::from_rgb(255, 100, 100)),
-            "🙂" => (C::from_rgb(255, 205, 64), C::from_rgb(90, 60, 10)),
-            "😀" => (C::from_rgb(255, 205, 64), C::from_rgb(90, 60, 10)),
-            "😉" => (C::from_rgb(255, 205, 64), C::from_rgb(90, 60, 10)),
+            "\u{1f389}" => (C::from_rgb(255, 215, 0), C::from_rgb(255, 80, 80)),
+            "\u{2705}" => (C::from_rgb(30, 150, 30), C::WHITE),
+            "\u{1f680}" => (C::from_rgb(70, 70, 200), C::from_rgb(255, 100, 100)),
+            "\u{1f642}" | "\u{1f600}" | "\u{1f609}" => {
+                (C::from_rgb(255, 205, 64), C::from_rgb(90, 60, 10))
+            }
+            "\u{2b50}" => (C::from_rgb(255, 215, 0), C::WHITE),
+            "\u{1f525}" => (C::from_rgb(255, 120, 50), C::from_rgb(255, 200, 120)),
+            "\u{1f44d}" | "\u{1f44e}" => (C::from_rgb(200, 200, 200), C::from_rgb(80, 80, 80)),
+            "\u{1f4a1}" => (C::from_rgb(255, 240, 120), C::from_rgb(255, 255, 255)),
+            "\u{2753}" | "\u{2757}" => (C::from_rgb(70, 70, 200), C::from_rgb(255, 255, 255)),
+            "\u{1f4dd}" => (C::from_rgb(240, 240, 200), C::from_rgb(140, 140, 140)),
+            "\u{1f9e0}" => (C::from_rgb(220, 160, 200), C::from_rgb(255, 255, 255)),
+            "\u{1f9ea}" => (C::from_rgb(180, 220, 255), C::from_rgb(120, 160, 240)),
+            "\u{1f4e6}" => (C::from_rgb(205, 170, 125), C::from_rgb(150, 110, 70)),
+            "\u{1f527}" => (C::from_rgb(160, 170, 180), C::from_rgb(220, 220, 220)),
             _ => (C::from_rgb(180, 180, 180), C::WHITE),
         };
 
@@ -2272,6 +2277,7 @@ impl MarkdownRenderer {
         img
     }
 
+    /// Render a list with proper inline formatting, including simple nested lines
     /// Render a list with proper inline formatting, including simple nested lines
     fn render_list(&self, ui: &mut egui::Ui, ordered: bool, items: &[Vec<InlineSpan>]) {
         if items.is_empty() {
@@ -2309,7 +2315,7 @@ impl MarkdownRenderer {
                         let marker = if ordered {
                             format!("{}.", index + 1)
                         } else {
-                            "•".to_string()
+                            "-".to_string()
                         };
                         let marker_color = if ui.visuals().dark_mode {
                             Color32::from_rgb(180, 180, 180)
@@ -2469,12 +2475,12 @@ impl MarkdownRenderer {
 
         // Add context menu for code blocks
         frame_response.response.context_menu(|ui| {
-            if ui.button("📋 Copy Code").clicked() {
+            if ui.button("Copy Code").clicked() {
                 ui.ctx().copy_text(code.to_string());
                 ui.close_menu();
             }
             if let Some(lang) = language {
-                if ui.button(format!("📋 Copy as {}", lang)).clicked() {
+                if ui.button(format!("Copy as {}", lang)).clicked() {
                     // Include language identifier for better pasting
                     ui.ctx().copy_text(format!("```{}\n{}\n```", lang, code));
                     ui.close_menu();
@@ -3785,9 +3791,15 @@ impl MarkdownRenderer {
     fn trigger_link(&self, url: &str) {
         if let Some(fragment) = Self::extract_fragment(url) {
             *self.pending_anchor.borrow_mut() = Some(fragment);
-        } else {
+        } else if Self::is_allowed_scheme(url) {
             self.open_url(url);
+        } else {
+            eprintln!("Blocked link with unsupported scheme: {}", url);
         }
+    }
+
+    fn is_allowed_scheme(url: &str) -> bool {
+        url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:")
     }
 
     /// Consume and return the last clicked internal anchor, if any
@@ -4191,8 +4203,8 @@ mod tests {
     fn test_superscript_expansion_basic() {
         let s = "5^th^ and m^2^";
         let out = MarkdownRenderer::expand_superscripts(s);
-        assert!(out.contains("ᵗʰ"));
-        assert!(out.contains("²"));
+        assert!(out.contains("5ᵗʰ"));
+        assert!(out.contains("m²"));
     }
 
     #[test]
@@ -4217,7 +4229,7 @@ mod tests {
         let mixed = "Use 2^32 for math and 5^th^ for ordinal";
         let result = MarkdownRenderer::expand_superscripts(mixed);
         assert!(result.contains("2^32"), "Single caret should be preserved");
-        assert!(result.contains("ᵗʰ"), "Paired carets should be converted");
+        assert!(result.contains("5ᵗʰ"), "Paired carets should be converted");
     }
 
     #[test]

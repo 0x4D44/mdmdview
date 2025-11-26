@@ -71,7 +71,7 @@ fn main() -> Result<(), eframe::Error> {
             // Load initial file if provided via command line
             if let Some(file_path) = initial_file {
                 if file_path.exists() && file_path.is_file() {
-                    if let Err(e) = app.load_file(file_path) {
+                    if let Err(e) = app.load_file(file_path, true) {
                         eprintln!("Failed to load file: {}", e);
                         // Continue with default welcome screen
                     }
