@@ -71,74 +71,6 @@ Enjoy reading your markdown files with this lightweight, efficient viewer!
 *Built with ❤️ using Rust, egui, and pulldown-cmark*
 "#;
 
-const SEARCH_GUIDE_CONTENT: &str = r#"# Search Tips & Examples
-
-MarkdownView's search panel is accent-aware and case-insensitive. A single query matches multiple spellings automatically.
-
-## Accent Folding
-
-- Typing `resume` highlights `résumé`, `RESUME`, and `résume` (precomposed vs. combining accent).
-- `istanbul` matches both `İstanbul` (Turkish dotted capital I) and `ISTANBUL`.
-- `sao` finds `São`, `SÃO`, and `São` regardless of combining marks.
-- `nino` finds `Niño`, `NINO`, and `niño`.
-
-Try opening this sample, pressing `Ctrl+F`, and searching for the words below:
-
-| Query | Matches in this document |
-|-------|-------------------------|
-| `resume` | résumé, RESUME, résume |
-| `istanbul` | İstanbul, ISTANBUL |
-| `sao` | São, SÃO, São |
-| `nino` | Niño, NINO, niño |
-
-> Tip: Use `Enter` / `Shift+Enter` to cycle through matches. The highlight respects grapheme clusters, so emoji and combined characters stay intact.
-
-"#;
-
-/// Images and diagrams examples
-const IMAGES_CONTENT: &str = r#"# Inline Images & Diagrams
-
-This sample demonstrates inline images and Mermaid code blocks.
-
-## PNG Image
-
-Below is a PNG image using an embedded emoji asset.
-
-![Smiley PNG](assets/emoji/1f600.png "PNG emoji sample")
-
-## SVG Image
-
-An SVG logo rendered via resvg/tiny-skia.
-
-![SVG Logo](assets/samples/logo.svg "SVG sample logo")
-
-## WEBP Image
-
-A small WEBP sample is bundled for testing.
-
-![WEBP Sample](assets/samples/webp_sample.webp "WEBP sample")
-
-## Mermaid Diagram (feature-gated)
-
-When the `mermaid-quickjs` feature is enabled, Mermaid code blocks are rendered as diagrams.
-Otherwise, the source is shown with an informational note.
-
-```mermaid
-graph TD;
-    A[Start] --> B{Is SVG supported?};
-    B -- Yes --> C[Rasterize via resvg];
-    B -- No  --> D[Show placeholder];
-    C --> E[Display egui texture];
-    D --> E;
-```
-
-## Notes
-
-- The WEBP sample is at `assets/samples/webp_sample.webp`. See `examples/webp_test.md` for a standalone test file.
-
-"#;
-
-/// Comprehensive formatting examples
 const FORMATTING_CONTENT: &str = r#"# Markdown Formatting Guide
 
 This document demonstrates the various formatting options supported by MarkdownView.
@@ -154,7 +86,7 @@ This document demonstrates the various formatting options supported by MarkdownV
 - [Horizontal Rules](#horizontal-rules)
 - [Tables](#tables)
 
-Quick jump: [Go to Lists](#lists) • [Go to Tables](#tables)
+Quick jump: [Go to Lists](#lists) ΓÇó [Go to Tables](#tables)
 
 ## Text Formatting
 
@@ -206,7 +138,7 @@ Links are clickable and will open in your default browser.
 ## Emojis
 
 Unicode emojis render as normal text if your font supports them.
-Examples: Thanks! 🎉  Status: ✅  Ship it 🚀
+Examples: Thanks! ≡ƒÄë  Status: Γ£à  Ship it ≡ƒÜÇ
 
 Shortcodes like `:rocket:` and `:tada:` are expanded to emoji images in normal text, headers, and list items.
 
@@ -225,11 +157,11 @@ Shortcodes like `:rocket:` and `:tada:` are expanded to emoji images in normal t
 
 | Feature | Supported | Notes |
 |---------|-----------|-------|
-| Headers | ✅ | All levels 1-6 |
-| Lists | ✅ | Ordered and unordered |
-| Code blocks | ✅ | With syntax highlighting |
-| Tables | ✅ | Basic table support |
-| Links | ✅ | Opens in browser; internal anchors scroll in‑document |
+| Headers | Γ£à | All levels 1-6 |
+| Lists | Γ£à | Ordered and unordered |
+| Code blocks | Γ£à | With syntax highlighting |
+| Tables | Γ£à | Basic table support |
+| Links | Γ£à | Opens in browser; internal anchors scroll inΓÇædocument |
 
 ---
 
@@ -238,6 +170,66 @@ Shortcodes like `:rocket:` and `:tada:` are expanded to emoji images in normal t
 "#;
 
 /// Code examples with syntax highlighting
+
+const SEARCH_GUIDE_CONTENT: &str = concat!(
+    "# Search Tips & Examples\n\n",
+    "MarkdownView's search panel is accent-aware and case-insensitive. A single query matches multiple spellings automatically.\n\n",
+    "## Accent Folding\n\n",
+    "- Typing `resume` highlights `r\u{00e9}sum\u{00e9}`, `RESUME`, and `re\u{0301}sume` (precomposed vs. combining accent).\n",
+    "- `istanbul` matches both `\u{0130}stanbul` (Turkish dotted capital I) and `ISTANBUL`.\n",
+    "- `sao` finds `S\u{00e3}o`, `SAO`, and `Sao` regardless of combining marks.\n",
+    "- `nino` finds `Ni\u{00f1}o`, `NINO`, and `nin\u{0303}o`.\n\n",
+    "Try opening this sample, pressing `Ctrl+F`, and searching for the words below:\n\n",
+    "| Query | Matches in this document |\n",
+    "|-------|-------------------------|\n",
+    "| `resume` | r\u{00e9}sum\u{00e9}, RESUME, re\u{0301}sume |\n",
+    "| `istanbul` | \u{0130}stanbul, ISTANBUL |\n",
+    "| `sao` | S\u{00e3}o, SAO, Sao |\n",
+    "| `nino` | Ni\u{00f1}o, NINO, nin\u{0303}o |\n\n",
+    "> Tip: Use `Enter` / `Shift+Enter` to cycle through matches. The highlight respects grapheme clusters, so emoji and combined characters stay intact.\n\n",
+);
+const IMAGES_CONTENT: &str = r#"# Inline Images & Diagrams
+
+This sample demonstrates inline images and Mermaid code blocks.
+
+## PNG Image
+
+Below is a PNG image using an embedded emoji asset.
+
+![Smiley PNG](assets/emoji/1f600.png "PNG emoji sample")
+
+## SVG Image
+
+An SVG logo rendered via resvg/tiny-skia.
+
+![SVG Logo](assets/samples/logo.svg "SVG sample logo")
+
+## WEBP Image
+
+A small WEBP sample is bundled for testing.
+
+![WEBP Sample](assets/samples/webp_sample.webp "WEBP sample")
+
+## Mermaid Diagram (feature-gated)
+
+When the `mermaid-quickjs` feature is enabled, Mermaid code blocks are rendered as diagrams.
+Otherwise, the source is shown with an informational note.
+
+```mermaid
+graph TD;
+    A[Start] --> B{Is SVG supported?};
+    B -- Yes --> C[Rasterize via resvg];
+    B -- No  --> D[Show placeholder];
+    C --> E[Display egui texture];
+    D --> E;
+```
+
+## Notes
+
+- The WEBP sample is at `assets/samples/webp_sample.webp`. See `examples/webp_test.md` for a standalone test file.
+
+"#;
+
 const CODE_CONTENT: &str = r#"# Code Examples
 
 MarkdownView supports syntax highlighting for many programming languages.
@@ -344,6 +336,7 @@ You can also use `inline code` within paragraphs, like `let x = 42;` or `print("
 "#;
 
 /// Usage instructions and tips
+
 const USAGE_CONTENT: &str = r#"# Usage Instructions
 
 ## Opening Files

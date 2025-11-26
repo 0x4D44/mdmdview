@@ -1,19 +1,20 @@
 use egui::Color32 as C;
 
+// Draw simple vector fallback icons for a subset of emoji.
 pub fn make_image(emoji: &str, size: usize) -> Option<egui::ColorImage> {
     let mut img = egui::ColorImage::new([size, size], C::TRANSPARENT);
     match emoji {
-        "✅" => {
+        "\u{2705}" => {
             draw_circle(&mut img, size, C::from_rgb(34, 139, 34));
             draw_check(&mut img, size, C::WHITE);
             Some(img)
         }
-        "🎉" => {
+        "\u{1f389}" => {
             draw_circle(&mut img, size, C::from_rgb(255, 215, 0));
             confetti(&mut img, size);
             Some(img)
         }
-        "🚀" => {
+        "\u{1f680}" => {
             draw_circle(&mut img, size, C::from_rgb(60, 60, 170));
             rocket(
                 &mut img,
@@ -23,15 +24,15 @@ pub fn make_image(emoji: &str, size: usize) -> Option<egui::ColorImage> {
             );
             Some(img)
         }
-        "❤️" | "❤" => {
+        "\u{2764}" | "\u{1f496}" => {
             heart(&mut img, size, C::from_rgb(220, 20, 60));
             Some(img)
         }
-        "⭐" => {
+        "\u{2b50}" => {
             star(&mut img, size, C::from_rgb(255, 215, 0));
             Some(img)
         }
-        "🔥" => {
+        "\u{1f525}" => {
             flame(&mut img, size);
             Some(img)
         }
@@ -119,19 +120,13 @@ fn rocket(img: &mut egui::ColorImage, size: usize, body: C, flame: C) {
 
 fn heart(img: &mut egui::ColorImage, size: usize, color: C) {
     let s = size as i32;
-    let cx1 = s / 2 - s / 6;
-    let cx2 = s / 2 + s / 6;
-    let cy = s / 3;
-    let r = s / 6;
     for y in 0..s {
         for x in 0..s {
-            let d1 = (x - cx1) * (x - cx1) + (y - cy) * (y - cy) <= r * r;
-            let d2 = (x - cx2) * (x - cx2) + (y - cy) * (y - cy) <= r * r;
-            let tri = y >= cy
-                && (x >= s / 2 - r)
-                && (x <= s / 2 + r)
-                && (y - cy <= (r * 2 - (x - s / 2).abs()));
-            if d1 || d2 || tri {
+            let dx = x - s / 2;
+            let dy = y - s / 3;
+            let a = (dx * dx + dy * dy - s * s / 16) < 0;
+            let b = x > s / 4 && x < 3 * s / 4 && y > s / 3 && y < s * 3 / 4;
+            if a || b {
                 img[(x as usize, y as usize)] = color;
             }
         }
@@ -140,30 +135,37 @@ fn heart(img: &mut egui::ColorImage, size: usize, color: C) {
 
 fn star(img: &mut egui::ColorImage, size: usize, color: C) {
     let s = size as i32;
-    let cx = s / 2;
-    let cy = s / 2;
-    let r = s / 2 - 2;
-    for t in 0..360 {
-        let rad = (t as f32).to_radians();
-        let rr = if t % 72 < 36 { r } else { r / 2 };
-        let x = cx + (rr as f32 * rad.cos()) as i32;
-        let y = cy + (rr as f32 * rad.sin()) as i32;
-        if x >= 0 && y >= 0 && x < s && y < s {
-            img[(x as usize, y as usize)] = color;
+    for i in 0..s {
+        let y = i;
+        let x1 = s / 2;
+        let x2 = s / 2 - i / 2;
+        let x3 = s / 2 + i / 2;
+        if x2 >= 0 {
+            img[(x2 as usize, y as usize)] = color;
+        }
+        img[(x1 as usize, y as usize)] = color;
+        if x3 < s {
+            img[(x3 as usize, y as usize)] = color;
         }
     }
 }
 
 fn flame(img: &mut egui::ColorImage, size: usize) {
     let s = size as i32;
+    let base = C::from_rgb(255, 140, 0);
+    let tip = C::from_rgb(255, 220, 120);
     for y in 0..s {
         for x in 0..s {
-            let t = y as f32 / s as f32;
-            let r = 255u8;
-            let g = (160.0 * (1.0 - t)) as u8;
-            let b = (40.0 * (1.0 - t)) as u8;
-            if x.abs_diff(s / 2) as f32 + t * (s as f32 / 2.0) < s as f32 / 2.0 {
-                img[(x as usize, y as usize)] = C::from_rgb(r, g, b);
+            let dx = (x - s / 2) as f32 / (s as f32 / 3.5);
+            let dy = (y - s) as f32 / (s as f32 / 1.5);
+            let v = (dx * dx + dy * dy).sqrt();
+            if v < 1.0 {
+                let t = 1.0 - v;
+                img[(x as usize, y as usize)] = C::from_rgb(
+                    (base.r() as f32 * t + tip.r() as f32 * (1.0 - t)) as u8,
+                    (base.g() as f32 * t + tip.g() as f32 * (1.0 - t)) as u8,
+                    (base.b() as f32 * t + tip.b() as f32 * (1.0 - t)) as u8,
+                );
             }
         }
     }
