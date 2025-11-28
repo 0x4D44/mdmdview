@@ -922,7 +922,7 @@ impl MarkdownRenderer {
     /// Extract plain text from all markdown elements
     pub fn elements_to_plain_text(elements: &[MarkdownElement]) -> String {
         let mut result = String::new();
-        for (_element_idx, element) in elements.iter().enumerate() {
+        for element in elements.iter() {
             match element {
                 MarkdownElement::Paragraph(spans) | MarkdownElement::Header { spans, .. } => {
                     if !result.is_empty() {
@@ -3362,7 +3362,11 @@ impl MarkdownRenderer {
             .map(|idx| self.row_height_hint(table_id, idx))
             .collect();
 
-        let mut column_widths = vec![0.0f32; column_specs.len()];
+        // Use RefCell to allow capturing widths from body closure.
+        // BUG FIX: Previously captured ui.min_rect().width() which is the cell *content* width.
+        // Now we capture body.widths() which gives the actual *allocated* column widths.
+        // See: https://docs.rs/egui_extras/latest/egui_extras/struct.TableBody.html#method.widths
+        let column_widths: RefCell<Vec<f32>> = RefCell::new(vec![0.0f32; column_specs.len()]);
         let mut table_rect: Option<egui::Rect> = None;
         let mut clip_rect: Option<egui::Rect> = None;
         let mut painter: Option<Painter> = None;
@@ -3377,7 +3381,8 @@ impl MarkdownRenderer {
                         let width = ui.available_width().max(1.0);
                         let spans = headers.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
                         let _ = self.render_overhauled_cell(ui, spans, width, true, None, ci);
-                        column_widths[ci] = ui.min_rect().width();
+                        // NOTE: Do NOT capture ui.min_rect().width() here - that's the content width,
+                        // not the column width. Column widths are captured from body.widths() below.
                         Self::extend_table_rect(&mut table_rect, ui.min_rect());
                         if clip_rect.is_none() {
                             clip_rect = Some(ui.clip_rect());
@@ -3389,6 +3394,10 @@ impl MarkdownRenderer {
                 }
             })
             .body(|body| {
+                // Capture the actual allocated column widths from the table layout system.
+                // This MUST be done before heterogeneous_rows() consumes the body.
+                *column_widths.borrow_mut() = body.widths().to_vec();
+
                 let row_height_hints = row_heights.clone();
                 body.heterogeneous_rows(row_height_hints.into_iter(), |mut row| {
                     let idx = row.index();
@@ -3424,15 +3433,18 @@ impl MarkdownRenderer {
 
         ui.spacing_mut().item_spacing = prev_spacing;
 
+        // Extract column widths from RefCell for use in divider painting
+        let widths = column_widths.into_inner();
+
         if let (Some(rect), Some(clip_rect), Some(painter), Some(visuals), Some(ctx)) =
             (table_rect, clip_rect, painter, visuals, ctx_snapshot)
         {
-            if column_specs.len() == column_widths.len() && column_widths.iter().any(|w| *w > 0.0) {
+            if column_specs.len() == widths.len() && widths.iter().any(|w| *w > 0.0) {
                 let frame_id = ctx.frame_nr();
-                let change = self.record_resolved_widths(table_id, frame_id, &column_widths);
-                self.persist_resizable_widths(table_id, &column_specs, &column_widths);
+                let change = self.record_resolved_widths(table_id, frame_id, &widths);
+                self.persist_resizable_widths(table_id, &column_specs, &widths);
                 self.handle_width_change(&ctx, table_id, change);
-                self.paint_table_dividers(&painter, &visuals, rect, clip_rect, &column_widths);
+                self.paint_table_dividers(&painter, &visuals, rect, clip_rect, &widths);
                 if height_growth {
                     ctx.request_repaint();
                 }
@@ -3528,6 +3540,12 @@ impl MarkdownRenderer {
         }
     }
 
+    /// Paint vertical dividers between table columns and an outer border.
+    ///
+    /// # Arguments
+    /// * `widths` - The actual allocated column widths from `TableBody::widths()`.
+    ///   IMPORTANT: These must NOT be cell content widths from `ui.min_rect()`,
+    ///   which would cause dividers to be misaligned.
     fn paint_table_dividers(
         &self,
         painter: &Painter,
