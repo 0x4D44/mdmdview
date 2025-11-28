@@ -170,7 +170,6 @@ Shortcodes like `:rocket:` and `:tada:` are expanded to emoji images in normal t
 "#;
 
 /// Code examples with syntax highlighting
-
 const SEARCH_GUIDE_CONTENT: &str = concat!(
     "# Search Tips & Examples\n\n",
     "MarkdownView's search panel is accent-aware and case-insensitive. A single query matches multiple spellings automatically.\n\n",
@@ -336,7 +335,6 @@ You can also use `inline code` within paragraphs, like `let x = 42;` or `print("
 "#;
 
 /// Usage instructions and tips
-
 const USAGE_CONTENT: &str = r#"# Usage Instructions
 
 ## Opening Files
