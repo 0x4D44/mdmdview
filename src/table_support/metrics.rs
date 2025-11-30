@@ -18,6 +18,9 @@ pub struct TableMetricEntry {
     pub last_discard_frame: Option<u64>,
     pub persisted_column_widths: HashMap<u64, f32>,
     pub pending_user_resize: Option<PendingResize>,
+    /// Font size when widths were last persisted. Used to invalidate
+    /// persisted widths when zoom level changes.
+    pub persisted_font_size: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -103,6 +106,23 @@ impl TableMetricEntry {
     pub fn current_widths(&self) -> &[f32] {
         &self.resolved_widths
     }
+
+    /// Check if font size has changed since widths were last persisted.
+    /// If so, clear all persisted widths and update the stored font size.
+    /// Returns true if widths were cleared.
+    pub fn check_font_size_change(&mut self, current_font_size: f32) -> bool {
+        const FONT_SIZE_EPSILON: f32 = 0.5;
+        if let Some(stored_font) = self.persisted_font_size {
+            if (stored_font - current_font_size).abs() > FONT_SIZE_EPSILON {
+                self.persisted_column_widths.clear();
+                self.persisted_font_size = Some(current_font_size);
+                return true;
+            }
+        } else {
+            self.persisted_font_size = Some(current_font_size);
+        }
+        false
+    }
 }
 
 #[allow(dead_code)]
@@ -160,5 +180,27 @@ mod tests {
         assert_eq!(entry.update_widths(&[100.0, 120.0], 1), WidthChange::None);
         assert_eq!(entry.update_widths(&[100.2, 120.6], 2), WidthChange::Small);
         assert_eq!(entry.update_widths(&[140.0, 120.6], 3), WidthChange::Large);
+    }
+
+    #[test]
+    fn font_size_change_clears_persisted_widths() {
+        let mut entry = TableMetricEntry::default();
+
+        // Set some persisted widths at font size 14.0
+        entry.set_persisted_width(1, 100.0);
+        entry.set_persisted_width(2, 150.0);
+        assert!(!entry.check_font_size_change(14.0)); // First call sets baseline
+        assert_eq!(entry.persisted_width(1), Some(100.0));
+        assert_eq!(entry.persisted_width(2), Some(150.0));
+
+        // Small font size change (within epsilon) should NOT clear
+        assert!(!entry.check_font_size_change(14.3));
+        assert_eq!(entry.persisted_width(1), Some(100.0));
+
+        // Large font size change should clear all persisted widths
+        assert!(entry.check_font_size_change(16.0));
+        assert_eq!(entry.persisted_width(1), None);
+        assert_eq!(entry.persisted_width(2), None);
+        assert_eq!(entry.persisted_font_size, Some(16.0));
     }
 }

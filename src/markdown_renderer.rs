@@ -3367,8 +3367,18 @@ impl MarkdownRenderer {
         // Now we capture body.widths() which gives the actual *allocated* column widths.
         // See: https://docs.rs/egui_extras/latest/egui_extras/struct.TableBody.html#method.widths
         let column_widths: RefCell<Vec<f32>> = RefCell::new(vec![0.0f32; column_specs.len()]);
-        let mut table_rect: Option<egui::Rect> = None;
-        let mut clip_rect: Option<egui::Rect> = None;
+        // Track header and body rects separately for accurate table bounds calculation.
+        // The header rect captures the header row bounds, body_rect captures body row bounds.
+        // These are combined after rendering to get the full table rect.
+        let mut header_rect: Option<egui::Rect> = None;
+        let mut body_rect: Option<egui::Rect> = None;
+        // body_layout_rect captures the allocated layout region from body.max_rect(),
+        // which is more accurate than union of cell min_rects for table width.
+        let body_layout_rect: RefCell<Option<egui::Rect>> = RefCell::new(None);
+        // Track clip rects separately for header and body, then union them.
+        // This ensures dividers respect scroll boundaries for both regions.
+        let mut header_clip_rect: Option<egui::Rect> = None;
+        let body_clip_rect: RefCell<Option<egui::Rect>> = RefCell::new(None);
         let mut painter: Option<Painter> = None;
         let mut visuals: Option<Visuals> = None;
         let mut ctx_snapshot: Option<Context> = None;
@@ -3383,9 +3393,10 @@ impl MarkdownRenderer {
                         let _ = self.render_overhauled_cell(ui, spans, width, true, None, ci);
                         // NOTE: Do NOT capture ui.min_rect().width() here - that's the content width,
                         // not the column width. Column widths are captured from body.widths() below.
-                        Self::extend_table_rect(&mut table_rect, ui.min_rect());
-                        if clip_rect.is_none() {
-                            clip_rect = Some(ui.clip_rect());
+                        // Extend header_rect (not body_rect) for accurate header bounds.
+                        Self::extend_table_rect(&mut header_rect, ui.min_rect());
+                        if header_clip_rect.is_none() {
+                            header_clip_rect = Some(ui.clip_rect());
                             painter = Some(ui.painter().clone());
                             visuals = Some(ui.visuals().clone());
                             ctx_snapshot = Some(ui.ctx().clone());
@@ -3397,6 +3408,10 @@ impl MarkdownRenderer {
                 // Capture the actual allocated column widths from the table layout system.
                 // This MUST be done before heterogeneous_rows() consumes the body.
                 *column_widths.borrow_mut() = body.widths().to_vec();
+
+                // Capture body's layout rect for accurate table width calculation.
+                // This is the allocated region, not the content bounds.
+                *body_layout_rect.borrow_mut() = Some(body.max_rect());
 
                 let row_height_hints = row_heights.clone();
                 body.heterogeneous_rows(row_height_hints.into_iter(), |mut row| {
@@ -3413,12 +3428,16 @@ impl MarkdownRenderer {
                                 .unwrap_or(&[]);
                             cell_height =
                                 self.render_overhauled_cell(ui, spans, width, false, Some(idx), ci);
-                            Self::extend_table_rect(&mut table_rect, ui.min_rect());
-                            if clip_rect.is_none() {
-                                clip_rect = Some(ui.clip_rect());
-                                painter = Some(ui.painter().clone());
-                                visuals = Some(ui.visuals().clone());
-                                ctx_snapshot = Some(ui.ctx().clone());
+                            // Extend body_rect (not header_rect) for accurate body bounds.
+                            Self::extend_table_rect(&mut body_rect, ui.min_rect());
+                            if body_clip_rect.borrow().is_none() {
+                                *body_clip_rect.borrow_mut() = Some(ui.clip_rect());
+                                // Also capture painter/visuals/ctx if not already captured from header
+                                if painter.is_none() {
+                                    painter = Some(ui.painter().clone());
+                                    visuals = Some(ui.visuals().clone());
+                                    ctx_snapshot = Some(ui.ctx().clone());
+                                }
                             }
                         });
                         row_height = row_height.max(cell_height);
@@ -3435,6 +3454,52 @@ impl MarkdownRenderer {
 
         // Extract column widths from RefCell for use in divider painting
         let widths = column_widths.into_inner();
+        let layout_rect = body_layout_rect.into_inner();
+        let body_clip = body_clip_rect.into_inner();
+
+        // Combine header and body clip rects to ensure dividers respect scroll bounds.
+        let clip_rect = match (header_clip_rect, body_clip) {
+            (Some(h), Some(b)) => Some(h.union(b)),
+            (Some(h), None) => Some(h),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+
+        // Calculate accurate table width from column widths.
+        // This is more accurate than union of cell min_rects which may be smaller
+        // than the allocated column space.
+        let calculated_width: f32 = widths.iter().sum();
+
+        // Combine header and body rects into the full table rect.
+        // Use calculated width for accuracy when column widths are available.
+        let table_rect = match (header_rect, body_rect, layout_rect) {
+            // Best case: use header for top/left, body for bottom, calculated width for right
+            (Some(h), Some(b), _) if calculated_width > 0.0 => {
+                let left = h.left().min(b.left());
+                let top = h.top();
+                let bottom = b.bottom();
+                let right = left + calculated_width;
+                Some(egui::Rect::from_min_max(
+                    egui::pos2(left, top),
+                    egui::pos2(right, bottom),
+                ))
+            }
+            // Fallback: use union of header and body
+            (Some(h), Some(b), _) => Some(h.union(b)),
+            // Header only with layout rect
+            (Some(h), None, Some(layout)) if calculated_width > 0.0 => {
+                let left = h.left().min(layout.left());
+                let right = left + calculated_width;
+                Some(egui::Rect::from_min_max(
+                    egui::pos2(left, h.top()),
+                    egui::pos2(right, h.bottom()),
+                ))
+            }
+            (Some(h), None, _) => Some(h),
+            (None, Some(b), _) => Some(b),
+            (None, None, Some(layout)) => Some(layout),
+            (None, None, None) => None,
+        };
 
         if let (Some(rect), Some(clip_rect), Some(painter), Some(visuals), Some(ctx)) =
             (table_rect, clip_rect, painter, visuals, ctx_snapshot)
@@ -3444,7 +3509,14 @@ impl MarkdownRenderer {
                 let change = self.record_resolved_widths(table_id, frame_id, &widths);
                 self.persist_resizable_widths(table_id, &column_specs, &widths);
                 self.handle_width_change(&ctx, table_id, change);
-                self.paint_table_dividers(&painter, &visuals, rect, clip_rect, &widths);
+                self.paint_table_dividers(
+                    &painter,
+                    &visuals,
+                    rect,
+                    clip_rect,
+                    &widths,
+                    header_height,
+                );
                 if height_growth {
                     ctx.request_repaint();
                 }
@@ -3510,6 +3582,11 @@ impl MarkdownRenderer {
         }
         let mut metrics = self.table_metrics.borrow_mut();
         let entry = metrics.entry_mut(table_id);
+
+        // Check if font size changed since last persist - if so, clear old widths
+        // to prevent size mismatch after zoom changes.
+        entry.check_font_size_change(self.font_sizes.body);
+
         for (spec, width) in specs.iter().zip(widths.iter()) {
             if let ColumnPolicy::Resizable { .. } = spec.policy {
                 let stored = entry.persisted_width(spec.policy_hash).unwrap_or(-1.0);
@@ -3540,12 +3617,15 @@ impl MarkdownRenderer {
         }
     }
 
-    /// Paint vertical dividers between table columns and an outer border.
+    /// Paint vertical dividers between table columns, a horizontal header separator,
+    /// and an outer border.
     ///
     /// # Arguments
     /// * `widths` - The actual allocated column widths from `TableBody::widths()`.
     ///   IMPORTANT: These must NOT be cell content widths from `ui.min_rect()`,
     ///   which would cause dividers to be misaligned.
+    /// * `header_height` - The height of the header row. A horizontal separator is
+    ///   drawn at this y-offset to visually separate header from body rows.
     fn paint_table_dividers(
         &self,
         painter: &Painter,
@@ -3553,6 +3633,7 @@ impl MarkdownRenderer {
         rect: egui::Rect,
         clip_rect: egui::Rect,
         widths: &[f32],
+        header_height: f32,
     ) {
         if widths.len() <= 1 {
             return;
@@ -3566,12 +3647,24 @@ impl MarkdownRenderer {
         let separator_stroke = Stroke::new(1.0, separator_color);
         let border_stroke = visuals.window_stroke();
         let painter = painter.with_clip_rect(clip_rect);
+
+        // Draw vertical dividers between columns
         let mut x = rect.left();
         for width in widths.iter().take(widths.len().saturating_sub(1)) {
             x += *width;
             let x_pos = (x.round() + 0.5).clamp(rect.left(), rect.right());
             painter.vline(x_pos, rect.y_range(), separator_stroke);
         }
+
+        // Draw horizontal separator below header row
+        if header_height > 0.0 {
+            let header_y = rect.top() + header_height;
+            if header_y > rect.top() && header_y < rect.bottom() {
+                painter.hline(rect.x_range(), header_y.round() + 0.5, separator_stroke);
+            }
+        }
+
+        // Draw outer border
         painter.rect_stroke(rect, 0.0, border_stroke);
     }
 
