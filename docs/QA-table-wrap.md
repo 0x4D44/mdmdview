@@ -38,3 +38,27 @@ Include in the QA report:
 6. Drag-resize the Examples column; restart mdmdview and confirm the new width persists.
 7. Capture before/after screenshots for the QA report.
 
+## Table Polish QA (2025-11-30)
+
+### Header Separator
+1. Open any table file (e.g., `examples/regressions/table-threat-model.md`).
+2. Verify a horizontal line appears between the header row and body rows.
+3. The separator should use the same stroke style as vertical dividers.
+
+### Table Border Alignment
+1. With a table visible, verify the outer border exactly matches the column boundaries.
+2. Resize the window - the border should track column resizing without gaps.
+3. Scroll a long table - dividers should not leak into the scrollbar area.
+
+### Zoom and Persisted Widths
+1. Open a table and manually resize a column (drag the column edge).
+2. Close and reopen the file - the custom width should persist.
+3. Change zoom level (Ctrl++ or Ctrl+-).
+4. Verify the custom column width resets to default (persisted widths are cleared on zoom change).
+5. This prevents size mismatches when font sizes change.
+
+Include in the QA report:
+- Screenshot showing header separator line
+- Confirmation that table borders align with column boundaries
+- Confirmation that zoom change resets persisted column widths
+
