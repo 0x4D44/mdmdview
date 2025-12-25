@@ -1,0 +1,78 @@
+schema_version = 1
+
+[defaults]
+viewport_width = 1280
+viewport_height = 720
+dpr = 1.0
+theme = "light"
+zoom = 1.0
+table_wrap = true
+compare_mode = "mdmdview"
+reference = "markdown-it"
+wait_ms = 2000
+settle_frames = 3
+content_only = false
+
+[defaults.diff]
+max_percent = 0.10
+max_pixels = 500
+
+[[case]]
+id = "001-headings"
+path = "cases/001-headings.md"
+title = "Headings and paragraphs"
+
+[[case]]
+id = "002-lists"
+path = "cases/002-lists.md"
+title = "Lists and nesting"
+
+[[case]]
+id = "003-inline"
+path = "cases/003-inline.md"
+title = "Inline formatting"
+
+[[case]]
+id = "004-code"
+path = "cases/004-code.md"
+title = "Code blocks"
+
+[[case]]
+id = "005-tables"
+path = "cases/005-tables.md"
+title = "Tables and wrapping"
+
+[[case]]
+id = "006-images"
+path = "cases/006-images.md"
+title = "Images and missing assets"
+
+[[case]]
+id = "007-emoji"
+path = "cases/007-emoji.md"
+title = "Emoji coverage"
+
+[[case]]
+id = "008-mermaid"
+path = "cases/008-mermaid.md"
+title = "Mermaid diagrams"
+compare_mode = "mdmdview"
+mermaid_renderer = "embedded"
+
+[[case]]
+id = "009-unicode"
+path = "cases/009-unicode.md"
+title = "Unicode and RTL"
+
+[[case]]
+id = "010-large"
+path = "cases/010-large.md"
+title = "Large document"
+
+[[case.snapshots]]
+name = "top"
+scroll = 0.0
+
+[[case.snapshots]]
+name = "mid"
+scroll = 0.5

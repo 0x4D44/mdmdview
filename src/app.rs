@@ -8,10 +8,12 @@ use egui::text::LayoutJob;
 use egui::text::TextFormat;
 use egui::{menu, CentralPanel, Color32, Context, RichText, TopBottomPanel};
 use egui::{TextEdit, TextStyle};
+use image::{imageops, RgbaImage};
 use rfd::FileDialog;
 use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 
@@ -26,6 +28,164 @@ struct HistoryEntry {
     file_path: Option<PathBuf>,
     title: String,
     content: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenshotTheme {
+    Light,
+    Dark,
+}
+
+impl ScreenshotTheme {
+    fn as_str(self) -> &'static str {
+        match self {
+            ScreenshotTheme::Light => "light",
+            ScreenshotTheme::Dark => "dark",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ScreenshotConfig {
+    pub output_path: PathBuf,
+    pub viewport_width: f32,
+    pub viewport_height: f32,
+    pub content_only: bool,
+    pub scroll_ratio: Option<f32>,
+    pub wait_ms: u64,
+    pub settle_frames: u32,
+    pub zoom: f32,
+    pub theme: ScreenshotTheme,
+    pub table_wrap: bool,
+    pub font_source: Option<String>,
+}
+
+impl ScreenshotConfig {
+    fn metadata_path(&self) -> PathBuf {
+        self.output_path.with_extension("json")
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ScrollSnapshot {
+    content_size: egui::Vec2,
+    inner_rect: egui::Rect,
+    offset_y: f32,
+}
+
+#[derive(Debug)]
+struct ScreenshotState {
+    config: ScreenshotConfig,
+    started: Instant,
+    stable_frames: u32,
+    last_layout_hash: Option<u64>,
+    last_scroll_offset: Option<f32>,
+    scroll_offset: Option<f32>,
+    content_rect: Option<egui::Rect>,
+    last_content_size: Option<egui::Vec2>,
+    last_inner_rect: Option<egui::Rect>,
+    pixels_per_point: f32,
+    viewport_adjusted: bool,
+    requested: bool,
+    done: bool,
+    timed_out: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ScreenshotSnapshot {
+    config: ScreenshotConfig,
+    content_rect: Option<egui::Rect>,
+    pixels_per_point: f32,
+    stable_frames: u32,
+    timed_out: bool,
+    last_scroll_offset: Option<f32>,
+    started: Instant,
+}
+
+impl ScreenshotState {
+    fn new(config: ScreenshotConfig) -> Self {
+        Self {
+            config,
+            started: Instant::now(),
+            stable_frames: 0,
+            last_layout_hash: None,
+            last_scroll_offset: None,
+            scroll_offset: None,
+            content_rect: None,
+            last_content_size: None,
+            last_inner_rect: None,
+            pixels_per_point: 1.0,
+            viewport_adjusted: false,
+            requested: false,
+            done: false,
+            timed_out: false,
+        }
+    }
+
+    fn record_scroll(&mut self, snapshot: ScrollSnapshot) -> bool {
+        self.last_content_size = Some(snapshot.content_size);
+        self.last_inner_rect = Some(snapshot.inner_rect);
+        self.last_scroll_offset = Some(snapshot.offset_y);
+
+        if self.scroll_offset.is_none() {
+            if let Some(ratio) = self.config.scroll_ratio {
+                let max_scroll = (snapshot.content_size.y - snapshot.inner_rect.height()).max(0.0);
+                self.scroll_offset = Some((max_scroll * ratio).round());
+                return true;
+            }
+        }
+        false
+    }
+
+    fn scroll_ready(&self) -> bool {
+        match (
+            self.config.scroll_ratio,
+            self.scroll_offset,
+            self.last_scroll_offset,
+        ) {
+            (None, _, _) => true,
+            (Some(_), Some(target), Some(actual)) => (actual - target).abs() <= 0.5,
+            _ => false,
+        }
+    }
+
+    fn update_stability(&mut self, layout_hash: Option<u64>, scroll_offset: Option<f32>) {
+        let mut changed = false;
+        if let Some(hash) = layout_hash {
+            if self.last_layout_hash != Some(hash) {
+                changed = true;
+            }
+            self.last_layout_hash = Some(hash);
+        } else {
+            changed = true;
+        }
+
+        if let (Some(prev), Some(current)) = (self.last_scroll_offset, scroll_offset) {
+            if (prev - current).abs() > 0.5 {
+                changed = true;
+            }
+        }
+
+        if changed {
+            self.stable_frames = 0;
+        } else {
+            self.stable_frames = self.stable_frames.saturating_add(1);
+        }
+    }
+}
+
+impl From<&ScreenshotState> for ScreenshotSnapshot {
+    fn from(state: &ScreenshotState) -> Self {
+        Self {
+            config: state.config.clone(),
+            content_rect: state.content_rect,
+            pixels_per_point: state.pixels_per_point,
+            stable_frames: state.stable_frames,
+            timed_out: state.timed_out,
+            last_scroll_offset: state.last_scroll_offset,
+            started: state.started,
+        }
+    }
 }
 
 /// Main application state and logic
@@ -99,6 +259,7 @@ pub struct MarkdownViewerApp {
     drag_hover: bool,
     /// Queue of files waiting to be opened (from multi-file drop)
     pending_files: VecDeque<PathBuf>,
+    screenshot: Option<ScreenshotState>,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -319,6 +480,7 @@ impl MarkdownViewerApp {
             max_history: 50,
             drag_hover: false,
             pending_files: VecDeque::new(),
+            screenshot: None,
         };
         app.renderer
             .set_table_wrap_overhaul_enabled(app.table_wrap_overhaul_enabled);
@@ -334,6 +496,19 @@ impl MarkdownViewerApp {
     pub fn set_table_wrap_overhaul_enabled(&mut self, enabled: bool) {
         self.table_wrap_overhaul_enabled = enabled;
         self.renderer.set_table_wrap_overhaul_enabled(enabled);
+    }
+
+    pub fn set_zoom_scale(&mut self, scale: f32) {
+        self.renderer.set_zoom_scale(scale);
+    }
+
+    pub fn set_screenshot_mode(&mut self, config: ScreenshotConfig) {
+        self.screenshot = Some(ScreenshotState::new(config));
+        self.view_mode = ViewMode::Rendered;
+        self.write_enabled = false;
+        self.show_search = false;
+        self.search_focus_requested = false;
+        self.nav_request = None;
     }
 
     fn toggle_table_wrap_overhaul(&mut self) {
@@ -1551,11 +1726,23 @@ Rows rendered this frame: {} / {}", rendered_rows, total_rows)
 impl eframe::App for MarkdownViewerApp {
     /// Update function called every frame
     fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.handle_screenshot_events(ctx);
+        if self.screenshot.as_ref().is_some_and(|state| state.done) {
+            return;
+        }
+
+        let screenshot_active = self.screenshot.is_some();
+        let hide_chrome = screenshot_active;
+
         // Handle drag-drop events
-        self.handle_drag_drop_events(ctx);
+        if !screenshot_active {
+            self.handle_drag_drop_events(ctx);
+        }
 
         // Handle keyboard shortcuts
-        self.handle_shortcuts(ctx);
+        if !screenshot_active {
+            self.handle_shortcuts(ctx);
+        }
 
         // Keep native window title in sync with the current document
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.title.clone()));
@@ -1633,7 +1820,16 @@ impl eframe::App for MarkdownViewerApp {
         }
 
         // Render menu bar
-        self.render_menu_bar(ctx);
+        if !hide_chrome {
+            self.render_menu_bar(ctx);
+        }
+
+        let mut layout_signature: Option<u64> = None;
+        let mut scroll_snapshot: Option<ScrollSnapshot> = None;
+        let screenshot_scroll_offset = self
+            .screenshot
+            .as_ref()
+            .and_then(|state| state.scroll_offset);
 
         // Main content area
         let central_response = CentralPanel::default().show(ctx, |ui| {
@@ -1675,141 +1871,147 @@ impl eframe::App for MarkdownViewerApp {
                 egui::Vec2::ZERO
             };
 
-            egui::ScrollArea::vertical()
+            let mut scroll_area = egui::ScrollArea::vertical()
                 .id_source(self.scroll_area_id)
                 .auto_shrink([false, false])
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-                .show(ui, |ui| {
-                    // Apply scroll delta if we have navigation
-                    if scroll_delta != egui::Vec2::ZERO {
-                        ui.scroll_with_delta(scroll_delta);
-                    }
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded);
+            if let Some(offset) = screenshot_scroll_offset {
+                scroll_area = scroll_area.vertical_scroll_offset(offset);
+            }
+            if screenshot_active {
+                scroll_area = scroll_area.enable_scrolling(false);
+            }
+            let scroll_output = scroll_area.show(ui, |ui| {
+                // Apply scroll delta if we have navigation
+                if scroll_delta != egui::Vec2::ZERO {
+                    ui.scroll_with_delta(scroll_delta);
+                }
 
-                    ui.spacing_mut().item_spacing.y = 8.0;
+                ui.spacing_mut().item_spacing.y = 8.0;
 
-                    if self.parsed_elements.is_empty() && self.error_message.is_none() {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(50.0);
-                            ui.label(RichText::new("Welcome to MarkdownView").size(24.0).strong());
-                            ui.add_space(20.0);
-                            ui.label("Open a markdown file or select a sample to get started.");
-                            ui.add_space(20.0);
+                if self.parsed_elements.is_empty() && self.error_message.is_none() {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(50.0);
+                        ui.label(RichText::new("Welcome to MarkdownView").size(24.0).strong());
+                        ui.add_space(20.0);
+                        ui.label("Open a markdown file or select a sample to get started.");
+                        ui.add_space(20.0);
 
-                            if ui.button("Open File").clicked() {
-                                self.open_file_dialog();
+                        if ui.button("Open File").clicked() {
+                            self.open_file_dialog();
+                        }
+                    });
+                } else {
+                    match self.view_mode {
+                        ViewMode::Rendered => {
+                            // Update highlight phrase: prefer live input, else last executed
+                            if self.show_search && !self.search_query.is_empty() {
+                                self.renderer.set_highlight_phrase(Some(&self.search_query));
+                            } else if !self.last_query.is_empty() {
+                                self.renderer.set_highlight_phrase(Some(&self.last_query));
+                            } else {
+                                self.renderer.set_highlight_phrase(None);
                             }
-                        });
-                    } else {
-                        match self.view_mode {
-                            ViewMode::Rendered => {
-                                // Update highlight phrase: prefer live input, else last executed
-                                if self.show_search && !self.search_query.is_empty() {
-                                    self.renderer.set_highlight_phrase(Some(&self.search_query));
-                                } else if !self.last_query.is_empty() {
-                                    self.renderer.set_highlight_phrase(Some(&self.last_query));
-                                } else {
-                                    self.renderer.set_highlight_phrase(None);
-                                }
 
-                                self.renderer.render_to_ui(ui, &self.parsed_elements);
-                                // If a header anchor was clicked, scroll to it
-                                if let Some(anchor) = self.renderer.take_pending_anchor() {
-                                    if let Some(rect) = self.renderer.header_rect_for(&anchor) {
-                                        // Align target header to the top of the visible area
-                                        ui.scroll_to_rect(rect, Some(egui::Align::Min));
-                                    }
-                                }
-                                // If a search requested a scroll, align to top of visible area
-                                if let Some(idx) = self.pending_scroll_to_element.take() {
-                                    if let Some(rect) = self.renderer.element_rect_at(idx) {
-                                        ui.scroll_to_rect(rect, Some(egui::Align::Min));
-                                    }
+                            self.renderer.render_to_ui(ui, &self.parsed_elements);
+                            // If a header anchor was clicked, scroll to it
+                            if let Some(anchor) = self.renderer.take_pending_anchor() {
+                                if let Some(rect) = self.renderer.header_rect_for(&anchor) {
+                                    // Align target header to the top of the visible area
+                                    ui.scroll_to_rect(rect, Some(egui::Align::Min));
                                 }
                             }
-                            ViewMode::Raw => {
-                                // Raw markdown view; editable when write mode is enabled
-                                if self.write_enabled {
-                                    let editor_id = egui::Id::new("raw_editor");
-                                    // If we have a remembered cursor, restore it (clamped)
-                                    if let Some(mut idx) = self.raw_cursor.take() {
-                                        idx = idx.min(self.raw_buffer.len());
-                                        if let Some(mut state) =
-                                            egui::text_edit::TextEditState::load(
-                                                ui.ctx(),
-                                                editor_id,
-                                            )
-                                        {
-                                            let cr = egui::text::CCursorRange::one(
-                                                egui::text::CCursor::new(idx),
-                                            );
-                                            state.cursor.set_char_range(Some(cr));
-                                            state.store(ui.ctx(), editor_id);
-                                        } else {
-                                            let mut state =
-                                                egui::text_edit::TextEditState::default();
-                                            let cr = egui::text::CCursorRange::one(
-                                                egui::text::CCursor::new(idx),
-                                            );
-                                            state.cursor.set_char_range(Some(cr));
-                                            state.store(ui.ctx(), editor_id);
-                                        }
-                                    }
-                                    let before = self.raw_buffer.clone();
-                                    let resp = ui.add(
-                                        TextEdit::multiline(&mut self.raw_buffer)
-                                            .font(TextStyle::Monospace)
-                                            .code_editor()
-                                            .lock_focus(false)
-                                            .interactive(true)
-                                            .desired_width(f32::INFINITY)
-                                            .desired_rows(24)
-                                            .id_source(editor_id),
-                                    );
-                                    if self.raw_focus_requested {
-                                        resp.request_focus();
-                                        self.raw_focus_requested = false;
-                                    }
-                                    // Remember cursor position for next time
-                                    if let Some(state) =
+                            // If a search requested a scroll, align to top of visible area
+                            if let Some(idx) = self.pending_scroll_to_element.take() {
+                                if let Some(rect) = self.renderer.element_rect_at(idx) {
+                                    ui.scroll_to_rect(rect, Some(egui::Align::Min));
+                                }
+                            }
+                            layout_signature = Some(self.renderer.layout_signature());
+                        }
+                        ViewMode::Raw => {
+                            // Raw markdown view; editable when write mode is enabled
+                            if self.write_enabled {
+                                let editor_id = egui::Id::new("raw_editor");
+                                // If we have a remembered cursor, restore it (clamped)
+                                if let Some(mut idx) = self.raw_cursor.take() {
+                                    idx = idx.min(self.raw_buffer.len());
+                                    if let Some(mut state) =
                                         egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
                                     {
-                                        if let Some(range) = state.cursor.char_range() {
-                                            let idx = range.primary.index;
-                                            self.raw_cursor = Some(idx);
-                                        }
+                                        let cr = egui::text::CCursorRange::one(
+                                            egui::text::CCursor::new(idx),
+                                        );
+                                        state.cursor.set_char_range(Some(cr));
+                                        state.store(ui.ctx(), editor_id);
+                                    } else {
+                                        let mut state = egui::text_edit::TextEditState::default();
+                                        let cr = egui::text::CCursorRange::one(
+                                            egui::text::CCursor::new(idx),
+                                        );
+                                        state.cursor.set_char_range(Some(cr));
+                                        state.store(ui.ctx(), editor_id);
                                     }
-                                    if self.raw_buffer != before {
-                                        self.current_content = self.raw_buffer.clone();
-                                        match self.renderer.parse(&self.current_content) {
-                                            Ok(elements) => {
-                                                self.parsed_elements = elements;
-                                                self.error_message = None;
-                                            }
-                                            Err(e) => {
-                                                self.error_message = Some(format!(
-                                                    "Failed to parse markdown: {}",
-                                                    e
-                                                ));
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    // Read-only
-                                    let mut tmp = self.raw_buffer.clone();
-                                    ui.add(
-                                        TextEdit::multiline(&mut tmp)
-                                            .font(TextStyle::Monospace)
-                                            .code_editor()
-                                            .lock_focus(false)
-                                            .interactive(false)
-                                            .desired_width(f32::INFINITY)
-                                            .desired_rows(24),
-                                    );
                                 }
+                                let before = self.raw_buffer.clone();
+                                let resp = ui.add(
+                                    TextEdit::multiline(&mut self.raw_buffer)
+                                        .font(TextStyle::Monospace)
+                                        .code_editor()
+                                        .lock_focus(false)
+                                        .interactive(true)
+                                        .desired_width(f32::INFINITY)
+                                        .desired_rows(24)
+                                        .id_source(editor_id),
+                                );
+                                if self.raw_focus_requested {
+                                    resp.request_focus();
+                                    self.raw_focus_requested = false;
+                                }
+                                // Remember cursor position for next time
+                                if let Some(state) =
+                                    egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
+                                {
+                                    if let Some(range) = state.cursor.char_range() {
+                                        let idx = range.primary.index;
+                                        self.raw_cursor = Some(idx);
+                                    }
+                                }
+                                if self.raw_buffer != before {
+                                    self.current_content = self.raw_buffer.clone();
+                                    match self.renderer.parse(&self.current_content) {
+                                        Ok(elements) => {
+                                            self.parsed_elements = elements;
+                                            self.error_message = None;
+                                        }
+                                        Err(e) => {
+                                            self.error_message =
+                                                Some(format!("Failed to parse markdown: {}", e));
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Read-only
+                                let mut tmp = self.raw_buffer.clone();
+                                ui.add(
+                                    TextEdit::multiline(&mut tmp)
+                                        .font(TextStyle::Monospace)
+                                        .code_editor()
+                                        .lock_focus(false)
+                                        .interactive(false)
+                                        .desired_width(f32::INFINITY)
+                                        .desired_rows(24),
+                                );
                             }
                         }
                     }
-                });
+                }
+            });
+            scroll_snapshot = Some(ScrollSnapshot {
+                content_size: scroll_output.content_size,
+                inner_rect: scroll_output.inner_rect,
+                offset_y: scroll_output.state.offset.y,
+            });
         });
 
         // Add context menu for the main panel
@@ -1844,14 +2046,21 @@ impl eframe::App for MarkdownViewerApp {
             }
         });
 
-        // Render floating search dialog (non-modal, always on top)
-        self.render_search_dialog(ctx);
+        if let Some(state) = self.screenshot.as_mut() {
+            state.content_rect = Some(central_response.response.rect);
+        }
+        self.update_screenshot_state(ctx, layout_signature, scroll_snapshot);
 
-        // Render status bar
-        self.render_status_bar(ctx);
+        if !hide_chrome {
+            // Render floating search dialog (non-modal, always on top)
+            self.render_search_dialog(ctx);
 
-        // Render drag-and-drop overlay (must be last to appear on top)
-        self.render_drag_overlay(ctx);
+            // Render status bar
+            self.render_status_bar(ctx);
+
+            // Render drag-and-drop overlay (must be last to appear on top)
+            self.render_drag_overlay(ctx);
+        }
     }
 
     fn auto_save_interval(&self) -> std::time::Duration {
@@ -1860,7 +2069,9 @@ impl eframe::App for MarkdownViewerApp {
 
     fn save(&mut self, _storage: &mut dyn eframe::Storage) {
         // Persist window position and size on app save/exit
-        self.persist_window_state();
+        if self.screenshot.is_none() {
+            self.persist_window_state();
+        }
     }
 }
 
@@ -1908,6 +2119,9 @@ impl MarkdownViewerApp {
     }
 
     fn should_persist_window_state(&self) -> bool {
+        if self.screenshot.is_some() {
+            return false;
+        }
         if self.last_persist_instant.elapsed() < std::time::Duration::from_secs(1) {
             return false;
         }
@@ -2026,6 +2240,220 @@ impl MarkdownViewerApp {
             self.clear_search_state();
         }
         self.show_search = open;
+    }
+
+    fn handle_screenshot_events(&mut self, ctx: &Context) {
+        let screenshot = ctx.input(|i| {
+            i.events.iter().find_map(|event| {
+                if let egui::Event::Screenshot { image, .. } = event {
+                    Some(std::sync::Arc::clone(image))
+                } else {
+                    None
+                }
+            })
+        });
+        let Some(image) = screenshot else {
+            return;
+        };
+        let snapshot = {
+            let Some(state) = self.screenshot.as_ref() else {
+                return;
+            };
+            if state.done {
+                return;
+            }
+            ScreenshotSnapshot::from(state)
+        };
+        if let Err(err) = Self::save_screenshot_image(&image, &snapshot) {
+            eprintln!("Failed to save screenshot: {err}");
+        }
+        if let Some(state) = self.screenshot.as_mut() {
+            state.done = true;
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn update_screenshot_state(
+        &mut self,
+        ctx: &Context,
+        layout_signature: Option<u64>,
+        scroll_snapshot: Option<ScrollSnapshot>,
+    ) {
+        let Some(state) = self.screenshot.as_mut() else {
+            return;
+        };
+        let native_ppp = ctx
+            .input(|i| i.viewport().native_pixels_per_point)
+            .unwrap_or(1.0);
+        ctx.set_pixels_per_point(1.0);
+        state.pixels_per_point = ctx.input(|i| i.pixels_per_point);
+
+        if !state.viewport_adjusted {
+            let width_points = (state.config.viewport_width / native_ppp).max(1.0);
+            let height_points = (state.config.viewport_height / native_ppp).max(1.0);
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                width_points,
+                height_points,
+            )));
+            state.viewport_adjusted = true;
+            ctx.request_repaint();
+        }
+
+        let mut scroll_offset = None;
+        let mut scroll_changed = false;
+        if let Some(snapshot) = scroll_snapshot {
+            scroll_offset = Some(snapshot.offset_y);
+            scroll_changed = state.record_scroll(snapshot);
+        }
+
+        state.update_stability(layout_signature, scroll_offset);
+
+        let pending = self.renderer.has_pending_renders();
+        let elapsed = state.started.elapsed();
+        let timed_out = elapsed >= Duration::from_millis(state.config.wait_ms);
+        let stable =
+            state.scroll_ready() && state.stable_frames >= state.config.settle_frames && !pending;
+
+        if stable || timed_out {
+            if timed_out && !stable {
+                state.timed_out = true;
+            }
+            if !state.requested {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
+                state.requested = true;
+            }
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+
+        if scroll_changed {
+            ctx.request_repaint();
+        }
+        if state.requested && !state.done {
+            ctx.request_repaint();
+        }
+    }
+
+    fn save_screenshot_image(image: &egui::ColorImage, state: &ScreenshotSnapshot) -> Result<()> {
+        let full_width = image.size[0] as u32;
+        let full_height = image.size[1] as u32;
+        let mut rgba = Self::color_image_to_rgba(image);
+
+        let mut crop_x = 0u32;
+        let mut crop_y = 0u32;
+        let mut crop_w = full_width;
+        let mut crop_h = full_height;
+
+        if state.config.content_only {
+            if let Some(rect) = state.content_rect {
+                let pixels_per_point = state.pixels_per_point.max(0.1);
+                let min_x = (rect.min.x * pixels_per_point).round() as i32;
+                let min_y = (rect.min.y * pixels_per_point).round() as i32;
+                let max_x = (rect.max.x * pixels_per_point).round() as i32;
+                let max_y = (rect.max.y * pixels_per_point).round() as i32;
+
+                let min_x = min_x.clamp(0, full_width as i32);
+                let min_y = min_y.clamp(0, full_height as i32);
+                let max_x = max_x.clamp(min_x, full_width as i32);
+                let max_y = max_y.clamp(min_y, full_height as i32);
+
+                let width = (max_x - min_x) as u32;
+                let height = (max_y - min_y) as u32;
+                if width > 0 && height > 0 {
+                    crop_x = min_x as u32;
+                    crop_y = min_y as u32;
+                    crop_w = width;
+                    crop_h = height;
+                }
+            }
+        }
+
+        if crop_x != 0 || crop_y != 0 || crop_w != full_width || crop_h != full_height {
+            rgba = imageops::crop_imm(&rgba, crop_x, crop_y, crop_w, crop_h).to_image();
+        }
+
+        if let Some(parent) = state.config.output_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        rgba.save(&state.config.output_path)?;
+
+        let metadata = Self::screenshot_metadata(state, full_width, full_height, crop_w, crop_h);
+        std::fs::write(state.config.metadata_path(), metadata)?;
+        Ok(())
+    }
+
+    fn screenshot_metadata(
+        state: &ScreenshotSnapshot,
+        full_width: u32,
+        full_height: u32,
+        crop_width: u32,
+        crop_height: u32,
+    ) -> String {
+        let output_path = Self::json_escape(&state.config.output_path.to_string_lossy());
+        let font_source = state
+            .config
+            .font_source
+            .as_ref()
+            .map(|value| format!("\"{}\"", Self::json_escape(value)))
+            .unwrap_or_else(|| "null".to_string());
+        let scroll_ratio = Self::json_opt_f32(state.config.scroll_ratio);
+        let scroll_offset = Self::json_opt_f32(state.last_scroll_offset);
+        let elapsed_ms = state.started.elapsed().as_millis();
+
+        format!(
+            "{{\n  \"version\": \"{}\",\n  \"build_timestamp\": \"{}\",\n  \"output\": \"{}\",\n  \"theme\": \"{}\",\n  \"zoom\": {:.3},\n  \"table_wrap\": {},\n  \"content_only\": {},\n  \"scroll_ratio\": {},\n  \"scroll_offset\": {},\n  \"viewport_px\": {{\"width\": {}, \"height\": {}}},\n  \"content_px\": {{\"width\": {}, \"height\": {}}},\n  \"pixels_per_point\": {:.3},\n  \"wait_ms\": {},\n  \"settle_frames\": {},\n  \"stable_frames\": {},\n  \"timed_out\": {},\n  \"font_source\": {},\n  \"elapsed_ms\": {}\n}}\n",
+            BUILD_VERSION,
+            BUILD_TIMESTAMP,
+            output_path,
+            state.config.theme.as_str(),
+            state.config.zoom,
+            state.config.table_wrap,
+            state.config.content_only,
+            scroll_ratio,
+            scroll_offset,
+            full_width,
+            full_height,
+            crop_width,
+            crop_height,
+            state.pixels_per_point,
+            state.config.wait_ms,
+            state.config.settle_frames,
+            state.stable_frames,
+            state.timed_out,
+            font_source,
+            elapsed_ms
+        )
+    }
+
+    fn color_image_to_rgba(image: &egui::ColorImage) -> RgbaImage {
+        let width = image.size[0] as u32;
+        let height = image.size[1] as u32;
+        let mut data = Vec::with_capacity(image.pixels.len() * 4);
+        for pixel in &image.pixels {
+            data.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b(), pixel.a()]);
+        }
+        RgbaImage::from_raw(width, height, data).unwrap_or_else(|| RgbaImage::new(width, height))
+    }
+
+    fn json_escape(value: &str) -> String {
+        let mut out = String::with_capacity(value.len() + 8);
+        for ch in value.chars() {
+            match ch {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                _ => out.push(ch),
+            }
+        }
+        out
+    }
+
+    fn json_opt_f32(value: Option<f32>) -> String {
+        value
+            .map(|v| format!("{v:.3}"))
+            .unwrap_or_else(|| "null".to_string())
     }
 
     // No overlay menu helpers; we only render egui's built-in menus.

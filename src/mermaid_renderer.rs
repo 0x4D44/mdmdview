@@ -292,6 +292,19 @@ impl MermaidRenderer {
         }
     }
 
+    pub(crate) fn has_pending(&self) -> bool {
+        if !self.kroki_pending.borrow().is_empty() {
+            return true;
+        }
+        #[cfg(feature = "mermaid-quickjs")]
+        {
+            if !self.mermaid_pending.borrow().is_empty() {
+                return true;
+            }
+        }
+        false
+    }
+
     pub(crate) fn render_block(
         &self,
         ui: &mut egui::Ui,
