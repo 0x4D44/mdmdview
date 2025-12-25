@@ -1,12 +1,11 @@
+use crate::image_decode;
+use crate::mermaid_renderer::MermaidRenderer;
 use crate::table_support::{
     compute_column_stats, derive_column_specs, ColumnPolicy, ColumnSpec, ColumnStat,
     TableColumnContext, TableMetrics, WidthChange,
 };
 use crate::{emoji_assets, emoji_catalog};
 use anyhow::Result;
-use crossbeam_channel::{
-    bounded, Receiver as KrokiJobReceiver, Sender as KrokiJobSender, TrySendError,
-};
 use egui::{
     text::{Galley, LayoutJob, TextWrapping},
     Align, Color32, Context, FontSelection, Painter, RichText, Stroke, Vec2, Visuals,
@@ -14,12 +13,12 @@ use egui::{
 use egui_extras::TableBuilder;
 use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
 use std::cell::RefCell;
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
+use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc::Receiver, Arc};
-use std::time::{Duration, SystemTime};
+use std::sync::Arc;
+use std::time::SystemTime;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
@@ -28,19 +27,8 @@ use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
-// Embedded Mermaid JS bytes are generated in build.rs into OUT_DIR.
-// Place mermaid.min.js at assets/vendor/mermaid.min.js to embed it.
-#[cfg(feature = "mermaid-quickjs")]
-mod mermaid_embed {
-    include!(concat!(env!("OUT_DIR"), "/mermaid_js.rs"));
-}
-
-#[cfg(feature = "mermaid-quickjs")]
-struct MermaidEngine {
-    #[allow(dead_code)]
-    rt: rquickjs::Runtime,
-    ctx: rquickjs::Context,
-}
+#[cfg(test)]
+use std::collections::HashSet;
 
 #[derive(Clone, Copy, Default)]
 struct InlineStyle {
@@ -270,18 +258,6 @@ struct ImageCacheEntry {
     modified: Option<SystemTime>,
 }
 
-struct KrokiRequest {
-    key: u64,
-    url: String,
-    payload: String,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum KrokiEnqueueError {
-    QueueFull,
-    Disconnected,
-}
-
 /// Markdown renderer with proper inline element handling
 pub struct MarkdownRenderer {
     font_sizes: FontSizes,
@@ -302,22 +278,7 @@ pub struct MarkdownRenderer {
     // Cache for image/diagram textures
     // Base directory used to resolve relative image paths
     base_dir: RefCell<Option<PathBuf>>,
-    // Kroki (default Mermaid path) state
-    kroki_pending: RefCell<HashSet<u64>>, // code_hashes in flight
-    kroki_svg_cache: RefCell<HashMap<u64, Vec<u8>>>, // code_hash -> image bytes (PNG preferred)
-    kroki_errors: RefCell<HashMap<u64, String>>, // code_hash -> last error
-    kroki_job_tx: KrokiJobSender<KrokiRequest>, // UI -> worker queue
-    kroki_rx: Receiver<(u64, Result<Vec<u8>, String>)>, // background -> UI thread
-    #[cfg(feature = "mermaid-quickjs")]
-    mermaid_engine: RefCell<Option<MermaidEngine>>,
-    #[cfg(feature = "mermaid-quickjs")]
-    mermaid_svg_cache: RefCell<HashMap<u64, String>>, // code_hash -> SVG string
-    #[cfg(feature = "mermaid-quickjs")]
-    mermaid_failed: RefCell<HashSet<u64>>, // hashes that failed rendering; skip reattempts
-    #[cfg(feature = "mermaid-quickjs")]
-    mermaid_init_logged: RefCell<bool>,
-    #[cfg(feature = "mermaid-quickjs")]
-    mermaid_last_error: RefCell<Option<String>>,
+    mermaid: MermaidRenderer,
     table_wrap_overhaul_enabled: bool,
     table_layout_cache: RefCell<CellLayoutCache>,
     table_metrics: RefCell<TableMetrics>,
@@ -683,38 +644,9 @@ impl MarkdownRenderer {
         char_count
     }
 
-    const MAX_KROKI_JOBS: usize = 4;
-
     /// Create a new markdown renderer
     pub fn new() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (job_tx, job_rx): (KrokiJobSender<KrokiRequest>, KrokiJobReceiver<KrokiRequest>) =
-            bounded(Self::MAX_KROKI_JOBS * 4);
-        for worker_idx in 0..Self::MAX_KROKI_JOBS {
-            let worker_rx = job_rx.clone();
-            let result_tx = tx.clone();
-            if let Err(err) = std::thread::Builder::new()
-                .name(format!("mdmdview-kroki-{worker_idx}"))
-                .spawn(move || {
-                    let agent = ureq::AgentBuilder::new()
-                        .timeout_connect(Duration::from_secs(5))
-                        .timeout_read(Duration::from_secs(10))
-                        .timeout_write(Duration::from_secs(10))
-                        .build();
-                    for job in worker_rx.iter() {
-                        let result = MarkdownRenderer::perform_kroki_with_agent(
-                            &agent,
-                            &job.url,
-                            &job.payload,
-                        );
-                        let _ = result_tx.send((job.key, result));
-                    }
-                })
-            {
-                eprintln!("Failed to start Kroki worker thread: {}", err);
-            }
-        }
-        drop(job_rx);
+        let mermaid = MermaidRenderer::new();
         Self {
             font_sizes: FontSizes::default(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
@@ -727,21 +659,7 @@ impl MarkdownRenderer {
             element_rects: RefCell::new(Vec::new()),
             highlight_phrase: RefCell::new(None),
             base_dir: RefCell::new(None),
-            kroki_pending: RefCell::new(HashSet::new()),
-            kroki_svg_cache: RefCell::new(HashMap::new()),
-            kroki_errors: RefCell::new(HashMap::new()),
-            kroki_job_tx: job_tx,
-            kroki_rx: rx,
-            #[cfg(feature = "mermaid-quickjs")]
-            mermaid_engine: RefCell::new(None),
-            #[cfg(feature = "mermaid-quickjs")]
-            mermaid_svg_cache: RefCell::new(HashMap::new()),
-            #[cfg(feature = "mermaid-quickjs")]
-            mermaid_failed: RefCell::new(HashSet::new()),
-            #[cfg(feature = "mermaid-quickjs")]
-            mermaid_init_logged: RefCell::new(false),
-            #[cfg(feature = "mermaid-quickjs")]
-            mermaid_last_error: RefCell::new(None),
+            mermaid,
             table_wrap_overhaul_enabled: true,
             table_layout_cache: RefCell::new(CellLayoutCache::new(TABLE_LAYOUT_CACHE_CAPACITY)),
             table_metrics: RefCell::new(TableMetrics::default()),
@@ -2529,374 +2447,8 @@ impl MarkdownRenderer {
 
     /// Try to render a Mermaid diagram. Returns true if handled (rendered or placeholder drawn).
     fn render_mermaid_block(&self, ui: &mut egui::Ui, code: &str) -> bool {
-        // First, drain any completed Kroki jobs into local caches.
-        self.poll_kroki_results();
-
-        // If QuickJS feature is enabled, attempt rendering to SVG then rasterize like normal SVG.
-        #[cfg(feature = "mermaid-quickjs")]
-        {
-            let key = Self::hash_str(code);
-            if self.mermaid_failed.borrow().contains(&key) {
-                // Previously failed; show brief diagnostics and bail
-                let bytes = mermaid_embed::MERMAID_JS.len();
-                let last = self.mermaid_last_error.borrow().clone().unwrap_or_default();
-                egui::Frame::none().inner_margin(4.0).show(ui, |ui| {
-                    ui.label(
-                        RichText::new(format!(
-                            "Mermaid skipped (prev fail). Bytes:{} Hash:{:016x}\n{}",
-                            bytes, key, last
-                        ))
-                        .family(egui::FontFamily::Monospace)
-                        .size(self.font_sizes.code),
-                    );
-                });
-                return true;
-            } else if let Some(tex) = self.get_or_load_mermaid_texture(ui, code) {
-                let size = tex.size();
-                let (tw, th) = (size[0] as f32, size[1] as f32);
-                let available_w = ui.available_width().max(1.0);
-                let base_scale = self.ui_scale();
-                let scaled_w = tw * base_scale;
-                let scale = if scaled_w > available_w {
-                    (available_w / tw).clamp(0.01, 4.0)
-                } else {
-                    base_scale
-                };
-                let size = egui::vec2((tw * scale).round(), (th * scale).round());
-                ui.add(egui::Image::new(&tex).fit_to_exact_size(size));
-                return true;
-            } else {
-                // Mark as failed to avoid repeated attempts causing jank
-                self.mermaid_failed.borrow_mut().insert(key);
-                let bytes = mermaid_embed::MERMAID_JS.len();
-                let last = self
-                    .mermaid_last_error
-                    .borrow()
-                    .clone()
-                    .unwrap_or_else(|| "unknown error".to_string());
-                egui::Frame::none()
-                    .fill(Color32::from_rgb(25, 25, 25))
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
-                    .inner_margin(8.0)
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new("Mermaid render failed; showing source.")
-                                .color(Color32::from_rgb(200, 160, 80)),
-                        );
-                        ui.label(
-                            RichText::new(format!(
-                                "Embedded bytes:{}\nHash:{:016x}\nError:{}",
-                                bytes, key, last
-                            ))
-                            .family(egui::FontFamily::Monospace)
-                            .size(self.font_sizes.code)
-                            .color(Color32::from_rgb(180, 180, 180)),
-                        );
-                    });
-                // fall through to code block rendering
-            }
-        }
-
-        // Default path: render via Kroki service (non-blocking)
-        let key = Self::hash_str(code);
-
-        if !Self::kroki_enabled() {
-            egui::Frame::none()
-                .fill(Color32::from_rgb(25, 25, 25))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
-                .inner_margin(8.0)
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new("Mermaid rendering via Kroki is disabled. Set MDMDVIEW_ENABLE_KROKI=1 to enable network rendering.")
-                            .color(Color32::from_rgb(200, 160, 80))
-                            .family(egui::FontFamily::Monospace)
-                            .size(self.font_sizes.code),
-                    );
-                });
-            return false;
-        }
-        // If we already have an SVG for this diagram, rasterize to a texture and draw it
-        if let Some(img_bytes) = self.kroki_svg_cache.borrow().get(&key) {
-            // Use a width-bucketed texture cache key to avoid re-rasterizing too often
-            let width_bucket = (ui.available_width().ceil() as u32) / 32 * 32;
-            let cache_key = format!("mermaid:{}:w{}", key, width_bucket);
-            if let Some(entry) = self.image_textures.borrow().get(&cache_key) {
-                let tex = entry.texture.clone();
-                let (tw, th) = (entry.size[0] as f32, entry.size[1] as f32);
-                let available_w = ui.available_width().max(1.0);
-                let base_scale = self.ui_scale();
-                let scaled_w = tw * base_scale;
-                let scale = if scaled_w > available_w {
-                    (available_w / tw).clamp(0.01, 4.0)
-                } else {
-                    base_scale
-                };
-                let size = egui::vec2((tw * scale).round(), (th * scale).round());
-                ui.add(egui::Image::new(&tex).fit_to_exact_size(size));
-                return true;
-            }
-
-            // Decode image bytes (prefer PNG). Fallback to SVG if not raster.
-            if let Some((img, w, h)) =
-                Self::bytes_to_color_image_guess(img_bytes, Self::mermaid_bg_fill())
-            {
-                let tex =
-                    ui.ctx()
-                        .load_texture(cache_key.clone(), img, egui::TextureOptions::LINEAR);
-                self.store_image_texture(&cache_key, tex.clone(), [w, h], None);
-                // Draw now
-                let (tw, th) = (w as f32, h as f32);
-                let available_w = ui.available_width().max(1.0);
-                let base_scale = self.ui_scale();
-                let scaled_w = tw * base_scale;
-                let scale = if scaled_w > available_w {
-                    (available_w / tw).clamp(0.01, 4.0)
-                } else {
-                    base_scale
-                };
-                let size = egui::vec2((tw * scale).round(), (th * scale).round());
-                ui.add(egui::Image::new(&tex).fit_to_exact_size(size));
-                return true;
-            } else {
-                // Decode failed; record error and fall through to message/source
-                self.kroki_errors
-                    .borrow_mut()
-                    .insert(key, "Failed to decode diagram bytes".to_string());
-            }
-        }
-
-        // If there was a prior error, show diagnostics and let caller show source
-        if let Some(err) = self.kroki_errors.borrow().get(&key) {
-            egui::Frame::none()
-                .fill(Color32::from_rgb(25, 25, 25))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
-                .inner_margin(8.0)
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(format!(
-                            "Mermaid render failed via Kroki; showing source.\n{}",
-                            err
-                        ))
-                        .color(Color32::from_rgb(200, 160, 80)),
-                    );
-                });
-            return false; // let caller render the source block
-        }
-
-        // If no job is pending, enqueue one for the worker pool
-        let should_schedule = {
-            let pending = self.kroki_pending.borrow();
-            !pending.contains(&key)
-        };
-        let waiting_for_slot = if should_schedule {
-            let inflight_before = {
-                let pending = self.kroki_pending.borrow();
-                pending.len()
-            };
-            match self.spawn_kroki_job(key, code) {
-                Ok(()) => {
-                    self.kroki_pending.borrow_mut().insert(key);
-                    ui.ctx().request_repaint();
-                    inflight_before >= Self::MAX_KROKI_JOBS
-                }
-                Err(KrokiEnqueueError::QueueFull) => {
-                    ui.ctx().request_repaint();
-                    true
-                }
-                Err(KrokiEnqueueError::Disconnected) => {
-                    self.kroki_errors
-                        .borrow_mut()
-                        .insert(key, "Mermaid worker pool unavailable".to_string());
-                    return false;
-                }
-            }
-        } else {
-            let pending = self.kroki_pending.borrow();
-            pending.len() >= Self::MAX_KROKI_JOBS
-        };
-
-        let inflight_count = self.kroki_pending.borrow().len();
-
-        // Show placeholder while rendering or waiting for an available worker
-        egui::Frame::none()
-            .fill(Color32::from_rgb(25, 25, 25))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
-            .inner_margin(8.0)
-            .show(ui, |ui| {
-                let url = self.kroki_base_url();
-                if waiting_for_slot {
-                    ui.label(
-                        RichText::new(format!(
-                            "Mermaid workers busy ({}/{}) - request queued.",
-                            inflight_count,
-                            Self::MAX_KROKI_JOBS
-                        ))
-                        .color(Color32::from_rgb(200, 160, 80))
-                        .family(egui::FontFamily::Monospace)
-                        .size(self.font_sizes.code),
-                    );
-                    ui.label(
-                        RichText::new(format!("Queue target: {}", url))
-                            .color(Color32::from_rgb(160, 200, 240)),
-                    );
-                } else {
-                    ui.label(
-                        RichText::new(format!("Rendering diagram via Kroki...\n{}", url))
-                            .color(Color32::from_rgb(160, 200, 240)),
-                    );
-                }
-            });
-        true
-    }
-
-    #[cfg(feature = "mermaid-quickjs")]
-    fn render_mermaid_to_svg_string(&self, code: &str) -> Option<String> {
-        use rquickjs::{Context, Function, Runtime};
-        // Quick check
-        if mermaid_embed::MERMAID_JS.is_empty() {
-            self.mermaid_last_error
-                .borrow_mut()
-                .replace("No embedded Mermaid JS".to_string());
-            return None;
-        }
-        // Initialize engine once
-        if self.mermaid_engine.borrow().is_none() {
-            let rt = Runtime::new().ok()?;
-            let ctx = Context::full(&rt).ok()?;
-            let engine = MermaidEngine { rt, ctx };
-            // Load library and shim
-            let _ = engine.ctx.with(|ctx| {
-                let shim = r#"
-                    var window = globalThis;
-                    var document = {
-                      body: {},
-                      createElement: function(tag){
-                        return {
-                          innerHTML: '',
-                          setAttribute: function(){},
-                          getAttribute: function(){ return null; },
-                          appendChild: function(){},
-                          querySelector: function(){ return null; },
-                        };
-                      },
-                      createElementNS: function(ns, tag){ return this.createElement(tag); },
-                      getElementById: function(){ return null; },
-                      querySelector: function(){ return null; },
-                    };
-                    window.document = document;
-                    // Minimal timers and raf
-                    window.setTimeout = function(fn, ms){ fn(); return 1; };
-                    window.clearTimeout = function(id){};
-                    window.requestAnimationFrame = function(fn){ fn(0); return 1; };
-                    window.performance = { now: function(){ return 0; } };
-                "#;
-                if let Err(e) = ctx.eval::<(), _>(shim) {
-                    self.mermaid_last_error
-                        .borrow_mut()
-                        .replace(format!("Shim error: {}", e));
-                }
-                if let Ok(js) = std::str::from_utf8(mermaid_embed::MERMAID_JS) {
-                    if let Err(e) = ctx.eval::<(), _>(js) {
-                        self.mermaid_last_error
-                            .borrow_mut()
-                            .replace(format!("Mermaid eval error: {}", e));
-                    }
-                    if let Err(e) = ctx.eval::<(), _>(
-                        r#"if (window.mermaid && mermaid.mermaidAPI) {
-                               mermaid.mermaidAPI.initialize({startOnLoad: false, securityLevel: 'loose'});
-                           } else { throw new Error('Mermaid not available'); }
-                        "#,
-                    ) {
-                        self.mermaid_last_error
-                            .borrow_mut()
-                            .replace(format!("Mermaid init error: {}", e));
-                    }
-                }
-                Ok::<(), ()>(())
-            });
-            self.mermaid_engine.borrow_mut().replace(engine);
-            // One-time log for diagnostics
-            if !*self.mermaid_init_logged.borrow() {
-                eprintln!(
-                    "Mermaid embedded bytes: {}",
-                    mermaid_embed::MERMAID_JS.len()
-                );
-                *self.mermaid_init_logged.borrow_mut() = true;
-            }
-        }
-
-        // Use cache if available
-        let key = Self::hash_str(code);
-        if let Some(svg) = self.mermaid_svg_cache.borrow().get(&key) {
-            return Some(svg.clone());
-        }
-
-        // Render fresh
-        let svg = self.mermaid_engine.borrow().as_ref().and_then(|engine| {
-            engine.ctx.with(|ctx| {
-                // Minimal DOM shim sufficient for mermaid.mermaidAPI.render
-                let wrapper = r#"
-                (function(id, code){
-                    var svgOut = null;
-                    mermaid.mermaidAPI.render(id, code, function(svg){ svgOut = svg; });
-                    if (typeof svgOut !== 'string' || svgOut.length === 0) {
-                        throw new Error('Mermaid render returned empty');
-                    }
-                    return svgOut;
-                })
-            "#;
-                let func: Function = match ctx.eval(wrapper) {
-                    Ok(f) => f,
-                    Err(e) => {
-                        self.mermaid_last_error
-                            .borrow_mut()
-                            .replace(format!("Wrapper eval error: {}", e));
-                        return None;
-                    }
-                };
-                let id = format!("m{:016x}", key);
-                let svg: String = match func.call((id.as_str(), code)) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        self.mermaid_last_error
-                            .borrow_mut()
-                            .replace(format!("Mermaid call error: {}", e));
-                        return None;
-                    }
-                };
-                Some(svg)
-            })
-        });
-        if let Some(svg) = svg {
-            self.mermaid_svg_cache.borrow_mut().insert(key, svg.clone());
-            self.mermaid_last_error.borrow_mut().take();
-            return Some(svg);
-        }
-        self.mermaid_last_error
-            .borrow_mut()
-            .replace("Mermaid render produced no SVG".to_string());
-        None
-    }
-
-    #[cfg(feature = "mermaid-quickjs")]
-    fn get_or_load_mermaid_texture(
-        &self,
-        ui: &egui::Ui,
-        code: &str,
-    ) -> Option<egui::TextureHandle> {
-        let key = Self::hash_str(code);
-        let width_bucket = (ui.available_width().ceil() as u32).saturating_sub(0) / 16 * 16;
-        let cache_key = format!("mermaid:{}:w{}", key, width_bucket);
-        if let Some(entry) = self.image_textures.borrow().get(&cache_key) {
-            return Some(entry.texture.clone());
-        }
-        let svg = self.render_mermaid_to_svg_string(code)?;
-        let (img, w, h) = Self::svg_bytes_to_color_image(svg.as_bytes())?;
-        let tex = ui
-            .ctx()
-            .load_texture(cache_key.clone(), img, egui::TextureOptions::LINEAR);
-        self.store_image_texture(&cache_key, tex.clone(), [w, h], None);
-        Some(tex)
+        self.mermaid
+            .render_block(ui, code, self.ui_scale(), self.font_sizes.code)
     }
 
     fn hash_str(s: &str) -> u64 {
@@ -3007,228 +2559,6 @@ impl MarkdownRenderer {
             },
         );
         stats
-    }
-
-    // Drain any completed Kroki jobs and cache their results
-    fn poll_kroki_results(&self) {
-        loop {
-            match self.kroki_rx.try_recv() {
-                Ok((key, Ok(svg))) => {
-                    self.kroki_svg_cache.borrow_mut().insert(key, svg);
-                    self.kroki_pending.borrow_mut().remove(&key);
-                }
-                Ok((key, Err(err))) => {
-                    self.kroki_errors.borrow_mut().insert(key, err);
-                    self.kroki_pending.borrow_mut().remove(&key);
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-            }
-        }
-    }
-
-    fn kroki_enabled() -> bool {
-        match std::env::var("MDMDVIEW_ENABLE_KROKI") {
-            Ok(value) => {
-                let normalized = value.trim().to_ascii_lowercase();
-                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-            }
-            Err(_) => false,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn kroki_enabled_for_tests() -> bool {
-        Self::kroki_enabled()
-    }
-
-    fn kroki_base_url(&self) -> String {
-        std::env::var("MDMDVIEW_KROKI_URL").unwrap_or_else(|_| "https://kroki.io".to_string())
-    }
-
-    #[cfg(not(test))]
-    fn perform_kroki_with_agent(
-        agent: &ureq::Agent,
-        url: &str,
-        payload: &str,
-    ) -> Result<Vec<u8>, String> {
-        let resp = agent
-            .post(url)
-            .set("Content-Type", "text/plain")
-            .send_string(payload)
-            .map_err(|e| format!("ureq error: {}", e))?;
-        if resp.status() >= 200 && resp.status() < 300 {
-            let mut bytes: Vec<u8> = Vec::new();
-            let mut reader = resp.into_reader();
-            use std::io::Read as _;
-            reader
-                .read_to_end(&mut bytes)
-                .map_err(|e| format!("read body: {}", e))?;
-            if bytes.is_empty() {
-                return Err("Empty SVG from Kroki".to_string());
-            }
-            Ok(bytes)
-        } else {
-            Err(format!("HTTP {} from Kroki", resp.status()))
-        }
-    }
-
-    #[cfg(test)]
-    fn perform_kroki_with_agent(
-        _agent: &ureq::Agent,
-        _url: &str,
-        _payload: &str,
-    ) -> Result<Vec<u8>, String> {
-        Err("Kroki disabled in tests".to_string())
-    }
-
-    fn spawn_kroki_job(&self, key: u64, code: &str) -> Result<(), KrokiEnqueueError> {
-        // Prefer PNG to avoid client-side SVG CSS/foreignObject limitations
-        let url = format!("{}/mermaid/png", self.kroki_base_url());
-        let payload = self.wrap_mermaid_theme(code);
-        match self
-            .kroki_job_tx
-            .try_send(KrokiRequest { key, url, payload })
-        {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(KrokiEnqueueError::QueueFull),
-            Err(TrySendError::Disconnected(_)) => Err(KrokiEnqueueError::Disconnected),
-        }
-    }
-
-    fn wrap_mermaid_theme(&self, code: &str) -> String {
-        // If user already provided an init block, respect it
-        if code.contains("%%{") && code.contains("}%%") && code.contains("init") {
-            return code.to_string();
-        }
-        // Pastel palette defaults (nice contrast on dark/light UIs)
-        let def_main_bkg = "#FFF8DB"; // soft warm yellow
-        let def_primary = "#D7EEFF"; // pastel blue (nodes)
-        let def_primary_border = "#9BB2C8"; // muted blue border
-        let def_primary_text = "#1C2430"; // dark slate text
-        let def_secondary = "#DFF5E1"; // pastel green
-        let def_tertiary = "#E9E2FF"; // pastel lavender
-        let def_line = "#6B7A90"; // slate lines/arrows
-        let def_text = "#1C2430"; // general text
-        let def_cluster_bkg = "#FFF1C1"; // soft yellow, slightly deeper
-        let def_cluster_border = "#E5C07B"; // golden
-        let def_default_link = def_line;
-        let def_title = def_text;
-        let def_label_bg = def_main_bkg;
-        let def_edge_label_bg = def_main_bkg;
-
-        // Allow overrides via env vars (keep defaults above if absent)
-        let theme_name =
-            std::env::var("MDMDVIEW_MERMAID_THEME").unwrap_or_else(|_| "base".to_string());
-        let main_bkg =
-            std::env::var("MDMDVIEW_MERMAID_MAIN_BKG").unwrap_or_else(|_| def_main_bkg.to_string());
-        let primary = std::env::var("MDMDVIEW_MERMAID_PRIMARY_COLOR")
-            .unwrap_or_else(|_| def_primary.to_string());
-        let primary_border = std::env::var("MDMDVIEW_MERMAID_PRIMARY_BORDER")
-            .unwrap_or_else(|_| def_primary_border.to_string());
-        let primary_text = std::env::var("MDMDVIEW_MERMAID_PRIMARY_TEXT")
-            .unwrap_or_else(|_| def_primary_text.to_string());
-        let secondary = std::env::var("MDMDVIEW_MERMAID_SECONDARY_COLOR")
-            .unwrap_or_else(|_| def_secondary.to_string());
-        let tertiary = std::env::var("MDMDVIEW_MERMAID_TERTIARY_COLOR")
-            .unwrap_or_else(|_| def_tertiary.to_string());
-        let line =
-            std::env::var("MDMDVIEW_MERMAID_LINE_COLOR").unwrap_or_else(|_| def_line.to_string());
-        let text =
-            std::env::var("MDMDVIEW_MERMAID_TEXT_COLOR").unwrap_or_else(|_| def_text.to_string());
-        let cluster_bkg = std::env::var("MDMDVIEW_MERMAID_CLUSTER_BKG")
-            .unwrap_or_else(|_| def_cluster_bkg.to_string());
-        let cluster_border = std::env::var("MDMDVIEW_MERMAID_CLUSTER_BORDER")
-            .unwrap_or_else(|_| def_cluster_border.to_string());
-        let default_link = std::env::var("MDMDVIEW_MERMAID_LINK_COLOR")
-            .unwrap_or_else(|_| def_default_link.to_string());
-        let title =
-            std::env::var("MDMDVIEW_MERMAID_TITLE_COLOR").unwrap_or_else(|_| def_title.to_string());
-        let label_bg =
-            std::env::var("MDMDVIEW_MERMAID_LABEL_BG").unwrap_or_else(|_| def_label_bg.to_string());
-        let edge_label_bg = std::env::var("MDMDVIEW_MERMAID_EDGE_LABEL_BG")
-            .unwrap_or_else(|_| def_edge_label_bg.to_string());
-
-        let theme = format!(
-            concat!(
-                "%%{{init: {{\"theme\": \"{}\", \"themeVariables\": {{",
-                "\"background\": \"{}\", ",
-                "\"mainBkg\": \"{}\", ",
-                "\"textColor\": \"{}\", ",
-                "\"titleColor\": \"{}\", ",
-                "\"primaryColor\": \"{}\", ",
-                "\"primaryBorderColor\": \"{}\", ",
-                "\"primaryTextColor\": \"{}\", ",
-                "\"secondaryColor\": \"{}\", ",
-                "\"tertiaryColor\": \"{}\", ",
-                "\"lineColor\": \"{}\", ",
-                "\"defaultLinkColor\": \"{}\", ",
-                "\"clusterBkg\": \"{}\", ",
-                "\"clusterBorder\": \"{}\", ",
-                "\"labelBackground\": \"{}\", ",
-                "\"edgeLabelBackground\": \"{}\"",
-                "}} }}%%\n"
-            ),
-            theme_name,
-            main_bkg,
-            main_bkg,
-            text,
-            title,
-            primary,
-            primary_border,
-            primary_text,
-            secondary,
-            tertiary,
-            line,
-            default_link,
-            cluster_bkg,
-            cluster_border,
-            label_bg,
-            edge_label_bg
-        );
-        format!("{}{}", theme, code)
-    }
-
-    // Choose background fill for Mermaid rasterization, based on env
-    fn mermaid_bg_fill() -> Option<[u8; 4]> {
-        // Preferred: explicit color
-        if let Ok(hex) = std::env::var("MDMDVIEW_MERMAID_BG_COLOR") {
-            if let Some(rgba) = Self::parse_hex_color(&hex) {
-                return Some(rgba);
-            }
-        }
-        // Mode selector; default to the theme's main background
-        let mode = std::env::var("MDMDVIEW_MERMAID_BG").unwrap_or_else(|_| "theme".to_string());
-        match mode.as_str() {
-            "transparent" => None,
-            "dark" => Some([20, 20, 20, 255]),
-            "light" => Some([255, 255, 255, 255]),
-            _ /* theme */ => {
-                let hex = std::env::var("MDMDVIEW_MERMAID_MAIN_BKG").unwrap_or_else(|_| "#FFF8DB".to_string());
-                Self::parse_hex_color(&hex).or(Some([255, 248, 219, 255]))
-            }
-        }
-    }
-
-    fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
-        let t = s.trim();
-        let hex = t.strip_prefix('#').unwrap_or(t);
-        let (r, g, b, a) = match hex.len() {
-            6 => (
-                u8::from_str_radix(&hex[0..2], 16).ok()?,
-                u8::from_str_radix(&hex[2..4], 16).ok()?,
-                u8::from_str_radix(&hex[4..6], 16).ok()?,
-                255,
-            ),
-            8 => (
-                u8::from_str_radix(&hex[0..2], 16).ok()?,
-                u8::from_str_radix(&hex[2..4], 16).ok()?,
-                u8::from_str_radix(&hex[4..6], 16).ok()?,
-                u8::from_str_radix(&hex[6..8], 16).ok()?,
-            ),
-            _ => return None,
-        };
-        Some([r, g, b, a])
     }
 
     /// Render a table using an egui Grid
@@ -3896,15 +3226,21 @@ impl MarkdownRenderer {
         let desired_total: f32 = desired.iter().sum();
         let min_total: f32 = mins.iter().sum();
 
-        let mut widths = if desired_total <= clamped_available {
-            desired.to_vec()
-        } else if min_total >= clamped_available {
+        let mut widths = if min_total >= clamped_available {
             if min_total <= f32::EPSILON {
                 vec![clamped_available / mins.len() as f32; mins.len()]
             } else {
                 mins.iter()
                     .map(|m| m * (clamped_available / min_total))
                     .collect()
+            }
+        } else if desired_total <= clamped_available {
+            let slack = desired_total - min_total;
+            if slack <= f32::EPSILON {
+                let bonus = (clamped_available - min_total) / mins.len() as f32;
+                mins.iter().map(|m| m + bonus).collect()
+            } else {
+                desired.to_vec()
             }
         } else {
             let mut widths = mins.to_vec();
@@ -4105,7 +3441,8 @@ impl MarkdownRenderer {
 
         // Try embedded assets first
         if let Some(bytes) = Self::embedded_image_bytes(resolved_src) {
-            if let Some((color_image, w, h)) = Self::bytes_to_color_image_guess(bytes, None) {
+            if let Some((color_image, w, h)) = image_decode::bytes_to_color_image_guess(bytes, None)
+            {
                 let tex = ui.ctx().load_texture(
                     format!("img:{}", resolved_src),
                     color_image,
@@ -4122,7 +3459,7 @@ impl MarkdownRenderer {
 
         let bytes = std::fs::read(path).ok()?;
         let (color_image, w, h) = if Self::is_svg_path(resolved_src) {
-            match Self::svg_bytes_to_color_image(&bytes) {
+            match image_decode::svg_bytes_to_color_image(&bytes) {
                 Some((ci, w, h)) => (ci, w, h),
                 None => return None,
             }
@@ -4196,76 +3533,6 @@ impl MarkdownRenderer {
             .next()
             .map(|e| e.eq_ignore_ascii_case("svg"))
             .unwrap_or(false)
-    }
-
-    fn svg_bytes_to_color_image(bytes: &[u8]) -> Option<(egui::ColorImage, u32, u32)> {
-        Self::svg_bytes_to_color_image_with_bg(bytes, None)
-    }
-
-    fn svg_bytes_to_color_image_with_bg(
-        bytes: &[u8],
-        bg: Option<[u8; 4]>,
-    ) -> Option<(egui::ColorImage, u32, u32)> {
-        // Parse SVG
-        let mut opt = usvg::Options::default();
-        // Load system fonts so <text> elements render via resvg
-        let mut db = usvg::fontdb::Database::new();
-        db.load_system_fonts();
-        opt.fontdb = std::sync::Arc::new(db);
-        let tree = usvg::Tree::from_data(bytes, &opt).ok()?;
-        // Determine output size in pixels
-        let sz = tree.size();
-        let pix = sz.to_int_size();
-        let (mut w, mut h) = (pix.width(), pix.height());
-        if w == 0 || h == 0 {
-            // Fallback if unspecified
-            w = 256;
-            h = 256;
-        }
-        // Clamp to a reasonable texture size
-        let max_side: u32 = 4096;
-        if w > max_side || h > max_side {
-            let scale = (max_side as f32 / w as f32).min(max_side as f32 / h as f32);
-            w = (w as f32 * scale) as u32;
-            h = (h as f32 * scale) as u32;
-        }
-        let mut pixmap = tiny_skia::Pixmap::new(w, h)?;
-        // Optional background fill for better contrast against dark UI
-        if let Some([r, g, b, a]) = bg {
-            let color = tiny_skia::Color::from_rgba8(r, g, b, a);
-            pixmap.fill(color);
-        }
-        let mut pmut = pixmap.as_mut();
-        resvg::render(&tree, tiny_skia::Transform::identity(), &mut pmut);
-        let data = pixmap.data();
-        let img = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], data);
-        Some((img, w, h))
-    }
-
-    // Try decode as raster image first (PNG/JPEG/WEBP). If that fails, try SVG.
-    fn bytes_to_color_image_guess(
-        bytes: &[u8],
-        bg: Option<[u8; 4]>,
-    ) -> Option<(egui::ColorImage, u32, u32)> {
-        if let Ok(img) = image::load_from_memory(bytes) {
-            let rgba = img.to_rgba8();
-            let (w, h) = rgba.dimensions();
-            let mut ci = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
-            if let Some([br, bgc, bb, ba]) = bg {
-                // Composite over solid bg
-                for p in ci.pixels.iter_mut() {
-                    let a = p[3] as f32 / 255.0;
-                    let inv = 1.0 - a;
-                    p[0] = (a * p[0] as f32 + inv * br as f32) as u8;
-                    p[1] = (a * p[1] as f32 + inv * bgc as f32) as u8;
-                    p[2] = (a * p[2] as f32 + inv * bb as f32) as u8;
-                    p[3] = ba; // fully opaque output
-                }
-            }
-            return Some((ci, w, h));
-        }
-        // Fallback to SVG
-        Self::svg_bytes_to_color_image_with_bg(bytes, bg)
     }
 
     /// Find syntax definition for a given language name
@@ -4355,16 +3622,7 @@ mod tests {
     use image::codecs::png::PngEncoder;
     use image::ColorType;
     use image::ImageEncoder;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::tempdir;
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env lock")
-    }
 
     struct ForcedRenderActions {
         actions: Vec<&'static str>,
@@ -4459,29 +3717,6 @@ mod tests {
             .write_image(&pixels, width, height, ColorType::Rgba8)
             .expect("encode png");
         out
-    }
-
-    struct EnvGuard {
-        key: &'static str,
-        original: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let original = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self { key, original }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            if let Some(value) = &self.original {
-                std::env::set_var(self.key, value);
-            } else {
-                std::env::remove_var(self.key);
-            }
-        }
     }
 
     #[test]
@@ -4727,50 +3962,6 @@ mod tests {
             }
             other => panic!("Expected Paragraph, got {:?}", other),
         }
-    }
-
-    #[test]
-    fn test_kroki_enabled_env_flag() {
-        let _lock = env_lock();
-        std::env::remove_var("MDMDVIEW_ENABLE_KROKI");
-        assert!(!MarkdownRenderer::kroki_enabled_for_tests());
-
-        std::env::set_var("MDMDVIEW_ENABLE_KROKI", "true");
-        assert!(MarkdownRenderer::kroki_enabled_for_tests());
-
-        std::env::set_var("MDMDVIEW_ENABLE_KROKI", "0");
-        assert!(!MarkdownRenderer::kroki_enabled_for_tests());
-
-        std::env::remove_var("MDMDVIEW_ENABLE_KROKI");
-    }
-
-    #[test]
-    fn test_spawn_kroki_job_reports_queue_disconnect() {
-        let mut renderer = MarkdownRenderer::new();
-        let (temp_tx, temp_rx) = crossbeam_channel::bounded::<KrokiRequest>(1);
-        drop(temp_rx);
-        renderer.kroki_job_tx = temp_tx;
-        let result = renderer.spawn_kroki_job(1, "graph TD; A-->B;");
-        assert!(matches!(result, Err(KrokiEnqueueError::Disconnected)));
-    }
-
-    #[test]
-    fn test_spawn_kroki_job_reports_queue_full() {
-        let mut renderer = MarkdownRenderer::new();
-        let (temp_tx, temp_rx) = crossbeam_channel::bounded::<KrokiRequest>(1);
-        // Fill the bounded channel so subsequent sends report Full
-        temp_tx
-            .try_send(KrokiRequest {
-                key: 99,
-                url: "https://example.invalid/diagram".to_string(),
-                payload: "graph TD; A-->B;".to_string(),
-            })
-            .expect("pre-fill queue");
-        renderer.kroki_job_tx = temp_tx.clone();
-        // Keep receiver alive (unused) to avoid disconnecting the channel
-        let _guard = temp_rx;
-        let result = renderer.spawn_kroki_job(42, "graph TD; B-->C;");
-        assert!(matches!(result, Err(KrokiEnqueueError::QueueFull)));
     }
 
     #[test]
@@ -5441,100 +4632,6 @@ fn main() {}
     }
 
     #[test]
-    fn test_poll_kroki_results_caches() {
-        let mut renderer = MarkdownRenderer::new();
-        let (tx, rx) = std::sync::mpsc::channel();
-        renderer.kroki_rx = rx;
-        renderer.kroki_pending.borrow_mut().insert(1);
-        renderer.kroki_pending.borrow_mut().insert(2);
-        tx.send((1, Ok(vec![1, 2, 3]))).expect("send ok");
-        tx.send((2, Err("boom".to_string()))).expect("send err");
-
-        renderer.poll_kroki_results();
-
-        assert!(renderer.kroki_svg_cache.borrow().contains_key(&1));
-        assert!(renderer.kroki_errors.borrow().contains_key(&2));
-        assert!(!renderer.kroki_pending.borrow().contains(&1));
-    }
-
-    #[test]
-    fn test_render_mermaid_block_paths() {
-        let _lock = env_lock();
-        let renderer = MarkdownRenderer::new();
-        let code = "graph TD; A-->B;";
-        let key = MarkdownRenderer::hash_str(code);
-
-        let _guard = EnvGuard::set("MDMDVIEW_ENABLE_KROKI", "1");
-        let _guard_url = EnvGuard::set("MDMDVIEW_KROKI_URL", "https://example.invalid");
-
-        renderer
-            .kroki_svg_cache
-            .borrow_mut()
-            .insert(key, tiny_png_bytes());
-
-        with_test_ui(|_, ui| {
-            assert!(renderer.render_mermaid_block(ui, code));
-        });
-
-        let bad_code = "graph TD; B-->C;";
-        let bad_key = MarkdownRenderer::hash_str(bad_code);
-        renderer
-            .kroki_svg_cache
-            .borrow_mut()
-            .insert(bad_key, vec![1, 2, 3]);
-
-        with_test_ui(|_, ui| {
-            assert!(!renderer.render_mermaid_block(ui, bad_code));
-        });
-
-        let mut renderer = MarkdownRenderer::new();
-        let (tx, _rx) = crossbeam_channel::bounded(0);
-        renderer.kroki_job_tx = tx;
-        with_test_ui(|_, ui| {
-            assert!(renderer.render_mermaid_block(ui, "graph TD; C-->D;"));
-        });
-    }
-
-    #[test]
-    fn test_render_mermaid_block_disabled() {
-        let _lock = env_lock();
-        let renderer = MarkdownRenderer::new();
-        let _guard = EnvGuard::set("MDMDVIEW_ENABLE_KROKI", "0");
-        with_test_ui(|_, ui| {
-            assert!(!renderer.render_mermaid_block(ui, "graph TD; A-->B;"));
-        });
-    }
-
-    #[test]
-    fn test_parse_hex_color_and_mermaid_bg_fill() {
-        let _lock = env_lock();
-        assert_eq!(
-            MarkdownRenderer::parse_hex_color("#ff00ff"),
-            Some([255, 0, 255, 255])
-        );
-        assert_eq!(
-            MarkdownRenderer::parse_hex_color("11223344"),
-            Some([17, 34, 51, 68])
-        );
-        assert!(MarkdownRenderer::parse_hex_color("bad").is_none());
-
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG_COLOR", "#010203");
-            assert_eq!(MarkdownRenderer::mermaid_bg_fill(), Some([1, 2, 3, 255]));
-        }
-
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG", "transparent");
-            assert_eq!(MarkdownRenderer::mermaid_bg_fill(), None);
-        }
-
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG", "dark");
-            assert_eq!(MarkdownRenderer::mermaid_bg_fill(), Some([20, 20, 20, 255]));
-        }
-    }
-
-    #[test]
     fn test_to_superscript_full_mapping() {
         let input = "0123456789+-=()abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ#";
         let out = MarkdownRenderer::to_superscript(input);
@@ -5979,49 +5076,6 @@ fn main() {}
         with_test_ui(|_, ui| {
             renderer.render_table_tablebuilder(ui, &headers, &rows, 0);
             renderer.render_table_tablebuilder(ui, &headers, &[], 1);
-        });
-    }
-
-    #[test]
-    fn test_render_mermaid_block_cache_and_queue_paths() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_ENABLE_KROKI", "1");
-        let mut renderer = MarkdownRenderer::new();
-        renderer.font_sizes.body = 80.0;
-        let code = "graph TD; A-->B;";
-        let key = MarkdownRenderer::hash_str(code);
-        renderer
-            .kroki_svg_cache
-            .borrow_mut()
-            .insert(key, tiny_png_bytes());
-
-        with_test_ui(|_, ui| {
-            ui.set_width(12.0);
-            assert!(renderer.render_mermaid_block(ui, code));
-        });
-        with_test_ui(|_, ui| {
-            ui.set_width(12.0);
-            assert!(renderer.render_mermaid_block(ui, code));
-        });
-
-        renderer.kroki_pending.borrow_mut().insert(key);
-        with_test_ui(|_, ui| {
-            assert!(renderer.render_mermaid_block(ui, code));
-        });
-
-        let mut renderer_ok = MarkdownRenderer::new();
-        let (tx, _rx) = crossbeam_channel::bounded(4);
-        renderer_ok.kroki_job_tx = tx;
-        with_test_ui(|_, ui| {
-            assert!(renderer_ok.render_mermaid_block(ui, "graph TD; C-->D;"));
-        });
-
-        let mut renderer_disc = MarkdownRenderer::new();
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        drop(rx);
-        renderer_disc.kroki_job_tx = tx;
-        with_test_ui(|_, ui| {
-            assert!(!renderer_disc.render_mermaid_block(ui, "graph TD; E-->F;"));
         });
     }
 

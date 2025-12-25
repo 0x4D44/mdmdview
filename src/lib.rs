@@ -1,11 +1,13 @@
 pub mod app;
 pub mod emoji_assets;
 pub mod emoji_catalog;
+pub(crate) mod image_decode;
 /// A simple markdown viewer built with egui
 ///
 /// This library provides markdown parsing and rendering functionality
 /// that can be embedded in GUI applications.
 pub mod markdown_renderer;
+pub(crate) mod mermaid_renderer;
 pub mod sample_files;
 pub mod table_support;
 pub mod window_state;
