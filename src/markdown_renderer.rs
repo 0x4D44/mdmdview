@@ -3314,6 +3314,24 @@ impl MarkdownRenderer {
         self.element_rects.borrow().get(index).copied()
     }
 
+    pub fn layout_signature(&self) -> u64 {
+        let rects = self.element_rects.borrow();
+        let mut h = DefaultHasher::new();
+        rects.len().hash(&mut h);
+        for rect in rects.iter() {
+            let min_x = (rect.min.x * 2.0).round() as i32;
+            let min_y = (rect.min.y * 2.0).round() as i32;
+            let max_x = (rect.max.x * 2.0).round() as i32;
+            let max_y = (rect.max.y * 2.0).round() as i32;
+            (min_x, min_y, max_x, max_y).hash(&mut h);
+        }
+        h.finish()
+    }
+
+    pub fn has_pending_renders(&self) -> bool {
+        self.mermaid.has_pending()
+    }
+
     /// Set or clear the highlight phrase (case-insensitive)
     pub fn set_highlight_phrase(&self, phrase: Option<&str>) {
         if let Some(p) = phrase {
@@ -3613,6 +3631,21 @@ impl MarkdownRenderer {
         self.font_sizes = FontSizes::default();
         self.clear_table_layout_cache();
     }
+
+    /// Set zoom scale relative to default font sizes.
+    pub fn set_zoom_scale(&mut self, scale: f32) {
+        let scale = scale.clamp(0.5, 4.0);
+        let default = FontSizes::default();
+        self.font_sizes.body = (default.body * scale).clamp(8.0, 32.0);
+        self.font_sizes.h1 = (default.h1 * scale).clamp(16.0, 48.0);
+        self.font_sizes.h2 = (default.h2 * scale).clamp(14.0, 42.0);
+        self.font_sizes.h3 = (default.h3 * scale).clamp(12.0, 36.0);
+        self.font_sizes.h4 = (default.h4 * scale).clamp(11.0, 32.0);
+        self.font_sizes.h5 = (default.h5 * scale).clamp(10.0, 28.0);
+        self.font_sizes.h6 = (default.h6 * scale).clamp(9.0, 24.0);
+        self.font_sizes.code = (default.code * scale).clamp(8.0, 20.0);
+        self.clear_table_layout_cache();
+    }
 }
 
 #[cfg(test)]
@@ -3780,6 +3813,20 @@ mod tests {
 
         renderer.reset_zoom();
         assert_eq!(renderer.font_sizes.body, original_body);
+    }
+
+    #[test]
+    fn test_set_zoom_scale() {
+        let mut renderer = MarkdownRenderer::new();
+
+        renderer.set_zoom_scale(1.5);
+        assert!((renderer.font_sizes.body - 21.0).abs() < 0.1);
+
+        renderer.set_zoom_scale(10.0);
+        assert_eq!(renderer.font_sizes.body, 32.0);
+
+        renderer.set_zoom_scale(0.1);
+        assert_eq!(renderer.font_sizes.body, 8.0);
     }
 
     #[test]

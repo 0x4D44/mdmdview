@@ -428,6 +428,17 @@ cargo test window_state
 cargo test search
 ```
 
+### Visual Regression (Optional)
+
+```bash
+python -m pip install -r tools/regression/requirements.txt
+python -m playwright install chromium
+cargo build --release
+python tools/regression/runner.py update-reference
+python tools/regression/runner.py update-baseline
+python tools/regression/runner.py run
+```
+
 ### Code Quality
 
 ```bash
