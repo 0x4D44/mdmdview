@@ -106,3 +106,53 @@ pub fn shortcode_map() -> &'static HashMap<&'static str, &'static str> {
         ])
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_image_bytes_for_known_emojis() {
+        let emojis = [
+            "\u{1f389}",
+            "\u{2705}",
+            "\u{1f680}",
+            "\u{1f642}",
+            "\u{1f600}",
+            "\u{1f609}",
+            "\u{2b50}",
+            "\u{1f525}",
+            "\u{1f44d}",
+            "\u{1f44e}",
+            "\u{1f4a1}",
+            "\u{2753}",
+            "\u{2757}",
+            "\u{1f4dd}",
+            "\u{1f9e0}",
+            "\u{1f9ea}",
+            "\u{1f4e6}",
+            "\u{1f527}",
+        ];
+
+        for emoji in emojis {
+            let bytes = image_bytes_for(emoji).expect("expected embedded emoji bytes");
+            assert!(!bytes.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_image_bytes_for_unknown_emoji() {
+        assert!(image_bytes_for("\u{1f47d}").is_none());
+    }
+
+    #[test]
+    fn test_shortcode_map_contains_expected_entries() {
+        let map = shortcode_map();
+        assert_eq!(map.get(":tada:"), Some(&"\u{1f389}"));
+        assert_eq!(map.get(":white_check_mark:"), Some(&"\u{2705}"));
+        assert_eq!(map.get(":rocket:"), Some(&"\u{1f680}"));
+        assert_eq!(map.get(":fire:"), Some(&"\u{1f525}"));
+        assert_eq!(map.get(":wrench:"), Some(&"\u{1f527}"));
+        assert!(map.get(":does_not_exist:").is_none());
+    }
+}

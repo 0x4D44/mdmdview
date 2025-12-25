@@ -671,4 +671,131 @@ mod tests {
         let stats = compute_column_stats(&headers, &rows, 32);
         assert!(stats[0].max_graphemes > stats[1].max_graphemes);
     }
+
+    #[test]
+    fn test_header_text_and_spans_to_text_variants() {
+        let spans = vec![
+            InlineSpan::Text(" Alpha ".to_string()),
+            InlineSpan::Strong("Beta".to_string()),
+            InlineSpan::Emphasis("Gamma".to_string()),
+            InlineSpan::Strikethrough("Delta".to_string()),
+            InlineSpan::Code("Epsilon".to_string()),
+            InlineSpan::Link {
+                text: "Zeta".to_string(),
+                url: "https://example.invalid".to_string(),
+            },
+            InlineSpan::Image {
+                src: "img.png".to_string(),
+                alt: "Eta".to_string(),
+                title: None,
+            },
+        ];
+
+        let header = header_text(&spans);
+        assert!(header.contains("Alpha"));
+        assert!(header.contains("Beta"));
+        assert!(header.contains("Zeta"));
+        assert!(header.contains("Eta"));
+
+        let text = spans_to_text(&spans);
+        assert!(text.contains("Alpha"));
+        assert!(text.contains("Zeta"));
+        assert!(text.contains("Eta"));
+
+        assert_eq!(header_text(&[]), "Column");
+        assert_eq!(
+            header_text(&[InlineSpan::Text("   ".to_string())]),
+            "Column"
+        );
+    }
+
+    #[test]
+    fn test_column_policy_to_column_and_tooltip() {
+        let policies = vec![
+            ColumnPolicy::Auto,
+            ColumnPolicy::Fixed {
+                width: 120.0,
+                clip: true,
+            },
+            ColumnPolicy::Remainder { clip: false },
+            ColumnPolicy::Resizable {
+                min: 50.0,
+                preferred: 140.0,
+                clip: true,
+            },
+        ];
+
+        for policy in policies {
+            let _col = policy.to_column();
+            let tooltip = column_tooltip("Header", &policy).expect("tooltip");
+            assert!(tooltip.contains("Header"));
+        }
+    }
+
+    #[test]
+    fn test_apply_preferred_width_clamps_and_hash_changes() {
+        let mut spec = ColumnSpec::new(
+            "body",
+            ColumnPolicy::Resizable {
+                min: 50.0,
+                preferred: 120.0,
+                clip: false,
+            },
+            None,
+        );
+        let original_hash = spec.policy_hash;
+        spec.apply_preferred_width(10.0);
+        match spec.policy {
+            ColumnPolicy::Resizable { preferred, min, .. } => {
+                assert_eq!(preferred, min);
+            }
+            other => panic!("unexpected policy: {:?}", other),
+        }
+        assert_ne!(spec.policy_hash, original_hash);
+
+        let mut fixed = ColumnSpec::new(
+            "fixed",
+            ColumnPolicy::Fixed {
+                width: 40.0,
+                clip: false,
+            },
+            None,
+        );
+        let fixed_hash = fixed.policy_hash;
+        fixed.apply_preferred_width(100.0);
+        assert_eq!(fixed.policy_hash, fixed_hash);
+    }
+
+    #[test]
+    fn test_compute_column_stats_empty() {
+        let stats = compute_column_stats(&[], &[], 10);
+        assert!(stats.is_empty());
+    }
+
+    #[test]
+    fn test_classify_date_status_notes_columns() {
+        let mut remainder = 0usize;
+        let date_policy = classify_column("Date", 0, &mut remainder, None, 14.0);
+        let status_policy = classify_column("Status", 1, &mut remainder, None, 14.0);
+        let notes_policy = classify_column("Notes", 2, &mut remainder, None, 14.0);
+
+        assert!(matches!(date_policy, ColumnPolicy::Fixed { .. }));
+        assert!(matches!(status_policy, ColumnPolicy::Fixed { .. }));
+        assert!(matches!(notes_policy, ColumnPolicy::Resizable { .. }));
+    }
+
+    #[test]
+    fn test_derive_column_specs_remainder_for_rich_content() {
+        let headers = vec![vec![span("Body")]];
+        let rows = vec![vec![vec![InlineSpan::Link {
+            text: "verylonglinkword".to_string(),
+            url: "https://example.invalid".to_string(),
+        }]]];
+        let stats = compute_column_stats(&headers, &rows, 32);
+        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
+        let specs = derive_column_specs(&ctx);
+
+        assert!(matches!(specs[0].policy, ColumnPolicy::Remainder { .. }));
+    }
+
 }

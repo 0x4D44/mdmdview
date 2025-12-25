@@ -170,3 +170,35 @@ fn flame(img: &mut egui::ColorImage, size: usize) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn has_non_transparent_pixel(img: &egui::ColorImage) -> bool {
+        img.pixels.iter().any(|p| p.a() != 0)
+    }
+
+    #[test]
+    fn test_make_image_known_emojis_produce_pixels() {
+        let emojis = [
+            "\u{2705}",
+            "\u{1f389}",
+            "\u{1f680}",
+            "\u{2764}",
+            "\u{1f496}",
+            "\u{2b50}",
+            "\u{1f525}",
+        ];
+
+        for emoji in emojis {
+            let img = make_image(emoji, 24).expect("expected fallback image");
+            assert!(has_non_transparent_pixel(&img));
+        }
+    }
+
+    #[test]
+    fn test_make_image_unknown_returns_none() {
+        assert!(make_image("\u{1f47d}", 24).is_none());
+    }
+}

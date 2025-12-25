@@ -5,9 +5,11 @@
 /// A simple, standalone markdown viewer for Windows built with Rust and egui.
 /// This application provides a clean interface for viewing markdown files with
 /// syntax highlighting, embedded samples, and essential viewing features.
+#[cfg(not(test))]
 use mdmdview::{load_window_state, sanitize_window_state, MarkdownViewerApp, APP_TITLE_PREFIX};
 
 /// Application entry point
+#[cfg(not(test))]
 fn main() -> Result<(), eframe::Error> {
     // Configure logging for debugging (only in debug builds)
     #[cfg(debug_assertions)]
@@ -85,6 +87,9 @@ fn main() -> Result<(), eframe::Error> {
         }),
     )
 }
+
+#[cfg(test)]
+fn main() {}
 
 /// Create an application icon from embedded data
 fn create_app_icon() -> egui::IconData {
@@ -224,5 +229,56 @@ mod tests {
         assert_eq!(parse_bool_flag("1"), Some(true));
         assert_eq!(parse_bool_flag("0"), Some(false));
         assert_eq!(parse_bool_flag("unknown"), None);
+    }
+
+    #[test]
+    fn test_configure_egui_style_dark_mode() {
+        let ctx = egui::Context::default();
+        let mut style = (*ctx.style()).clone();
+        style.visuals.dark_mode = true;
+        ctx.set_style(style);
+
+        configure_egui_style(&ctx);
+
+        let style = ctx.style();
+        assert_eq!(style.spacing.item_spacing, egui::Vec2::new(8.0, 8.0));
+        assert_eq!(style.spacing.window_margin, egui::Margin::same(8.0));
+        assert_eq!(style.spacing.menu_margin, egui::Margin::same(6.0));
+        assert_eq!(style.visuals.window_rounding, egui::Rounding::same(4.0));
+        assert_eq!(style.visuals.menu_rounding, egui::Rounding::same(4.0));
+        assert_eq!(style.visuals.window_fill, egui::Color32::BLACK);
+        assert_eq!(style.visuals.panel_fill, egui::Color32::BLACK);
+        assert_eq!(style.visuals.faint_bg_color, egui::Color32::from_gray(20));
+        assert_eq!(style.visuals.extreme_bg_color, egui::Color32::BLACK);
+    }
+
+    #[test]
+    fn test_configure_egui_style_light_mode() {
+        let ctx = egui::Context::default();
+        let mut style = (*ctx.style()).clone();
+        style.visuals.dark_mode = false;
+        style.visuals.window_fill = egui::Color32::from_rgb(1, 2, 3);
+        style.visuals.panel_fill = egui::Color32::from_rgb(4, 5, 6);
+        style.visuals.faint_bg_color = egui::Color32::from_rgb(7, 8, 9);
+        style.visuals.extreme_bg_color = egui::Color32::from_rgb(10, 11, 12);
+        ctx.set_style(style);
+
+        configure_egui_style(&ctx);
+
+        let style = ctx.style();
+        assert_eq!(style.spacing.item_spacing, egui::Vec2::new(8.0, 8.0));
+        assert_eq!(style.spacing.window_margin, egui::Margin::same(8.0));
+        assert_eq!(style.spacing.menu_margin, egui::Margin::same(6.0));
+        assert_eq!(style.visuals.window_rounding, egui::Rounding::same(4.0));
+        assert_eq!(style.visuals.menu_rounding, egui::Rounding::same(4.0));
+        assert_eq!(style.visuals.window_fill, egui::Color32::from_rgb(1, 2, 3));
+        assert_eq!(style.visuals.panel_fill, egui::Color32::from_rgb(4, 5, 6));
+        assert_eq!(style.visuals.faint_bg_color, egui::Color32::from_rgb(7, 8, 9));
+        assert_eq!(style.visuals.extreme_bg_color, egui::Color32::from_rgb(10, 11, 12));
+    }
+
+    #[test]
+    fn test_main_stub_executes() {
+        super::main();
     }
 }

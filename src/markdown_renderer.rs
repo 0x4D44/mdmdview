@@ -50,6 +50,21 @@ struct InlineStyle {
     color: Option<Color32>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static FORCED_RENDER_ACTIONS: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
+}
+
+#[cfg(test)]
+fn render_action_triggered(triggered: bool, action: &'static str) -> bool {
+    triggered || FORCED_RENDER_ACTIONS.with(|actions| actions.borrow().contains(action))
+}
+
+#[cfg(not(test))]
+fn render_action_triggered(triggered: bool, _action: &'static str) -> bool {
+    triggered
+}
+
 /// Font size configuration
 #[derive(Debug, Clone)]
 pub struct FontSizes {
@@ -1688,10 +1703,7 @@ impl MarkdownRenderer {
 
                 // Add context menu for code
                 response.context_menu(|ui| {
-                    if ui.button("Copy Code").clicked() {
-                        ui.ctx().copy_text(code.clone());
-                        ui.close_menu();
-                    }
+                    self.render_inline_code_context_menu(ui, code);
                 });
             }
             InlineSpan::Strong(text) => {
@@ -1742,28 +1754,16 @@ impl MarkdownRenderer {
                 let id = egui::Id::new(format!("link:{}:{}", *counter, url));
                 *counter += 1;
                 let r = ui.interact(group.response.rect, id, egui::Sense::click());
-                if r.hovered() {
+                if render_action_triggered(r.hovered(), "link_hover") {
                     ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
                 }
-                if r.clicked() {
+                if render_action_triggered(r.clicked(), "link_click") {
                     self.trigger_link(url);
                 }
 
                 // Add context menu for links
                 r.context_menu(|ui| {
-                    if ui.button("Open Link").clicked() {
-                        self.trigger_link(url);
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Copy Link Text").clicked() {
-                        ui.ctx().copy_text(text.clone());
-                        ui.close_menu();
-                    }
-                    if ui.button("Copy Link URL").clicked() {
-                        ui.ctx().copy_text(url.clone());
-                        ui.close_menu();
-                    }
+                    self.render_link_context_menu(ui, text, url);
                 });
             }
             InlineSpan::Image { src, alt, title } => {
@@ -1788,7 +1788,7 @@ impl MarkdownRenderer {
                     let resp = ui.add(image);
                     if let Some(t) = title {
                         if !t.is_empty() {
-                            if resp.hovered() {
+                            if render_action_triggered(resp.hovered(), "image_hover") {
                                 resp.on_hover_text(t.clone());
                             }
                             // Subtle caption below image
@@ -1927,11 +1927,7 @@ impl MarkdownRenderer {
         // Note: Due to egui limitations, selection is cleared on right-click
         // As a workaround, we provide "Copy Text" for the segment
         response.context_menu(|ui| {
-            if ui.button("Copy Text").clicked() {
-                ui.ctx().copy_text(text.to_string());
-                ui.close_menu();
-            }
-            ui.label("Tip: Use Ctrl+C to copy selected text");
+            self.render_text_context_menu(ui, text);
         });
     }
 
@@ -1970,12 +1966,62 @@ impl MarkdownRenderer {
 
         // Add context menu for highlighted text
         response.context_menu(|ui| {
-            if ui.button("Copy Text").clicked() {
-                ui.ctx().copy_text(text.to_string());
-                ui.close_menu();
-            }
-            ui.label("Tip: Use Ctrl+C to copy selected text");
+            self.render_text_context_menu(ui, text);
         });
+    }
+
+    fn render_text_context_menu(&self, ui: &mut egui::Ui, text: &str) {
+        if ui.button("Copy Text").clicked() {
+            self.copy_text_and_close(ui, text);
+        }
+        ui.label("Tip: Use Ctrl+C to copy selected text");
+    }
+
+    fn render_inline_code_context_menu(&self, ui: &mut egui::Ui, code: &str) {
+        if ui.button("Copy Code").clicked() {
+            self.copy_text_and_close(ui, code);
+        }
+    }
+
+    fn render_code_block_context_menu(
+        &self,
+        ui: &mut egui::Ui,
+        code: &str,
+        language: Option<&str>,
+    ) {
+        if ui.button("Copy Code").clicked() {
+            self.copy_text_and_close(ui, code);
+        }
+        if let Some(lang) = language {
+            if ui.button(format!("Copy as {}", lang)).clicked() {
+                self.copy_text_and_close(ui, &format!("```{}\n{}\n```", lang, code));
+            }
+        }
+    }
+
+    fn render_link_context_menu(&self, ui: &mut egui::Ui, text: &str, url: &str) {
+        if ui.button("Open Link").clicked() {
+            self.trigger_link(url);
+            ui.close_menu();
+        }
+        ui.separator();
+        if ui.button("Copy Link Text").clicked() {
+            self.copy_text_and_close(ui, text);
+        }
+        if ui.button("Copy Link URL").clicked() {
+            self.copy_text_and_close(ui, url);
+        }
+    }
+
+    fn render_cell_context_menu(&self, ui: &mut egui::Ui, text: &str) {
+        if ui.button("Copy Cell Text").clicked() {
+            self.copy_text_and_close(ui, text);
+        }
+    }
+
+    fn copy_text_and_close(&self, ui: &mut egui::Ui, text: &str) {
+        ui.ctx().copy_text(text.to_string());
+        ui.close_menu();
     }
 
     /// Map a grapheme cluster to an emoji image key if available.
@@ -2475,17 +2521,7 @@ impl MarkdownRenderer {
 
         // Add context menu for code blocks
         frame_response.response.context_menu(|ui| {
-            if ui.button("Copy Code").clicked() {
-                ui.ctx().copy_text(code.to_string());
-                ui.close_menu();
-            }
-            if let Some(lang) = language {
-                if ui.button(format!("Copy as {}", lang)).clicked() {
-                    // Include language identifier for better pasting
-                    ui.ctx().copy_text(format!("```{}\n{}\n```", lang, code));
-                    ui.close_menu();
-                }
-            }
+            self.render_code_block_context_menu(ui, code, language.as_deref());
         });
 
         ui.add_space(8.0);
@@ -3010,6 +3046,7 @@ impl MarkdownRenderer {
         std::env::var("MDMDVIEW_KROKI_URL").unwrap_or_else(|_| "https://kroki.io".to_string())
     }
 
+    #[cfg(not(test))]
     fn perform_kroki_with_agent(
         agent: &ureq::Agent,
         url: &str,
@@ -3034,6 +3071,15 @@ impl MarkdownRenderer {
         } else {
             Err(format!("HTTP {} from Kroki", resp.status()))
         }
+    }
+
+    #[cfg(test)]
+    fn perform_kroki_with_agent(
+        _agent: &ureq::Agent,
+        _url: &str,
+        _payload: &str,
+    ) -> Result<Vec<u8>, String> {
+        Err("Kroki disabled in tests".to_string())
     }
 
     fn spawn_kroki_job(&self, key: u64, code: &str) -> Result<(), KrokiEnqueueError> {
@@ -3584,8 +3630,11 @@ impl MarkdownRenderer {
         let entry = metrics.entry_mut(table_id);
 
         // Check if font size changed since last persist - if so, clear old widths
-        // to prevent size mismatch after zoom changes.
-        entry.check_font_size_change(self.font_sizes.body);
+        // to prevent size mismatch after zoom changes. Skip persisting in this
+        // frame so the next layout can compute fresh widths before we store them.
+        if entry.check_font_size_change(self.font_sizes.body) {
+            return;
+        }
 
         for (spec, width) in specs.iter().zip(widths.iter()) {
             if let ColumnPolicy::Resizable { .. } = spec.policy {
@@ -3736,10 +3785,7 @@ impl MarkdownRenderer {
             response = response.on_hover_text(build.plain_text.clone());
         }
         response.context_menu(|ui| {
-            if ui.button("Copy Cell Text").clicked() {
-                ui.ctx().copy_text(build.plain_text.clone());
-                ui.close_menu();
-            }
+            self.render_cell_context_menu(ui, &build.plain_text);
         });
 
         if let Some(link) = self.link_at_pointer(&response, &galley, &build) {
@@ -3893,13 +3939,17 @@ impl MarkdownRenderer {
     }
 
     /// Open URL in default browser
+    #[cfg(not(test))]
     fn open_url(&self, url: &str) {
         if let Err(e) = webbrowser::open(url) {
             eprintln!("Failed to open URL {}: {}", url, e);
         }
     }
 
-    fn trigger_link(&self, url: &str) {
+    #[cfg(test)]
+    fn open_url(&self, _url: &str) {}
+
+    pub(crate) fn trigger_link(&self, url: &str) {
         if let Some(fragment) = Self::extract_fragment(url) {
             *self.pending_anchor.borrow_mut() = Some(fragment);
         } else if Self::is_allowed_scheme(url) {
@@ -4302,6 +4352,130 @@ impl MarkdownRenderer {
 mod tests {
     use super::*;
     use crate::SAMPLE_FILES;
+    use image::codecs::png::PngEncoder;
+    use image::ColorType;
+    use image::ImageEncoder;
+    use std::sync::{Mutex, OnceLock};
+    use tempfile::tempdir;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().expect("env lock")
+    }
+
+    struct ForcedRenderActions {
+        actions: Vec<&'static str>,
+    }
+
+    impl ForcedRenderActions {
+        fn new(actions: &[&'static str]) -> Self {
+            FORCED_RENDER_ACTIONS.with(|set| {
+                let mut set = set.borrow_mut();
+                for action in actions {
+                    set.insert(*action);
+                }
+            });
+            Self {
+                actions: actions.to_vec(),
+            }
+        }
+    }
+
+    impl Drop for ForcedRenderActions {
+        fn drop(&mut self) {
+            FORCED_RENDER_ACTIONS.with(|set| {
+                let mut set = set.borrow_mut();
+                for action in &self.actions {
+                    set.remove(action);
+                }
+            });
+        }
+    }
+
+    fn with_test_ui<F>(f: F)
+    where
+        F: FnOnce(&egui::Context, &mut egui::Ui),
+    {
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(1024.0, 768.0),
+        ));
+        ctx.begin_frame(input);
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            f(&ctx, ui);
+        });
+        let _ = ctx.end_frame();
+    }
+
+    fn run_frame_with_input<F>(ctx: &egui::Context, input: egui::RawInput, f: F)
+    where
+        F: FnOnce(&egui::Context, &mut egui::Ui),
+    {
+        ctx.begin_frame(input);
+        egui::CentralPanel::default().show(ctx, |ui| {
+            f(ctx, ui);
+        });
+        let _ = ctx.end_frame();
+    }
+
+    fn input_with_click(pos: egui::Pos2, button: egui::PointerButton) -> egui::RawInput {
+        let mut input = egui::RawInput::default();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(320.0, 240.0),
+        ));
+        input.events.push(egui::Event::PointerMoved(pos));
+        input.events.push(egui::Event::PointerButton {
+            pos,
+            button,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        });
+        input.events.push(egui::Event::PointerButton {
+            pos,
+            button,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        input
+    }
+
+    fn tiny_png_bytes() -> Vec<u8> {
+        let width = 2u32;
+        let height = 2u32;
+        let pixels = vec![255u8; (width * height * 4) as usize];
+        let mut out = Vec::new();
+        let encoder = PngEncoder::new(&mut out);
+        encoder
+            .write_image(&pixels, width, height, ColorType::Rgba8)
+            .expect("encode png");
+        out
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn test_markdown_renderer_creation() {
@@ -4364,6 +4538,51 @@ mod tests {
 
         renderer.reset_zoom();
         assert_eq!(renderer.font_sizes.body, original_body);
+    }
+
+    #[test]
+    fn font_size_change_does_not_repersist_stale_widths() {
+        let mut renderer = MarkdownRenderer::new();
+        let table_id = 7u64;
+        let specs = vec![ColumnSpec::new(
+            "A",
+            ColumnPolicy::Resizable {
+                min: 20.0,
+                preferred: 100.0,
+                clip: false,
+            },
+            None,
+        )];
+        let widths = vec![100.0f32];
+
+        // Initial persist at default font size.
+        renderer.persist_resizable_widths(table_id, &specs, &widths);
+        let policy_hash = specs[0].policy_hash;
+        {
+            let metrics = renderer.table_metrics.borrow();
+            let entry = metrics.entry(table_id).expect("entry created");
+            assert_eq!(entry.persisted_width(policy_hash), Some(100.0));
+            assert_eq!(entry.persisted_font_size, Some(renderer.font_sizes.body));
+        }
+
+        // Simulate zoom: font size changes but widths captured are still the old ones.
+        renderer.font_sizes.body = 16.0;
+        renderer.persist_resizable_widths(table_id, &specs, &widths);
+        {
+            let metrics = renderer.table_metrics.borrow();
+            let entry = metrics.entry(table_id).expect("entry exists");
+            // Cleared and NOT re-saved in the same frame.
+            assert_eq!(entry.persisted_width(policy_hash), None);
+            assert_eq!(entry.persisted_font_size, Some(16.0));
+        }
+
+        // Next frame with new layout widths should persist again.
+        let new_widths = vec![80.0f32];
+        renderer.persist_resizable_widths(table_id, &specs, &new_widths);
+        let metrics = renderer.table_metrics.borrow();
+        let entry = metrics.entry(table_id).expect("entry exists");
+        assert_eq!(entry.persisted_width(policy_hash), Some(80.0));
+        assert_eq!(entry.persisted_font_size, Some(16.0));
     }
 
     #[test]
@@ -4505,6 +4724,7 @@ mod tests {
 
     #[test]
     fn test_kroki_enabled_env_flag() {
+        let _lock = env_lock();
         std::env::remove_var("MDMDVIEW_ENABLE_KROKI");
         assert!(!MarkdownRenderer::kroki_enabled_for_tests());
 
@@ -4855,5 +5075,995 @@ mod tests {
             .collect();
         assert_eq!(tables.len(), 2);
         assert_ne!(tables[0], tables[1], "table ids should differ by position");
+    }
+
+    #[test]
+    fn test_render_to_ui_rich_document_populates_rects_and_table_stats() {
+        let renderer = MarkdownRenderer::new();
+        let md = "\
+# Coverage Demo
+
+Paragraph with :tada: emoji and **bold** text and a [link](#target).
+
+> Quote line one
+> Quote line two
+
+- item one
+- item two
+
+---
+
+```rust
+fn main() {}
+```
+
+| Col A | Col B |
+| --- | --- |
+| A1 | B1 |
+| A2 | B2 |
+
+![Logo](assets/samples/logo.svg \"Logo\")
+![Sample](assets/samples/webp_sample.webp \"Sample\")
+![Missing](missing_test_image.png \"Missing\")
+![Remote](https://example.com/image.png \"Remote\")
+";
+
+        let elements = renderer.parse(md).expect("parse ok");
+        renderer.set_highlight_phrase(Some("item"));
+
+        with_test_ui(|_, ui| {
+            renderer.render_to_ui(ui, &elements);
+        });
+
+        assert!(renderer.element_rect_at(0).is_some());
+        assert!(renderer.header_rect_for("coverage-demo").is_some());
+        let (rendered, total) = renderer.table_render_stats();
+        assert!(total > 0);
+        assert!(rendered > 0);
+        let (_hits, misses) = renderer.table_layout_cache_stats();
+        assert!(misses > 0);
+    }
+
+    #[test]
+    fn test_table_layout_cache_records_hits() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![InlineSpan::Text("alpha".to_string())];
+        let style = egui::Style::default();
+
+        let _ = renderer.cached_layout_job(&style, Some(0), 0, &spans, 120.0, false);
+        let _ = renderer.cached_layout_job(&style, Some(0), 0, &spans, 120.0, false);
+
+        let (hits, misses) = renderer.table_layout_cache_stats();
+        assert!(hits >= 1);
+        assert!(misses >= 1);
+
+        renderer.clear_table_layout_cache();
+        assert_eq!(renderer.table_layout_cache_stats(), (0, 0));
+    }
+
+    #[test]
+    fn test_trigger_link_handles_fragments_and_schemes() {
+        let renderer = MarkdownRenderer::new();
+
+        renderer.trigger_link("#Section-One");
+        assert_eq!(
+            renderer.take_pending_anchor(),
+            Some("section-one".to_string())
+        );
+        assert!(renderer.take_pending_anchor().is_none());
+
+        renderer.trigger_link("ftp://example.com");
+        assert!(renderer.take_pending_anchor().is_none());
+
+        renderer.trigger_link("https://example.com");
+        assert!(renderer.take_pending_anchor().is_none());
+
+        renderer.trigger_link("mailto:hello@example.com");
+        assert!(renderer.take_pending_anchor().is_none());
+    }
+
+    #[test]
+    fn test_resolve_image_path_with_base_dir() {
+        let renderer = MarkdownRenderer::new();
+        let temp = tempdir().expect("temp dir");
+        renderer.set_base_dir(Some(temp.path()));
+
+        let resolved = renderer.resolve_image_path("sample.png");
+        assert!(resolved.contains("sample.png"));
+
+        let abs = temp.path().join("abs.png");
+        let abs_str = abs.to_string_lossy().into_owned();
+        assert_eq!(renderer.resolve_image_path(&abs_str), abs_str);
+
+        renderer.set_base_dir(None);
+        assert_eq!(renderer.resolve_image_path("relative.png"), "relative.png");
+    }
+
+    #[test]
+    fn test_disk_image_loads_and_caches() {
+        let renderer = MarkdownRenderer::new();
+        let temp = tempdir().expect("temp dir");
+        let image_path = temp.path().join("disk.png");
+
+        let mut img = image::RgbaImage::new(2, 2);
+        for pixel in img.pixels_mut() {
+            *pixel = image::Rgba([10, 20, 30, 255]);
+        }
+        img.save(&image_path).expect("save png");
+
+        renderer.set_base_dir(Some(temp.path()));
+        let resolved = renderer.resolve_image_path("disk.png");
+        with_test_ui(|_, ui| {
+            let loaded = renderer.get_or_load_image_texture(ui, &resolved);
+            assert!(loaded.is_some());
+        });
+
+        assert!(renderer.image_textures.borrow().contains_key(&resolved));
+    }
+
+    #[test]
+    fn test_context_menu_helpers_execute() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            renderer.render_text_context_menu(ui, "text");
+            renderer.render_inline_code_context_menu(ui, "code");
+            renderer.render_code_block_context_menu(ui, "fn main() {}", Some("rust"));
+            renderer.render_link_context_menu(ui, "label", "#anchor");
+            renderer.render_cell_context_menu(ui, "cell");
+            renderer.copy_text_and_close(ui, "direct-copy");
+        });
+    }
+
+    #[test]
+    fn test_table_wrap_overhaul_toggle() {
+        let mut renderer = MarkdownRenderer::new();
+        assert!(renderer.table_wrap_overhaul_enabled());
+        renderer.set_table_wrap_overhaul_enabled(false);
+        assert!(!renderer.table_wrap_overhaul_enabled());
+        renderer.set_table_wrap_overhaul_enabled(true);
+        assert!(renderer.table_wrap_overhaul_enabled());
+    }
+
+    #[test]
+    fn test_build_layout_job_covers_inline_styles() {
+        let renderer = MarkdownRenderer::new();
+        renderer.set_highlight_phrase(Some("code"));
+        let spans = vec![
+            InlineSpan::Text("plain".to_string()),
+            InlineSpan::Strong("bold".to_string()),
+            InlineSpan::Emphasis("italics".to_string()),
+            InlineSpan::Strikethrough("strike".to_string()),
+            InlineSpan::Code("code".to_string()),
+            InlineSpan::Link {
+                text: "ext".to_string(),
+                url: "https://example.com".to_string(),
+            },
+            InlineSpan::Link {
+                text: "local".to_string(),
+                url: "#anchor".to_string(),
+            },
+        ];
+
+        with_test_ui(|_, ui| {
+            let style = ui.style().clone();
+            let build = renderer.build_layout_job(&style, &spans, 200.0, false);
+            assert!(build.plain_text.contains("plain"));
+            assert_eq!(build.link_ranges.len(), 2);
+        });
+    }
+
+    #[test]
+    fn test_render_inline_span_variants() {
+        let renderer = MarkdownRenderer::new();
+        let temp = tempdir().expect("temp dir");
+        let image_path = temp.path().join("image.png");
+        std::fs::write(&image_path, tiny_png_bytes()).expect("write png");
+        renderer.set_base_dir(Some(temp.path()));
+
+        let image_span = InlineSpan::Image {
+            src: "image.png".to_string(),
+            alt: "Alt".to_string(),
+            title: Some("Title".to_string()),
+        };
+        let missing_span = InlineSpan::Image {
+            src: "missing.png".to_string(),
+            alt: "".to_string(),
+            title: None,
+        };
+
+        let _guard = ForcedRenderActions::new(&["link_hover", "link_click", "image_hover"]);
+        with_test_ui(|_, ui| {
+            ui.visuals_mut().dark_mode = false;
+            renderer.render_inline_span(ui, &InlineSpan::Code("code".to_string()), None, None);
+
+            ui.visuals_mut().dark_mode = true;
+            renderer.render_inline_span(ui, &InlineSpan::Text("text".to_string()), None, None);
+            renderer.render_inline_span(ui, &InlineSpan::Strong("bold".to_string()), None, None);
+            renderer.render_inline_span(
+                ui,
+                &InlineSpan::Emphasis("italic".to_string()),
+                None,
+                None,
+            );
+            renderer.render_inline_span(
+                ui,
+                &InlineSpan::Strikethrough("strike".to_string()),
+                None,
+                None,
+            );
+            renderer.render_inline_span(
+                ui,
+                &InlineSpan::Link {
+                    text: "ext".to_string(),
+                    url: "https://example.com".to_string(),
+                },
+                None,
+                None,
+            );
+            renderer.render_inline_span(
+                ui,
+                &InlineSpan::Link {
+                    text: "local".to_string(),
+                    url: "#anchor".to_string(),
+                },
+                None,
+                None,
+            );
+            renderer.render_inline_span(ui, &image_span, None, None);
+            renderer.render_inline_span(ui, &missing_span, None, None);
+        });
+    }
+
+    #[test]
+    fn test_parse_lists_and_blockquotes() {
+        let renderer = MarkdownRenderer::new();
+        let md = "\
+- Item 1
+- Item 2
+  - Nested
+
+1. First
+2. Second
+
+> Quote line
+> > Nested quote
+
+---";
+
+        let elements = renderer.parse(md).expect("parse ok");
+        assert!(elements.iter().any(|el| matches!(
+            el,
+            MarkdownElement::List { ordered: false, .. }
+        )));
+        assert!(elements
+            .iter()
+            .any(|el| matches!(el, MarkdownElement::List { ordered: true, .. })));
+        assert!(elements
+            .iter()
+            .any(|el| matches!(el, MarkdownElement::Quote { .. })));
+        assert!(elements
+            .iter()
+            .any(|el| matches!(el, MarkdownElement::HorizontalRule)));
+    }
+
+    #[test]
+    fn test_elements_to_plain_text_variants() {
+        let elements = vec![
+            MarkdownElement::Header {
+                level: 1,
+                spans: vec![InlineSpan::Text("Title".to_string())],
+                id: "title".to_string(),
+            },
+            MarkdownElement::Paragraph(vec![
+                InlineSpan::Text("Hello".to_string()),
+                InlineSpan::Code("code".to_string()),
+            ]),
+            MarkdownElement::CodeBlock {
+                language: Some("rust".to_string()),
+                text: "fn main() {}".to_string(),
+            },
+            MarkdownElement::List {
+                ordered: false,
+                items: vec![vec![InlineSpan::Text("Item".to_string())]],
+            },
+            MarkdownElement::Quote {
+                depth: 1,
+                lines: vec![vec![InlineSpan::Text("Quote".to_string())]],
+            },
+            MarkdownElement::HorizontalRule,
+            MarkdownElement::Table {
+                headers: vec![vec![InlineSpan::Text("H".to_string())]],
+                rows: vec![vec![vec![InlineSpan::Image {
+                    src: "img.png".to_string(),
+                    alt: "Alt".to_string(),
+                    title: None,
+                }]]],
+            },
+        ];
+        let text = MarkdownRenderer::elements_to_plain_text(&elements);
+        assert!(text.contains("Title"));
+        assert!(text.contains("Hello"));
+        assert!(text.contains("fn main"));
+        assert!(text.contains("Item"));
+        assert!(text.contains("Quote"));
+        assert!(text.contains("Alt"));
+    }
+
+    #[test]
+    fn test_table_rendering_legacy_and_overhaul() {
+        let mut renderer = MarkdownRenderer::new();
+        let headers = vec![
+            vec![InlineSpan::Text("H1".to_string())],
+            vec![InlineSpan::Text("H2".to_string())],
+        ];
+        let rows = vec![vec![
+            vec![InlineSpan::Text("Cell".to_string())],
+            vec![InlineSpan::Link {
+                text: "Link".to_string(),
+                url: "https://example.com".to_string(),
+            }],
+        ]];
+        let elements = vec![MarkdownElement::Table { headers, rows }];
+
+        with_test_ui(|_, ui| {
+            renderer.render_to_ui(ui, &elements);
+        });
+
+        renderer.set_table_wrap_overhaul_enabled(false);
+        with_test_ui(|_, ui| {
+            renderer.render_to_ui(ui, &elements);
+        });
+    }
+
+    #[test]
+    fn test_measure_inline_spans_and_emoji_texture() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![
+            InlineSpan::Text("Hello".to_string()),
+            InlineSpan::Text("🙂".to_string()),
+        ];
+
+        with_test_ui(|_, ui| {
+            let width = renderer.measure_inline_spans(ui, &spans);
+            assert!(width > 0.0);
+            let tex = renderer.get_or_make_emoji_texture(ui, "👾");
+            assert!(tex.size()[0] > 0);
+        });
+
+        let img = renderer.generate_emoji_image("👾", 16);
+        assert_eq!(img.size[0], 16);
+    }
+
+    #[test]
+    fn test_poll_kroki_results_caches() {
+        let mut renderer = MarkdownRenderer::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        renderer.kroki_rx = rx;
+        renderer.kroki_pending.borrow_mut().insert(1);
+        renderer.kroki_pending.borrow_mut().insert(2);
+        tx.send((1, Ok(vec![1, 2, 3]))).expect("send ok");
+        tx.send((2, Err("boom".to_string())))
+            .expect("send err");
+
+        renderer.poll_kroki_results();
+
+        assert!(renderer.kroki_svg_cache.borrow().contains_key(&1));
+        assert!(renderer.kroki_errors.borrow().contains_key(&2));
+        assert!(!renderer.kroki_pending.borrow().contains(&1));
+    }
+
+    #[test]
+    fn test_render_mermaid_block_paths() {
+        let _lock = env_lock();
+        let renderer = MarkdownRenderer::new();
+        let code = "graph TD; A-->B;";
+        let key = MarkdownRenderer::hash_str(code);
+
+        let _guard = EnvGuard::set("MDMDVIEW_ENABLE_KROKI", "1");
+        let _guard_url = EnvGuard::set("MDMDVIEW_KROKI_URL", "https://example.invalid");
+
+        renderer
+            .kroki_svg_cache
+            .borrow_mut()
+            .insert(key, tiny_png_bytes());
+
+        with_test_ui(|_, ui| {
+            assert!(renderer.render_mermaid_block(ui, code));
+        });
+
+        let bad_code = "graph TD; B-->C;";
+        let bad_key = MarkdownRenderer::hash_str(bad_code);
+        renderer
+            .kroki_svg_cache
+            .borrow_mut()
+            .insert(bad_key, vec![1, 2, 3]);
+
+        with_test_ui(|_, ui| {
+            assert!(!renderer.render_mermaid_block(ui, bad_code));
+        });
+
+        let mut renderer = MarkdownRenderer::new();
+        let (tx, _rx) = crossbeam_channel::bounded(0);
+        renderer.kroki_job_tx = tx;
+        with_test_ui(|_, ui| {
+            assert!(renderer.render_mermaid_block(ui, "graph TD; C-->D;"));
+        });
+    }
+
+    #[test]
+    fn test_render_mermaid_block_disabled() {
+        let _lock = env_lock();
+        let renderer = MarkdownRenderer::new();
+        let _guard = EnvGuard::set("MDMDVIEW_ENABLE_KROKI", "0");
+        with_test_ui(|_, ui| {
+            assert!(!renderer.render_mermaid_block(ui, "graph TD; A-->B;"));
+        });
+    }
+
+    #[test]
+    fn test_parse_hex_color_and_mermaid_bg_fill() {
+        let _lock = env_lock();
+        assert_eq!(
+            MarkdownRenderer::parse_hex_color("#ff00ff"),
+            Some([255, 0, 255, 255])
+        );
+        assert_eq!(
+            MarkdownRenderer::parse_hex_color("11223344"),
+            Some([17, 34, 51, 68])
+        );
+        assert!(MarkdownRenderer::parse_hex_color("bad").is_none());
+
+        {
+            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG_COLOR", "#010203");
+            assert_eq!(
+                MarkdownRenderer::mermaid_bg_fill(),
+                Some([1, 2, 3, 255])
+            );
+        }
+
+        {
+            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG", "transparent");
+            assert_eq!(MarkdownRenderer::mermaid_bg_fill(), None);
+        }
+
+        {
+            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG", "dark");
+            assert_eq!(
+                MarkdownRenderer::mermaid_bg_fill(),
+                Some([20, 20, 20, 255])
+            );
+        }
+    }
+
+    #[test]
+    fn test_to_superscript_full_mapping() {
+        let input = "0123456789+-=()abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ#";
+        let out = MarkdownRenderer::to_superscript(input);
+        assert_eq!(out.chars().count(), input.chars().count());
+        assert!(out.contains('\u{2070}'));
+        assert!(out.contains('\u{00b9}'));
+        assert!(out.contains('\u{1d43}'));
+        assert!(out.contains('#'));
+    }
+
+    #[test]
+    fn test_element_plain_text_variants() {
+        let list = MarkdownElement::List {
+            ordered: false,
+            items: vec![vec![InlineSpan::Text("Item".to_string())]],
+        };
+        let quote = MarkdownElement::Quote {
+            depth: 1,
+            lines: vec![vec![InlineSpan::Text("Quote".to_string())]],
+        };
+        let table = MarkdownElement::Table {
+            headers: vec![vec![InlineSpan::Text("Header".to_string())]],
+            rows: vec![vec![vec![InlineSpan::Text("Cell".to_string())]]],
+        };
+
+        assert!(MarkdownRenderer::element_plain_text(&list).contains("Item"));
+        assert!(MarkdownRenderer::element_plain_text(&quote).contains("Quote"));
+        assert_eq!(MarkdownRenderer::element_plain_text(&MarkdownElement::HorizontalRule), "---");
+        assert!(MarkdownRenderer::element_plain_text(&table).contains("Header"));
+        assert!(MarkdownRenderer::element_plain_text(&table).contains("Cell"));
+    }
+
+    #[test]
+    fn test_parse_element_image_outside_paragraph() {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![
+            Event::Start(Tag::Image(
+                LinkType::Inline,
+                "img.png".into(),
+                "Title".into(),
+            )),
+            Event::Text("Alt".into()),
+            Event::End(Tag::Image(LinkType::Inline, "".into(), "".into())),
+        ];
+        let mut elements = Vec::new();
+        let mut slugs = std::collections::HashMap::new();
+        let next = renderer
+            .parse_element(&events, 0, &mut elements, &mut slugs)
+            .expect("parse ok");
+        assert_eq!(next, events.len());
+        assert!(matches!(elements.get(0), Some(MarkdownElement::Paragraph(_))));
+        if let Some(MarkdownElement::Paragraph(spans)) = elements.get(0) {
+            assert!(matches!(
+                spans.get(0),
+                Some(InlineSpan::Image { title: Some(t), .. }) if t == "Title"
+            ));
+        }
+    }
+
+    #[test]
+    fn test_parse_list_event_variants() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![
+            Event::Start(Tag::List(None)),
+            Event::Start(Tag::Item),
+            Event::Start(Tag::Emphasis),
+            Event::Text("em".into()),
+            Event::End(Tag::Emphasis),
+            Event::Start(Tag::Strong),
+            Event::Text("strong".into()),
+            Event::End(Tag::Strong),
+            Event::Start(Tag::Strikethrough),
+            Event::Text("strike".into()),
+            Event::End(Tag::Strikethrough),
+            Event::Start(Tag::Link(
+                LinkType::Inline,
+                "https://example.com".into(),
+                "".into(),
+            )),
+            Event::Text("link".into()),
+            Event::End(Tag::Link(LinkType::Inline, "".into(), "".into())),
+            Event::Start(Tag::Image(
+                LinkType::Inline,
+                "img.png".into(),
+                "Title".into(),
+            )),
+            Event::Text("alt".into()),
+            Event::End(Tag::Image(LinkType::Inline, "".into(), "".into())),
+            Event::Code("code".into()),
+            Event::Text("text".into()),
+            Event::SoftBreak,
+            Event::Start(Tag::List(Some(1))),
+            Event::Start(Tag::Item),
+            Event::Text("nested".into()),
+            Event::End(Tag::Item),
+            Event::End(Tag::List(Some(1))),
+            Event::End(Tag::Item),
+            Event::End(Tag::List(None)),
+        ];
+
+        let (items, next) = renderer.parse_list(&events, 1, None, 0)?;
+        assert_eq!(next, events.len());
+        assert_eq!(items.len(), 1);
+        let spans = &items[0];
+        assert!(spans.iter().any(|s| matches!(s, InlineSpan::Emphasis(_))));
+        assert!(spans.iter().any(|s| matches!(s, InlineSpan::Strong(_))));
+        assert!(spans
+            .iter()
+            .any(|s| matches!(s, InlineSpan::Strikethrough(_))));
+        assert!(spans.iter().any(|s| matches!(s, InlineSpan::Link { .. })));
+        assert!(spans.iter().any(|s| matches!(s, InlineSpan::Image { .. })));
+        assert!(spans.iter().any(|s| matches!(s, InlineSpan::Code(_))));
+        assert!(spans.iter().any(|s| matches!(s, InlineSpan::Text(t) if t.contains('\n'))));
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_inline_spans_with_breaks_variants() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![
+            Event::Start(Tag::Paragraph),
+            Event::Text("Hello".into()),
+            Event::SoftBreak,
+            Event::Code("code".into()),
+            Event::Start(Tag::Strong),
+            Event::Text("bold".into()),
+            Event::End(Tag::Strong),
+            Event::Start(Tag::Emphasis),
+            Event::Text("em".into()),
+            Event::End(Tag::Emphasis),
+            Event::Start(Tag::Strikethrough),
+            Event::Text("strike".into()),
+            Event::End(Tag::Strikethrough),
+            Event::Start(Tag::Link(
+                LinkType::Inline,
+                "https://example.com".into(),
+                "".into(),
+            )),
+            Event::Text("link".into()),
+            Event::End(Tag::Link(LinkType::Inline, "".into(), "".into())),
+            Event::Start(Tag::Image(
+                LinkType::Inline,
+                "img.png".into(),
+                "Title".into(),
+            )),
+            Event::Text("alt".into()),
+            Event::End(Tag::Image(LinkType::Inline, "".into(), "".into())),
+            Event::End(Tag::Paragraph),
+        ];
+
+        let (spans, next) =
+            renderer.parse_inline_spans_with_breaks(&events, 1, Tag::Paragraph, true)?;
+        assert_eq!(next, events.len());
+        assert!(spans.iter().any(|s| matches!(s, InlineSpan::Code(_))));
+        assert!(spans.iter().any(|s| matches!(s, InlineSpan::Strong(_))));
+        assert!(spans.iter().any(|s| matches!(s, InlineSpan::Emphasis(_))));
+        assert!(spans
+            .iter()
+            .any(|s| matches!(s, InlineSpan::Strikethrough(_))));
+        assert!(spans.iter().any(|s| matches!(s, InlineSpan::Link { .. })));
+        assert!(spans.iter().any(|s| matches!(s, InlineSpan::Image { .. })));
+        assert!(spans.iter().any(|s| matches!(s, InlineSpan::Text(t) if t.contains('\n'))));
+
+        let (spans_no_break, _) = renderer.parse_inline_spans(&events, 1, Tag::Paragraph)?;
+        assert!(spans_no_break
+            .iter()
+            .any(|s| matches!(s, InlineSpan::Text(t) if t.contains(' '))));
+        Ok(())
+    }
+
+    #[test]
+    fn test_collect_blockquotes_nested_and_breaks() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![
+            Event::Start(Tag::BlockQuote),
+            Event::Start(Tag::Paragraph),
+            Event::Text("Line1\nLine2".into()),
+            Event::End(Tag::Paragraph),
+            Event::SoftBreak,
+            Event::Start(Tag::BlockQuote),
+            Event::Start(Tag::Paragraph),
+            Event::Text("Nested".into()),
+            Event::End(Tag::Paragraph),
+            Event::End(Tag::BlockQuote),
+            Event::End(Tag::BlockQuote),
+        ];
+        let (quotes, next) = renderer.collect_blockquotes(&events, 1, 1)?;
+        assert_eq!(next, events.len());
+        assert!(quotes.iter().any(|(depth, _)| *depth == 1));
+        assert!(quotes.iter().any(|(depth, _)| *depth == 2));
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_code_block_with_language() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let elements = renderer.parse("```rust\nfn main() {}\n```")?;
+        assert!(elements.iter().any(|el| matches!(
+            el,
+            MarkdownElement::CodeBlock {
+                language: Some(lang),
+                ..
+            } if lang == "rust"
+        )));
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_table_from_markdown() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let md = "| H1 | H2 |\n| --- | --- |\n| A | B |\n| C | D |\n";
+        let elements = renderer.parse(md)?;
+        assert!(elements
+            .iter()
+            .any(|el| matches!(el, MarkdownElement::Table { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn test_hash_inline_spans_variants() {
+        let spans = vec![
+            InlineSpan::Text("t".to_string()),
+            InlineSpan::Code("c".to_string()),
+            InlineSpan::Strong("s".to_string()),
+            InlineSpan::Emphasis("e".to_string()),
+            InlineSpan::Strikethrough("x".to_string()),
+            InlineSpan::Link {
+                text: "link".to_string(),
+                url: "https://example.com".to_string(),
+            },
+            InlineSpan::Image {
+                src: "img.png".to_string(),
+                alt: "alt".to_string(),
+                title: Some("title".to_string()),
+            },
+        ];
+        let hash = MarkdownRenderer::hash_inline_spans(&spans);
+        let hash2 = MarkdownRenderer::hash_inline_spans(&[InlineSpan::Text("other".to_string())]);
+        assert_ne!(hash, hash2);
+    }
+
+    #[test]
+    fn test_highlight_segments_edge_cases() {
+        let renderer = MarkdownRenderer::new();
+        assert!(renderer.highlight_segments("", Some("a")).is_empty());
+        assert_eq!(
+            renderer.highlight_segments("abc", None),
+            vec![(0..3, false)]
+        );
+        assert_eq!(
+            renderer.highlight_segments("abc", Some("")),
+            vec![(0..3, false)]
+        );
+        let segments = renderer.highlight_segments("Hello", Some("ell"));
+        assert!(segments.iter().any(|(_, highlighted)| *highlighted));
+    }
+
+    #[test]
+    fn test_resolve_table_widths_branches() {
+        assert_eq!(
+            MarkdownRenderer::resolve_table_widths(100.0, &[10.0, 10.0], &[20.0, 30.0]),
+            vec![20.0, 30.0]
+        );
+
+        assert_eq!(
+            MarkdownRenderer::resolve_table_widths(10.0, &[0.0, 0.0], &[0.0, 0.0]),
+            vec![5.0, 5.0]
+        );
+
+        assert_eq!(
+            MarkdownRenderer::resolve_table_widths(10.0, &[10.0, 10.0], &[20.0, 20.0]),
+            vec![5.0, 5.0]
+        );
+
+        assert_eq!(
+            MarkdownRenderer::resolve_table_widths(30.0, &[10.0, 10.0], &[10.0, 10.0]),
+            vec![15.0, 15.0]
+        );
+
+        let widths =
+            MarkdownRenderer::resolve_table_widths(30.0, &[10.0, 10.0], &[20.0, 30.0]);
+        assert_eq!(widths.len(), 2);
+        assert!((widths[0] + widths[1] - 30.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_handle_width_change_requests_repaint() {
+        let renderer = MarkdownRenderer::new();
+        let ctx = egui::Context::default();
+        renderer.handle_width_change(&ctx, 42, WidthChange::Large);
+        let entry = renderer
+            .table_metrics
+            .borrow()
+            .entry(42)
+            .expect("metrics entry");
+        assert!(entry.last_discard_frame.is_some());
+    }
+
+    #[test]
+    fn test_render_list_multiline_indent_and_empty() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![InlineSpan::Text("First\n  Nested".to_string())];
+        with_test_ui(|ctx, ui| {
+            ctx.set_visuals(egui::Visuals::light());
+            renderer.render_list(ui, false, &[]);
+            renderer.render_list(ui, true, &[spans.clone()]);
+        });
+    }
+
+    #[test]
+    fn test_render_inline_span_forced_actions_and_image_title() {
+        let mut renderer = MarkdownRenderer::new();
+        renderer.set_highlight_phrase(Some("hi"));
+        let image_span = InlineSpan::Image {
+            src: "assets/emoji/1f600.png".to_string(),
+            alt: "alt".to_string(),
+            title: Some("Caption".to_string()),
+        };
+        let missing_span = InlineSpan::Image {
+            src: "missing.png".to_string(),
+            alt: "missing".to_string(),
+            title: None,
+        };
+        let link_span = InlineSpan::Link {
+            text: "hi link".to_string(),
+            url: "https://example.com".to_string(),
+        };
+        let _guard = ForcedRenderActions::new(&["link_hover", "link_click", "image_hover"]);
+        with_test_ui(|_, ui| {
+            renderer.render_inline_span(
+                ui,
+                &InlineSpan::Text(format!("hi \u{1f600}")),
+                None,
+                None,
+            );
+            renderer.render_inline_span(ui, &InlineSpan::Strong("hi".to_string()), None, None);
+            renderer.render_inline_span(ui, &InlineSpan::Emphasis("hi".to_string()), None, None);
+            renderer.render_inline_span(
+                ui,
+                &InlineSpan::Strikethrough("hi".to_string()),
+                None,
+                None,
+            );
+            renderer.render_inline_span(ui, &InlineSpan::Code("code".to_string()), None, None);
+            renderer.render_inline_span(ui, &link_span, None, None);
+            renderer.render_inline_span(ui, &image_span, None, None);
+            renderer.render_inline_span(ui, &missing_span, None, None);
+        });
+    }
+
+    #[test]
+    fn test_get_or_load_image_texture_embedded_and_remote() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            let embedded = renderer.get_or_load_image_texture(ui, "assets/emoji/1f600.png");
+            assert!(embedded.is_some());
+            let remote = renderer.get_or_load_image_texture(ui, "https://example.com/img.png");
+            assert!(remote.is_none());
+        });
+    }
+
+    #[test]
+    fn test_get_or_make_emoji_texture_cache() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            let tex = renderer.get_or_make_emoji_texture(ui, "\u{1f600}");
+            assert!(tex.size()[0] > 0);
+            let cached = renderer.get_or_make_emoji_texture(ui, "\u{1f600}");
+            assert_eq!(cached.size(), tex.size());
+        });
+    }
+
+    #[test]
+    fn test_render_overhauled_cell_fragments() {
+        let renderer = MarkdownRenderer::new();
+        let emoji_span = InlineSpan::Text("\u{1f600}".to_string());
+        let image_span = InlineSpan::Image {
+            src: "assets/emoji/1f600.png".to_string(),
+            alt: "alt".to_string(),
+            title: None,
+        };
+        with_test_ui(|_, ui| {
+            renderer.render_overhauled_cell(ui, &[], 120.0, false, Some(0), 0);
+            renderer.render_overhauled_cell(
+                ui,
+                &[emoji_span.clone(), image_span.clone()],
+                120.0,
+                false,
+                Some(1),
+                1,
+            );
+        });
+    }
+
+    #[test]
+    fn test_paint_table_text_job_link_interaction() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![InlineSpan::Link {
+            text: "Click here for more text".to_string(),
+            url: "https://example.com".to_string(),
+        }];
+        let ctx = egui::Context::default();
+        let click_pos = egui::pos2(5.0, 5.0);
+
+        let input = input_with_click(click_pos, egui::PointerButton::Secondary);
+        run_frame_with_input(&ctx, input, |_, ui| {
+            ui.allocate_ui_at_rect(
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 80.0)),
+                |ui| {
+                    let build = renderer.build_layout_job(ui.style(), &spans, 30.0, false);
+                    renderer.paint_table_text_job(ui, 120.0, build);
+                },
+            );
+        });
+
+        let input = input_with_click(click_pos, egui::PointerButton::Primary);
+        run_frame_with_input(&ctx, input, |_, ui| {
+            ui.allocate_ui_at_rect(
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 80.0)),
+                |ui| {
+                    let build = renderer.build_layout_job(ui.style(), &spans, 30.0, false);
+                    renderer.paint_table_text_job(ui, 120.0, build);
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn test_render_table_tablebuilder_variants() {
+        let renderer = MarkdownRenderer::new();
+        let headers = vec![vec![InlineSpan::Text("H1".to_string())]];
+        let rows = vec![vec![
+            vec![InlineSpan::Text("A".to_string())],
+            vec![InlineSpan::Text("B".to_string())],
+        ]];
+        with_test_ui(|_, ui| {
+            renderer.render_table_tablebuilder(ui, &headers, &rows, 0);
+            renderer.render_table_tablebuilder(ui, &headers, &[], 1);
+        });
+    }
+
+    #[test]
+    fn test_render_mermaid_block_cache_and_queue_paths() {
+        let _lock = env_lock();
+        let _guard = EnvGuard::set("MDMDVIEW_ENABLE_KROKI", "1");
+        let mut renderer = MarkdownRenderer::new();
+        renderer.font_sizes.body = 80.0;
+        let code = "graph TD; A-->B;";
+        let key = MarkdownRenderer::hash_str(code);
+        renderer
+            .kroki_svg_cache
+            .borrow_mut()
+            .insert(key, tiny_png_bytes());
+
+        with_test_ui(|_, ui| {
+            ui.set_width(12.0);
+            assert!(renderer.render_mermaid_block(ui, code));
+        });
+        with_test_ui(|_, ui| {
+            ui.set_width(12.0);
+            assert!(renderer.render_mermaid_block(ui, code));
+        });
+
+        renderer.kroki_pending.borrow_mut().insert(key);
+        with_test_ui(|_, ui| {
+            assert!(renderer.render_mermaid_block(ui, code));
+        });
+
+        let mut renderer_ok = MarkdownRenderer::new();
+        let (tx, _rx) = crossbeam_channel::bounded(4);
+        renderer_ok.kroki_job_tx = tx;
+        with_test_ui(|_, ui| {
+            assert!(renderer_ok.render_mermaid_block(ui, "graph TD; C-->D;"));
+        });
+
+        let mut renderer_disc = MarkdownRenderer::new();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        drop(rx);
+        renderer_disc.kroki_job_tx = tx;
+        with_test_ui(|_, ui| {
+            assert!(!renderer_disc.render_mermaid_block(ui, "graph TD; E-->F;"));
+        });
+    }
+
+    #[test]
+    fn test_render_code_block_context_menu_clicks() {
+        let renderer = MarkdownRenderer::new();
+        let ctx = egui::Context::default();
+        let input = input_with_click(egui::pos2(5.0, 5.0), egui::PointerButton::Primary);
+        run_frame_with_input(&ctx, input, |_, ui| {
+            ui.allocate_ui_at_rect(
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 80.0)),
+                |ui| {
+                    renderer.render_code_block_context_menu(ui, "code", Some("rust"));
+                },
+            );
+        });
+
+        let input = input_with_click(egui::pos2(5.0, 30.0), egui::PointerButton::Primary);
+        run_frame_with_input(&ctx, input, |_, ui| {
+            ui.allocate_ui_at_rect(
+                egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 80.0)),
+                |ui| {
+                    renderer.render_code_block_context_menu(ui, "code", Some("rust"));
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn test_find_syntax_for_language() {
+        let renderer = MarkdownRenderer::new();
+        assert!(renderer.find_syntax_for_language("rust").is_some());
+        assert!(renderer.find_syntax_for_language("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_render_code_block_highlight_and_fallback() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            renderer.render_code_block(ui, Some("rust"), "fn main() {}");
+            renderer.render_code_block(ui, Some("notalanguage"), "code");
+        });
+    }
+
+    #[test]
+    fn test_to_superscript_maps_values() {
+        let mapped = MarkdownRenderer::to_superscript("Abc123!");
+        assert_ne!(mapped, "Abc123!");
     }
 }

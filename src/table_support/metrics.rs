@@ -203,4 +203,68 @@ mod tests {
         assert_eq!(entry.persisted_width(2), None);
         assert_eq!(entry.persisted_font_size, Some(16.0));
     }
+
+    #[test]
+    fn row_management_tracks_rows_and_rendered_counts() {
+        let mut entry = TableMetricEntry::default();
+        entry.begin_pass(3);
+        assert_eq!(entry.total_rows, 3);
+        assert_eq!(entry.rendered_rows, 0);
+
+        let row = entry.ensure_row(2);
+        row.max_height = 12.0;
+        row.dirty = true;
+
+        assert_eq!(entry.row(2).map(|r| r.max_height), Some(12.0));
+        assert_eq!(entry.row(2).map(|r| r.dirty), Some(true));
+        assert!(entry.row(5).is_none());
+
+        entry.note_row_rendered();
+        entry.note_row_rendered();
+        assert_eq!(entry.rendered_rows, 2);
+    }
+
+    #[test]
+    fn persisted_widths_can_be_added_and_removed() {
+        let mut entry = TableMetricEntry::default();
+        assert!(entry.persisted_width(10).is_none());
+        entry.set_persisted_width(10, 123.0);
+        assert_eq!(entry.persisted_width(10), Some(123.0));
+        entry.remove_persisted_width(10);
+        assert!(entry.persisted_width(10).is_none());
+    }
+
+    #[test]
+    fn update_widths_handles_empty_and_length_change() {
+        let mut entry = TableMetricEntry::default();
+        assert_eq!(entry.update_widths(&[], 1), WidthChange::None);
+        assert!(entry.current_widths().is_empty());
+
+        assert_eq!(entry.update_widths(&[50.0, 60.0], 2), WidthChange::None);
+        assert_eq!(entry.update_widths(&[50.0], 3), WidthChange::Large);
+    }
+
+    #[test]
+    fn table_metrics_totals_and_clear() {
+        let mut metrics = TableMetrics::default();
+        metrics.entry_mut(1).begin_pass(2);
+        metrics.entry_mut(1).note_row_rendered();
+        metrics.entry_mut(2).begin_pass(3);
+        metrics.entry_mut(2).note_row_rendered();
+        metrics.entry_mut(2).note_row_rendered();
+
+        assert_eq!(metrics.totals(), (3, 5));
+        metrics.clear();
+        assert!(metrics.entry(1).is_none());
+    }
+
+    #[test]
+    fn cache_stats_counts_hits_and_misses() {
+        let mut stats = CacheStats::default();
+        stats.record_hit();
+        stats.record_hit();
+        stats.record_miss();
+        assert_eq!(stats.hits, 2);
+        assert_eq!(stats.misses, 1);
+    }
 }
