@@ -470,7 +470,11 @@ mod tests {
     #[test]
     fn test_sample_files_content_not_empty() {
         for file in SAMPLE_FILES {
-            assert!(!file.content.is_empty(), "File {} has empty content", file.name);
+            assert!(
+                !file.content.is_empty(),
+                "File {} has empty content",
+                file.name
+            );
             assert!(!file.title.is_empty(), "File {} has empty title", file.name);
             assert!(!file.name.is_empty(), "File has empty name");
         }
@@ -483,7 +487,11 @@ mod tests {
         for file in SAMPLE_FILES {
             let parser = Parser::new_ext(file.content, Options::all());
             let events: Vec<_> = parser.collect();
-            assert!(!events.is_empty(), "File {} produces no markdown events", file.name);
+            assert!(
+                !events.is_empty(),
+                "File {} produces no markdown events",
+                file.name
+            );
         }
     }
 

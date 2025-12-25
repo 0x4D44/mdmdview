@@ -797,5 +797,4 @@ mod tests {
 
         assert!(matches!(specs[0].policy, ColumnPolicy::Remainder { .. }));
     }
-
 }

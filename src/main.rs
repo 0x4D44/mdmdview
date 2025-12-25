@@ -273,8 +273,14 @@ mod tests {
         assert_eq!(style.visuals.menu_rounding, egui::Rounding::same(4.0));
         assert_eq!(style.visuals.window_fill, egui::Color32::from_rgb(1, 2, 3));
         assert_eq!(style.visuals.panel_fill, egui::Color32::from_rgb(4, 5, 6));
-        assert_eq!(style.visuals.faint_bg_color, egui::Color32::from_rgb(7, 8, 9));
-        assert_eq!(style.visuals.extreme_bg_color, egui::Color32::from_rgb(10, 11, 12));
+        assert_eq!(
+            style.visuals.faint_bg_color,
+            egui::Color32::from_rgb(7, 8, 9)
+        );
+        assert_eq!(
+            style.visuals.extreme_bg_color,
+            egui::Color32::from_rgb(10, 11, 12)
+        );
     }
 
     #[test]

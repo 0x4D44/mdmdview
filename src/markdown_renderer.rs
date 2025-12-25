@@ -2521,7 +2521,7 @@ impl MarkdownRenderer {
 
         // Add context menu for code blocks
         frame_response.response.context_menu(|ui| {
-            self.render_code_block_context_menu(ui, code, language.as_deref());
+            self.render_code_block_context_menu(ui, code, language);
         });
 
         ui.add_space(8.0);
@@ -4360,7 +4360,10 @@ mod tests {
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().expect("env lock")
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock")
     }
 
     struct ForcedRenderActions {
@@ -4397,11 +4400,13 @@ mod tests {
         F: FnOnce(&egui::Context, &mut egui::Ui),
     {
         let ctx = egui::Context::default();
-        let mut input = egui::RawInput::default();
-        input.screen_rect = Some(egui::Rect::from_min_size(
-            egui::pos2(0.0, 0.0),
-            egui::vec2(1024.0, 768.0),
-        ));
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1024.0, 768.0),
+            )),
+            ..Default::default()
+        };
         ctx.begin_frame(input);
         egui::CentralPanel::default().show(&ctx, |ui| {
             f(&ctx, ui);
@@ -4421,11 +4426,13 @@ mod tests {
     }
 
     fn input_with_click(pos: egui::Pos2, button: egui::PointerButton) -> egui::RawInput {
-        let mut input = egui::RawInput::default();
-        input.screen_rect = Some(egui::Rect::from_min_size(
-            egui::pos2(0.0, 0.0),
-            egui::vec2(320.0, 240.0),
-        ));
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(320.0, 240.0),
+            )),
+            ..Default::default()
+        };
         input.events.push(egui::Event::PointerMoved(pos));
         input.events.push(egui::Event::PointerButton {
             pos,
@@ -5331,10 +5338,9 @@ fn main() {}
 ---";
 
         let elements = renderer.parse(md).expect("parse ok");
-        assert!(elements.iter().any(|el| matches!(
-            el,
-            MarkdownElement::List { ordered: false, .. }
-        )));
+        assert!(elements
+            .iter()
+            .any(|el| matches!(el, MarkdownElement::List { ordered: false, .. })));
         assert!(elements
             .iter()
             .any(|el| matches!(el, MarkdownElement::List { ordered: true, .. })));
@@ -5442,8 +5448,7 @@ fn main() {}
         renderer.kroki_pending.borrow_mut().insert(1);
         renderer.kroki_pending.borrow_mut().insert(2);
         tx.send((1, Ok(vec![1, 2, 3]))).expect("send ok");
-        tx.send((2, Err("boom".to_string())))
-            .expect("send err");
+        tx.send((2, Err("boom".to_string()))).expect("send err");
 
         renderer.poll_kroki_results();
 
@@ -5515,10 +5520,7 @@ fn main() {}
 
         {
             let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG_COLOR", "#010203");
-            assert_eq!(
-                MarkdownRenderer::mermaid_bg_fill(),
-                Some([1, 2, 3, 255])
-            );
+            assert_eq!(MarkdownRenderer::mermaid_bg_fill(), Some([1, 2, 3, 255]));
         }
 
         {
@@ -5528,10 +5530,7 @@ fn main() {}
 
         {
             let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG", "dark");
-            assert_eq!(
-                MarkdownRenderer::mermaid_bg_fill(),
-                Some([20, 20, 20, 255])
-            );
+            assert_eq!(MarkdownRenderer::mermaid_bg_fill(), Some([20, 20, 20, 255]));
         }
     }
 
@@ -5563,7 +5562,10 @@ fn main() {}
 
         assert!(MarkdownRenderer::element_plain_text(&list).contains("Item"));
         assert!(MarkdownRenderer::element_plain_text(&quote).contains("Quote"));
-        assert_eq!(MarkdownRenderer::element_plain_text(&MarkdownElement::HorizontalRule), "---");
+        assert_eq!(
+            MarkdownRenderer::element_plain_text(&MarkdownElement::HorizontalRule),
+            "---"
+        );
         assert!(MarkdownRenderer::element_plain_text(&table).contains("Header"));
         assert!(MarkdownRenderer::element_plain_text(&table).contains("Cell"));
     }
@@ -5586,10 +5588,13 @@ fn main() {}
             .parse_element(&events, 0, &mut elements, &mut slugs)
             .expect("parse ok");
         assert_eq!(next, events.len());
-        assert!(matches!(elements.get(0), Some(MarkdownElement::Paragraph(_))));
-        if let Some(MarkdownElement::Paragraph(spans)) = elements.get(0) {
+        assert!(matches!(
+            elements.first(),
+            Some(MarkdownElement::Paragraph(_))
+        ));
+        if let Some(MarkdownElement::Paragraph(spans)) = elements.first() {
             assert!(matches!(
-                spans.get(0),
+                spans.first(),
                 Some(InlineSpan::Image { title: Some(t), .. }) if t == "Title"
             ));
         }
@@ -5648,7 +5653,9 @@ fn main() {}
         assert!(spans.iter().any(|s| matches!(s, InlineSpan::Link { .. })));
         assert!(spans.iter().any(|s| matches!(s, InlineSpan::Image { .. })));
         assert!(spans.iter().any(|s| matches!(s, InlineSpan::Code(_))));
-        assert!(spans.iter().any(|s| matches!(s, InlineSpan::Text(t) if t.contains('\n'))));
+        assert!(spans
+            .iter()
+            .any(|s| matches!(s, InlineSpan::Text(t) if t.contains('\n'))));
         Ok(())
     }
 
@@ -5697,7 +5704,9 @@ fn main() {}
             .any(|s| matches!(s, InlineSpan::Strikethrough(_))));
         assert!(spans.iter().any(|s| matches!(s, InlineSpan::Link { .. })));
         assert!(spans.iter().any(|s| matches!(s, InlineSpan::Image { .. })));
-        assert!(spans.iter().any(|s| matches!(s, InlineSpan::Text(t) if t.contains('\n'))));
+        assert!(spans
+            .iter()
+            .any(|s| matches!(s, InlineSpan::Text(t) if t.contains('\n'))));
 
         let (spans_no_break, _) = renderer.parse_inline_spans(&events, 1, Tag::Paragraph)?;
         assert!(spans_no_break
@@ -5815,8 +5824,7 @@ fn main() {}
             vec![15.0, 15.0]
         );
 
-        let widths =
-            MarkdownRenderer::resolve_table_widths(30.0, &[10.0, 10.0], &[20.0, 30.0]);
+        let widths = MarkdownRenderer::resolve_table_widths(30.0, &[10.0, 10.0], &[20.0, 30.0]);
         assert_eq!(widths.len(), 2);
         assert!((widths[0] + widths[1] - 30.0).abs() < 0.1);
     }
@@ -5826,11 +5834,8 @@ fn main() {}
         let renderer = MarkdownRenderer::new();
         let ctx = egui::Context::default();
         renderer.handle_width_change(&ctx, 42, WidthChange::Large);
-        let entry = renderer
-            .table_metrics
-            .borrow()
-            .entry(42)
-            .expect("metrics entry");
+        let metrics = renderer.table_metrics.borrow();
+        let entry = metrics.entry(42).expect("metrics entry");
         assert!(entry.last_discard_frame.is_some());
     }
 
@@ -5841,13 +5846,13 @@ fn main() {}
         with_test_ui(|ctx, ui| {
             ctx.set_visuals(egui::Visuals::light());
             renderer.render_list(ui, false, &[]);
-            renderer.render_list(ui, true, &[spans.clone()]);
+            renderer.render_list(ui, true, std::slice::from_ref(&spans));
         });
     }
 
     #[test]
     fn test_render_inline_span_forced_actions_and_image_title() {
-        let mut renderer = MarkdownRenderer::new();
+        let renderer = MarkdownRenderer::new();
         renderer.set_highlight_phrase(Some("hi"));
         let image_span = InlineSpan::Image {
             src: "assets/emoji/1f600.png".to_string(),
@@ -5867,7 +5872,7 @@ fn main() {}
         with_test_ui(|_, ui| {
             renderer.render_inline_span(
                 ui,
-                &InlineSpan::Text(format!("hi \u{1f600}")),
+                &InlineSpan::Text("hi \u{1f600}".to_string()),
                 None,
                 None,
             );
