@@ -130,7 +130,7 @@ pub fn sanitize_window_state(ws: WindowState) -> Option<WindowState> {
     })
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 fn load_window_state_registry() -> Option<WindowState> {
     use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
@@ -148,7 +148,7 @@ fn load_window_state_registry() -> Option<WindowState> {
     })
 }
 
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 fn save_window_state_registry(state: &WindowState) -> std::io::Result<()> {
     use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
     use winreg::RegKey;
@@ -168,4 +168,153 @@ fn save_window_state_registry(state: &WindowState) -> std::io::Result<()> {
     key.set_value("Height", &to_u32(state.size[1]))?;
     key.set_value("Maximized", &(state.maximized as u32))?;
     Ok(())
+}
+
+#[cfg(all(windows, test))]
+fn load_window_state_registry() -> Option<WindowState> {
+    None
+}
+
+#[cfg(all(windows, test))]
+fn save_window_state_registry(_state: &WindowState) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+    use tempfile::TempDir;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK.get_or_init(|| Mutex::new(())).lock().expect("env lock")
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(value) = &self.original {
+                std::env::set_var(self.key, value);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+
+    #[test]
+    fn test_sanitize_window_state_clamps_and_rejects_invalid() {
+        let invalid = WindowState {
+            pos: [f32::NAN, 10.0],
+            size: [800.0, 600.0],
+            maximized: false,
+        };
+        assert!(sanitize_window_state(invalid).is_none());
+
+        let input = WindowState {
+            pos: [-50.0, 25000.0],
+            size: [100.0, 200.0],
+            maximized: true,
+        };
+        let sanitized = sanitize_window_state(input).expect("expected sanitized state");
+        assert_eq!(sanitized.pos[0], 0.0);
+        assert_eq!(sanitized.pos[1], 20000.0);
+        assert_eq!(sanitized.size[0], 600.0);
+        assert_eq!(sanitized.size[1], 400.0);
+        assert!(sanitized.maximized);
+    }
+
+    #[test]
+    fn test_save_and_load_window_state_from_file() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+
+        let state = WindowState {
+            pos: [120.0, 80.0],
+            size: [1024.0, 768.0],
+            maximized: false,
+        };
+        save_window_state(&state).expect("save");
+
+        let loaded = load_window_state().expect("load");
+        assert_eq!(loaded.pos, state.pos);
+        assert_eq!(loaded.size, state.size);
+        assert_eq!(loaded.maximized, state.maximized);
+    }
+
+    #[test]
+    fn test_load_window_state_rejects_bad_file() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+
+        let mut config = temp.path().join("MarkdownView");
+        std::fs::create_dir_all(&config).expect("create config dir");
+        config.push("window_state.txt");
+        std::fs::write(&config, "10 20 30").expect("write bad data");
+
+        assert!(load_window_state().is_none());
+    }
+
+    #[test]
+    fn test_config_dir_falls_back_to_xdg() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard_appdata = EnvGuard::unset("APPDATA");
+        let _guard_home = EnvGuard::unset("HOME");
+        let _guard_xdg = EnvGuard::set("XDG_CONFIG_HOME", temp.path().to_string_lossy().as_ref());
+
+        let dir = config_dir().expect("config dir");
+        assert!(dir.starts_with(temp.path()));
+        assert!(dir.ends_with("mdmdview"));
+    }
+
+    #[test]
+    fn test_config_dir_falls_back_to_home() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard_appdata = EnvGuard::unset("APPDATA");
+        let _guard_xdg = EnvGuard::unset("XDG_CONFIG_HOME");
+        let _guard_home = EnvGuard::set("HOME", temp.path().to_string_lossy().as_ref());
+
+        let dir = config_dir().expect("config dir");
+        assert!(dir.starts_with(temp.path()));
+        assert!(dir.ends_with(std::path::Path::new(".config").join("mdmdview")));
+    }
+
+    #[test]
+    fn test_config_dir_none_without_env() {
+        let _lock = env_lock();
+        let _guard_appdata = EnvGuard::unset("APPDATA");
+        let _guard_xdg = EnvGuard::unset("XDG_CONFIG_HOME");
+        let _guard_home = EnvGuard::unset("HOME");
+
+        assert!(config_dir().is_none());
+        let state = WindowState {
+            pos: [1.0, 2.0],
+            size: [800.0, 600.0],
+            maximized: false,
+        };
+        save_window_state(&state).expect("save ok");
+        assert!(load_window_state().is_none());
+    }
 }
