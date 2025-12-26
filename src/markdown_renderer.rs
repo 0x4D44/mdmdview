@@ -145,12 +145,14 @@ struct LinkRange {
 
 const TABLE_LAYOUT_CACHE_CAPACITY: usize = 512;
 const COLUMN_STATS_SAMPLE_ROWS: usize = 128;
+const PIPE_SENTINEL: char = '\u{1F}';
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct CellLayoutKey {
     row: Option<usize>,
     col: usize,
     width: u32,
+    align: u8,
     strong: bool,
     highlight_hash: u64,
     content_hash: u64,
@@ -416,6 +418,7 @@ impl MarkdownRenderer {
         spans: &[InlineSpan],
         wrap_width: f32,
         strong_override: bool,
+        halign: Align,
     ) -> LayoutJobBuild {
         let mut job = LayoutJob {
             wrap: TextWrapping {
@@ -423,7 +426,7 @@ impl MarkdownRenderer {
                 ..Default::default()
             },
             break_on_newline: true,
-            halign: Align::LEFT,
+            halign,
             ..Default::default()
         };
 
@@ -680,6 +683,198 @@ impl MarkdownRenderer {
         &self.font_sizes
     }
 
+    fn escape_table_pipes_in_inline_code(markdown: &str) -> String {
+        let mut out = String::with_capacity(markdown.len());
+        let mut in_table = false;
+        let mut in_fenced_block = false;
+        let mut fence_char = '\0';
+        let mut fence_len = 0usize;
+
+        let lines: Vec<&str> = markdown.split_inclusive('\n').collect();
+        let mut i = 0;
+        while i < lines.len() {
+            let line = lines[i];
+            let trimmed = line.trim_start();
+
+            if in_fenced_block {
+                if Self::is_fence_end(trimmed, fence_char, fence_len) {
+                    in_fenced_block = false;
+                    fence_char = '\0';
+                    fence_len = 0;
+                }
+                out.push_str(line);
+                i += 1;
+                continue;
+            }
+
+            if let Some((ch, len)) = Self::fence_start(trimmed) {
+                in_fenced_block = true;
+                fence_char = ch;
+                fence_len = len;
+                out.push_str(line);
+                i += 1;
+                continue;
+            }
+
+            if in_table {
+                if Self::is_table_row_candidate(line) {
+                    out.push_str(&Self::escape_pipes_in_inline_code_line(line));
+                    i += 1;
+                    continue;
+                }
+                in_table = false;
+                out.push_str(line);
+                i += 1;
+                continue;
+            }
+
+            if Self::is_table_row_candidate(line)
+                && i + 1 < lines.len()
+                && Self::is_table_delimiter_line(lines[i + 1])
+            {
+                out.push_str(&Self::escape_pipes_in_inline_code_line(line));
+                out.push_str(lines[i + 1]);
+                in_table = true;
+                i += 2;
+                continue;
+            }
+
+            out.push_str(line);
+            i += 1;
+        }
+
+        out
+    }
+
+    fn escape_pipes_in_inline_code_line(line: &str) -> String {
+        if !line.contains('|') || !line.contains('`') {
+            return line.to_string();
+        }
+        let mut out = String::with_capacity(line.len());
+        let mut in_code = false;
+        let mut delimiter_len = 0usize;
+        let mut chars = line.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '`' {
+                let mut run_len = 1usize;
+                while matches!(chars.peek(), Some('`')) {
+                    chars.next();
+                    run_len += 1;
+                }
+                if in_code {
+                    if run_len == delimiter_len {
+                        in_code = false;
+                        delimiter_len = 0;
+                    }
+                } else {
+                    in_code = true;
+                    delimiter_len = run_len;
+                }
+                for _ in 0..run_len {
+                    out.push('`');
+                }
+                continue;
+            }
+
+            if in_code && ch == '|' {
+                out.push(PIPE_SENTINEL);
+            } else {
+                out.push(ch);
+            }
+        }
+
+        out
+    }
+
+    fn is_html_line_break(html: &str) -> bool {
+        let trimmed = html.trim();
+        if trimmed.len() < 4 {
+            return false;
+        }
+        let normalized = trimmed.to_ascii_lowercase();
+        if !normalized.starts_with("<br") || !normalized.ends_with('>') {
+            return false;
+        }
+        let rest = &normalized[3..];
+        let first = rest.chars().next();
+        match first {
+            Some('>') => true,
+            Some('/') => rest[1..].trim_start().starts_with('>'),
+            Some(ch) if ch.is_whitespace() => true,
+            _ => false,
+        }
+    }
+
+    fn is_table_row_candidate(line: &str) -> bool {
+        let trimmed = line.trim_end_matches(['\r', '\n']).trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        trimmed.contains('|')
+    }
+
+    fn is_table_delimiter_line(line: &str) -> bool {
+        let trimmed = line.trim_end_matches(['\r', '\n']).trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let mut has_dash = false;
+        for ch in trimmed.chars() {
+            match ch {
+                '-' => has_dash = true,
+                '|' | ':' | ' ' | '\t' => {}
+                _ => return false,
+            }
+        }
+        has_dash
+    }
+
+    fn fence_start(line: &str) -> Option<(char, usize)> {
+        let trimmed = line.trim_start();
+        let mut chars = trimmed.chars();
+        let first = chars.next()?;
+        if first != '`' && first != '~' {
+            return None;
+        }
+        let mut count = 1usize;
+        for ch in chars {
+            if ch == first {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        if count >= 3 {
+            Some((first, count))
+        } else {
+            None
+        }
+    }
+
+    fn is_fence_end(line: &str, fence_char: char, fence_len: usize) -> bool {
+        let trimmed = line.trim_start();
+        let mut count = 0usize;
+        for ch in trimmed.chars() {
+            if ch == fence_char {
+                count += 1;
+            } else {
+                break;
+            }
+        }
+        count >= fence_len
+    }
+
+    fn restore_pipe_sentinel(text: &str) -> String {
+        if text.contains(PIPE_SENTINEL) {
+            text.chars()
+                .map(|ch| if ch == PIPE_SENTINEL { '|' } else { ch })
+                .collect()
+        } else {
+            text.to_string()
+        }
+    }
+
     /// Parse markdown content into elements with proper inline handling
     pub fn parse(&self, markdown: &str) -> Result<Vec<MarkdownElement>, anyhow::Error> {
         let mut options = Options::empty();
@@ -687,7 +882,8 @@ impl MarkdownRenderer {
         options.insert(Options::ENABLE_TABLES);
         options.insert(Options::ENABLE_TASKLISTS);
 
-        let parser = Parser::new_ext(markdown, options);
+        let prepared = Self::escape_table_pipes_in_inline_code(markdown);
+        let parser = Parser::new_ext(&prepared, options);
         let mut elements = Vec::new();
         let events = parser.collect::<Vec<_>>();
 
@@ -726,6 +922,7 @@ impl MarkdownRenderer {
                     events,
                     start + 1,
                     Tag::Image(LinkType::Inline, "".into(), "".into()),
+                    false,
                 )?;
                 let mut spans: Vec<InlineSpan> = Vec::new();
                 spans.push(InlineSpan::Image {
@@ -1032,7 +1229,8 @@ impl MarkdownRenderer {
                     return Ok((spans, i + 1));
                 }
                 Event::Text(text) => {
-                    text_buffer.push_str(text);
+                    let restored = Self::restore_pipe_sentinel(text);
+                    text_buffer.push_str(&restored);
                     i += 1;
                 }
                 Event::SoftBreak | Event::HardBreak => {
@@ -1052,7 +1250,21 @@ impl MarkdownRenderer {
                         spans.push(InlineSpan::Text(text_buffer.clone()));
                         text_buffer.clear();
                     }
-                    spans.push(InlineSpan::Code(code.to_string()));
+                    spans.push(InlineSpan::Code(Self::restore_pipe_sentinel(code)));
+                    i += 1;
+                }
+                Event::Html(html) => {
+                    if Self::is_html_line_break(html) {
+                        if keep_breaks {
+                            if !text_buffer.is_empty() {
+                                spans.push(InlineSpan::Text(text_buffer.clone()));
+                                text_buffer.clear();
+                            }
+                            spans.push(InlineSpan::Text("\n".to_string()));
+                        } else {
+                            text_buffer.push(' ');
+                        }
+                    }
                     i += 1;
                 }
                 Event::Start(Tag::Strong) => {
@@ -1061,7 +1273,7 @@ impl MarkdownRenderer {
                         text_buffer.clear();
                     }
                     let (inner_text, next_i) =
-                        self.collect_until_tag_end(events, i + 1, Tag::Strong)?;
+                        self.collect_until_tag_end(events, i + 1, Tag::Strong, keep_breaks)?;
                     spans.push(InlineSpan::Strong(inner_text));
                     i = next_i;
                 }
@@ -1071,7 +1283,7 @@ impl MarkdownRenderer {
                         text_buffer.clear();
                     }
                     let (inner_text, next_i) =
-                        self.collect_until_tag_end(events, i + 1, Tag::Emphasis)?;
+                        self.collect_until_tag_end(events, i + 1, Tag::Emphasis, keep_breaks)?;
                     spans.push(InlineSpan::Emphasis(inner_text));
                     i = next_i;
                 }
@@ -1081,7 +1293,7 @@ impl MarkdownRenderer {
                         text_buffer.clear();
                     }
                     let (inner_text, next_i) =
-                        self.collect_until_tag_end(events, i + 1, Tag::Strikethrough)?;
+                        self.collect_until_tag_end(events, i + 1, Tag::Strikethrough, keep_breaks)?;
                     spans.push(InlineSpan::Strikethrough(inner_text));
                     i = next_i;
                 }
@@ -1095,6 +1307,7 @@ impl MarkdownRenderer {
                         events,
                         i + 1,
                         Tag::Link(LinkType::Inline, "".into(), "".into()),
+                        keep_breaks,
                     )?;
                     spans.push(InlineSpan::Link {
                         text: link_text,
@@ -1112,6 +1325,7 @@ impl MarkdownRenderer {
                         events,
                         i + 1,
                         Tag::Image(LinkType::Inline, "".into(), "".into()),
+                        keep_breaks,
                     )?;
                     spans.push(InlineSpan::Image {
                         src: url_str,
@@ -1153,6 +1367,7 @@ impl MarkdownRenderer {
         events: &[Event],
         start: usize,
         end_tag: Tag,
+        keep_breaks: bool,
     ) -> Result<(String, usize), anyhow::Error> {
         let mut text = String::new();
         let mut i = start;
@@ -1165,10 +1380,28 @@ impl MarkdownRenderer {
                     return Ok((text, i + 1));
                 }
                 Event::Text(t) => {
-                    text.push_str(t);
+                    let restored = Self::restore_pipe_sentinel(t);
+                    text.push_str(&restored);
                 }
                 Event::Code(code) => {
-                    text.push_str(code);
+                    let restored = Self::restore_pipe_sentinel(code);
+                    text.push_str(&restored);
+                }
+                Event::SoftBreak | Event::HardBreak => {
+                    if keep_breaks {
+                        text.push('\n');
+                    } else {
+                        text.push(' ');
+                    }
+                }
+                Event::Html(html) => {
+                    if Self::is_html_line_break(html) {
+                        if keep_breaks {
+                            text.push('\n');
+                        } else {
+                            text.push(' ');
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -1252,20 +1485,28 @@ impl MarkdownRenderer {
                                 i += 1;
                             }
                             Event::Start(Tag::Emphasis) => {
-                                let (inner_text, next) =
-                                    self.collect_until_tag_end(events, i + 1, Tag::Emphasis)?;
+                                let (inner_text, next) = self.collect_until_tag_end(
+                                    events,
+                                    i + 1,
+                                    Tag::Emphasis,
+                                    false,
+                                )?;
                                 spans.push(InlineSpan::Emphasis(inner_text));
                                 i = next;
                             }
                             Event::Start(Tag::Strong) => {
                                 let (inner_text, next) =
-                                    self.collect_until_tag_end(events, i + 1, Tag::Strong)?;
+                                    self.collect_until_tag_end(events, i + 1, Tag::Strong, false)?;
                                 spans.push(InlineSpan::Strong(inner_text));
                                 i = next;
                             }
                             Event::Start(Tag::Strikethrough) => {
-                                let (inner_text, next) =
-                                    self.collect_until_tag_end(events, i + 1, Tag::Strikethrough)?;
+                                let (inner_text, next) = self.collect_until_tag_end(
+                                    events,
+                                    i + 1,
+                                    Tag::Strikethrough,
+                                    false,
+                                )?;
                                 spans.push(InlineSpan::Strikethrough(inner_text));
                                 i = next;
                             }
@@ -1275,6 +1516,7 @@ impl MarkdownRenderer {
                                     events,
                                     i + 1,
                                     Tag::Link(LinkType::Inline, "".into(), "".into()),
+                                    false,
                                 )?;
                                 spans.push(InlineSpan::Link {
                                     text: link_text,
@@ -1288,6 +1530,7 @@ impl MarkdownRenderer {
                                     events,
                                     i + 1,
                                     Tag::Image(LinkType::Inline, "".into(), "".into()),
+                                    false,
                                 )?;
                                 spans.push(InlineSpan::Image {
                                     src: url_str,
@@ -2510,10 +2753,46 @@ impl MarkdownRenderer {
         h.finish()
     }
 
+    fn alignment_hash(align: Alignment) -> u8 {
+        match align {
+            Alignment::None => 0,
+            Alignment::Left => 1,
+            Alignment::Center => 2,
+            Alignment::Right => 3,
+        }
+    }
+
+    fn alignment_to_egui(align: Alignment) -> Align {
+        match align {
+            Alignment::Center => Align::Center,
+            Alignment::Right => Align::RIGHT,
+            Alignment::Left | Alignment::None => Align::LEFT,
+        }
+    }
+
+    fn alignment_for_column(alignments: &[Alignment], col_idx: usize) -> Align {
+        alignments
+            .get(col_idx)
+            .copied()
+            .map(Self::alignment_to_egui)
+            .unwrap_or(Align::LEFT)
+    }
+
+    fn align_to_u8(align: Align) -> u8 {
+        if align == Align::LEFT {
+            0
+        } else if align == Align::Center {
+            1
+        } else {
+            2
+        }
+    }
+
     fn compute_table_id(
         &self,
         headers: &[Vec<InlineSpan>],
         rows: &[Vec<Vec<InlineSpan>>],
+        alignments: &[Alignment],
         element_index: usize,
     ) -> u64 {
         let mut hasher = DefaultHasher::new();
@@ -2521,7 +2800,7 @@ impl MarkdownRenderer {
             base.hash(&mut hasher);
         }
         hasher.write_usize(element_index);
-        hasher.write_u64(self.compute_table_content_hash(headers, rows));
+        hasher.write_u64(self.compute_table_content_hash(headers, rows, alignments));
         hasher.finish()
     }
 
@@ -2529,11 +2808,16 @@ impl MarkdownRenderer {
         &self,
         headers: &[Vec<InlineSpan>],
         rows: &[Vec<Vec<InlineSpan>>],
+        alignments: &[Alignment],
     ) -> u64 {
         let mut hasher = DefaultHasher::new();
         hasher.write_usize(headers.len());
         for header in headers {
             hasher.write_u64(Self::hash_inline_spans(header));
+        }
+        hasher.write_usize(alignments.len());
+        for align in alignments {
+            hasher.write_u8(Self::alignment_hash(*align));
         }
         let mut counted = 0usize;
         for row in rows {
@@ -2553,8 +2837,9 @@ impl MarkdownRenderer {
         table_id: u64,
         headers: &[Vec<InlineSpan>],
         rows: &[Vec<Vec<InlineSpan>>],
+        alignments: &[Alignment],
     ) -> Vec<ColumnStat> {
-        let content_hash = self.compute_table_content_hash(headers, rows);
+        let content_hash = self.compute_table_content_hash(headers, rows, alignments);
         if let Some(entry) = self
             .column_stats_cache
             .borrow()
@@ -2580,14 +2865,16 @@ impl MarkdownRenderer {
         ui: &mut egui::Ui,
         headers: &[Vec<InlineSpan>],
         rows: &[Vec<Vec<InlineSpan>>],
+        alignments: &[Alignment],
         element_index: usize,
     ) {
         if headers.is_empty() {
             return;
         }
 
+        let table_id = self.compute_table_id(headers, rows, alignments, element_index);
         if self.table_wrap_overhaul_enabled {
-            self.render_table_tablebuilder(ui, headers, rows, element_index);
+            self.render_table_tablebuilder(ui, headers, rows, alignments, element_index);
             ui.add_space(8.0);
             return;
         }
@@ -2601,11 +2888,18 @@ impl MarkdownRenderer {
         let min_floor = (self.font_sizes.body * MIN_COL_MULTIPLIER).max(HARD_MIN_COL_WIDTH);
         let wrap_cap = (self.font_sizes.body * MAX_WRAP_MULTIPLIER).min(640.0);
 
+        let row_max = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+        let column_count = headers.len().max(row_max).max(1);
+
         // 1) Establish baseline widths from headers so small columns don't collapse
-        let min_widths: Vec<f32> = headers
-            .iter()
-            .map(|h| self.measure_inline_spans(ui, h).max(min_floor))
-            .collect();
+        let mut min_widths = Vec::with_capacity(column_count);
+        for ci in 0..column_count {
+            if let Some(header) = headers.get(ci) {
+                min_widths.push(self.measure_inline_spans(ui, header).max(min_floor));
+            } else {
+                min_widths.push(min_floor);
+            }
+        }
         if min_widths.is_empty() {
             return;
         }
@@ -2614,7 +2908,7 @@ impl MarkdownRenderer {
         let mut desired_widths = min_widths.clone();
         for row in rows {
             for (ci, cell) in row.iter().enumerate() {
-                if ci >= desired_widths.len() {
+                if ci >= column_count {
                     break;
                 }
                 let measured = self.measure_inline_spans(ui, cell).max(min_floor);
@@ -2623,9 +2917,23 @@ impl MarkdownRenderer {
         }
 
         let available = ui.available_width().max(100.0);
-        let widths = Self::resolve_table_widths(available, &min_widths, &desired_widths);
+        let desired_total: f32 = desired_widths.iter().sum();
+        let widths = if desired_total <= available {
+            Self::resolve_table_widths(available, &min_widths, &desired_widths)
+        } else {
+            desired_widths.clone()
+        };
+        let use_hscroll = desired_total > available + 0.5;
 
-        self.render_table_legacy(ui, headers, rows, &widths);
+        self.render_table_legacy(
+            ui,
+            headers,
+            rows,
+            alignments,
+            &widths,
+            use_hscroll,
+            table_id,
+        );
         ui.add_space(8.0);
     }
 
@@ -2634,49 +2942,64 @@ impl MarkdownRenderer {
         ui: &mut egui::Ui,
         headers: &[Vec<InlineSpan>],
         rows: &[Vec<Vec<InlineSpan>>],
+        alignments: &[Alignment],
         widths: &[f32],
+        use_hscroll: bool,
+        table_id: u64,
     ) {
-        egui::Frame::none()
-            .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
-            .show(ui, |ui| {
-                egui::Grid::new("md_table").striped(true).show(ui, |ui| {
-                    for (ci, h) in headers.iter().enumerate() {
-                        let w = widths.get(ci).copied().unwrap_or(120.0);
-                        ui.push_id(("header", ci), |ui| {
-                            ui.allocate_ui_with_layout(
-                                Vec2::new(w, 0.0),
-                                egui::Layout::top_down(egui::Align::LEFT),
-                                |ui| {
-                                    ui.set_width(w);
-                                    ui.set_max_width(w);
-                                    self.render_table_cell_spans(ui, h, w, true);
-                                },
-                            );
-                        });
-                    }
-                    ui.end_row();
-
-                    for (ri, row) in rows.iter().enumerate() {
-                        for (ci, cell) in row.iter().enumerate() {
-                            if ci < headers.len() {
+        let total_width: f32 = widths.iter().sum();
+        let column_count = widths.len().max(headers.len());
+        let render_grid = |ui: &mut egui::Ui| {
+            egui::Frame::none()
+                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                .show(ui, |ui| {
+                    egui::Grid::new(("md_table", table_id))
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for ci in 0..column_count {
                                 let w = widths.get(ci).copied().unwrap_or(120.0);
-                                ui.push_id(("cell", ri, ci), |ui| {
-                                    ui.allocate_ui_with_layout(
-                                        Vec2::new(w, 0.0),
-                                        egui::Layout::top_down(egui::Align::LEFT),
-                                        |ui| {
-                                            ui.set_width(w);
-                                            ui.set_max_width(w);
-                                            self.render_table_cell_spans(ui, cell, w, false);
-                                        },
+                                let header = headers.get(ci).map(|h| h.as_slice()).unwrap_or(&[]);
+                                let halign = Self::alignment_for_column(alignments, ci);
+                                ui.push_id(("header", ci), |ui| {
+                                    self.render_overhauled_cell(
+                                        ui, header, w, true, None, ci, halign,
                                     );
                                 });
                             }
-                        }
-                        ui.end_row();
-                    }
+                            ui.end_row();
+
+                            for (ri, row) in rows.iter().enumerate() {
+                                for ci in 0..column_count {
+                                    let w = widths.get(ci).copied().unwrap_or(120.0);
+                                    let cell = row.get(ci).map(|c| c.as_slice()).unwrap_or(&[]);
+                                    let halign = Self::alignment_for_column(alignments, ci);
+                                    ui.push_id(("cell", ri, ci), |ui| {
+                                        self.render_overhauled_cell(
+                                            ui,
+                                            cell,
+                                            w,
+                                            false,
+                                            Some(ri),
+                                            ci,
+                                            halign,
+                                        );
+                                    });
+                                }
+                                ui.end_row();
+                            }
+                        });
                 });
+        };
+
+        if use_hscroll {
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.set_width(total_width);
+                ui.set_min_width(total_width);
+                render_grid(ui);
             });
+        } else {
+            render_grid(ui);
+        }
     }
 
     fn extend_table_rect(target: &mut Option<egui::Rect>, rect: egui::Rect) {
@@ -2699,10 +3022,11 @@ impl MarkdownRenderer {
         ui: &mut egui::Ui,
         headers: &[Vec<InlineSpan>],
         rows: &[Vec<Vec<InlineSpan>>],
+        alignments: &[Alignment],
         element_index: usize,
     ) {
-        let table_id = self.compute_table_id(headers, rows, element_index);
-        let column_stats = self.column_stats_for_table(table_id, headers, rows);
+        let table_id = self.compute_table_id(headers, rows, alignments, element_index);
+        let column_stats = self.column_stats_for_table(table_id, headers, rows, alignments);
         let ctx =
             TableColumnContext::new(headers, rows, &column_stats, self.font_sizes.body, table_id);
         let mut column_specs = derive_column_specs(&ctx);
@@ -2715,6 +3039,9 @@ impl MarkdownRenderer {
                 None,
             ));
         }
+        let column_aligns: Vec<Align> = (0..column_specs.len())
+            .map(|ci| Self::alignment_for_column(alignments, ci))
+            .collect();
         self.begin_table_pass(table_id, rows.len());
         self.apply_persisted_widths(table_id, &mut column_specs);
 
@@ -2734,7 +3061,9 @@ impl MarkdownRenderer {
                 .iter()
                 .enumerate()
                 .map(|(ci, spans)| {
-                    let build = self.cached_layout_job(&style, None, ci, spans, approx_width, true);
+                    let halign = column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
+                    let build =
+                        self.cached_layout_job(&style, None, ci, spans, approx_width, true, halign);
                     ui.fonts(|f| f.layout_job(build.job.clone()).size().y + 6.0)
                 })
                 .fold(header_height, |acc, h| acc.max(h));
@@ -2779,7 +3108,9 @@ impl MarkdownRenderer {
                     header.col(|ui| {
                         let width = ui.available_width().max(1.0);
                         let spans = headers.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
-                        let _ = self.render_overhauled_cell(ui, spans, width, true, None, ci);
+                        let halign = column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
+                        let _ =
+                            self.render_overhauled_cell(ui, spans, width, true, None, ci, halign);
                         // NOTE: Do NOT capture ui.min_rect().width() here - that's the content width,
                         // not the column width. Column widths are captured from body.widths() below.
                         // Extend header_rect (not body_rect) for accurate header bounds.
@@ -2815,8 +3146,16 @@ impl MarkdownRenderer {
                                 .and_then(|cells| cells.get(ci))
                                 .map(|cell| cell.as_slice())
                                 .unwrap_or(&[]);
-                            cell_height =
-                                self.render_overhauled_cell(ui, spans, width, false, Some(idx), ci);
+                            let halign = column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
+                            cell_height = self.render_overhauled_cell(
+                                ui,
+                                spans,
+                                width,
+                                false,
+                                Some(idx),
+                                ci,
+                                halign,
+                            );
                             // Extend body_rect (not header_rect) for accurate body bounds.
                             Self::extend_table_rect(&mut body_rect, ui.min_rect());
                             if body_clip_rect.borrow().is_none() {
@@ -3060,6 +3399,7 @@ impl MarkdownRenderer {
         painter.rect_stroke(rect, 0.0, border_stroke);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_overhauled_cell(
         &self,
         ui: &mut egui::Ui,
@@ -3068,12 +3408,13 @@ impl MarkdownRenderer {
         is_header: bool,
         row_idx: Option<usize>,
         col_idx: usize,
+        halign: Align,
     ) -> f32 {
         let fallback_height = self.row_height_fallback();
         let fragments = self.cell_fragments(spans);
         let inner = ui.allocate_ui_with_layout(
             Vec2::new(width, 0.0),
-            egui::Layout::top_down(egui::Align::LEFT),
+            egui::Layout::top_down(halign),
             |ui| {
                 ui.set_width(width);
                 ui.set_max_width(width);
@@ -3095,8 +3436,9 @@ impl MarkdownRenderer {
                                 slice,
                                 width,
                                 is_header,
+                                halign,
                             );
-                            self.paint_table_text_job(ui, width, build);
+                            self.paint_table_text_job(ui, width, build, halign);
                         }
                         CellFragment::Emoji(key) => {
                             self.render_table_emoji(ui, &key);
@@ -3116,14 +3458,16 @@ impl MarkdownRenderer {
         ui: &mut egui::Ui,
         width: f32,
         build: LayoutJobBuild,
+        halign: Align,
     ) -> egui::Response {
         let galley = ui.fonts(|f| f.layout_job(build.job.clone()));
         let height = galley.size().y;
         let (rect, mut response) =
             ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::click());
         let text_color = ui.visuals().text_color();
+        let text_origin = Self::aligned_text_origin(rect, width, galley.size().x, halign);
         ui.painter_at(rect)
-            .galley(rect.left_top(), galley.clone(), text_color);
+            .galley(text_origin, galley.clone(), text_color);
         if galley.rows.len() > 1 {
             response = response.on_hover_text(build.plain_text.clone());
         }
@@ -3131,7 +3475,7 @@ impl MarkdownRenderer {
             self.render_cell_context_menu(ui, &build.plain_text);
         });
 
-        if let Some(link) = self.link_at_pointer(&response, &galley, &build) {
+        if let Some(link) = self.link_at_pointer(&response, &galley, &build, text_origin) {
             ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
             response = response.on_hover_text(link.url.clone());
             if response.clicked() {
@@ -3142,6 +3486,24 @@ impl MarkdownRenderer {
         response
     }
 
+    fn aligned_text_origin(
+        rect: egui::Rect,
+        width: f32,
+        galley_width: f32,
+        halign: Align,
+    ) -> egui::Pos2 {
+        let extra = (width - galley_width).max(0.0);
+        let x_offset = if halign == Align::RIGHT {
+            extra
+        } else if halign == Align::Center {
+            extra * 0.5
+        } else {
+            0.0
+        };
+        rect.left_top() + egui::vec2(x_offset, 0.0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn cached_layout_job(
         &self,
         style: &egui::Style,
@@ -3150,9 +3512,10 @@ impl MarkdownRenderer {
         spans: &[InlineSpan],
         width: f32,
         is_header: bool,
+        halign: Align,
     ) -> LayoutJobBuild {
         if !self.table_wrap_overhaul_enabled {
-            return self.build_layout_job(style, spans, width, is_header);
+            return self.build_layout_job(style, spans, width, is_header, halign);
         }
         let highlight_hash = self
             .highlight_phrase
@@ -3165,6 +3528,7 @@ impl MarkdownRenderer {
             row: row_idx,
             col: col_idx,
             width: width.round() as u32,
+            align: Self::align_to_u8(halign),
             strong: is_header,
             highlight_hash,
             content_hash,
@@ -3172,7 +3536,7 @@ impl MarkdownRenderer {
         if let Some(build) = self.table_layout_cache.borrow_mut().get(&key) {
             return build;
         }
-        let build = self.build_layout_job(style, spans, width, is_header);
+        let build = self.build_layout_job(style, spans, width, is_header, halign);
         self.table_layout_cache
             .borrow_mut()
             .insert(key, build.clone());
@@ -3184,9 +3548,14 @@ impl MarkdownRenderer {
         response: &egui::Response,
         galley: &Arc<Galley>,
         build: &'a LayoutJobBuild,
+        text_origin: egui::Pos2,
     ) -> Option<&'a LinkRange> {
         let pointer = response.hover_pos()?;
-        let local = pointer - response.rect.left_top();
+        let text_rect = egui::Rect::from_min_size(text_origin, galley.size());
+        if !text_rect.contains(pointer) {
+            return None;
+        }
+        let local = pointer - text_origin;
         let cursor = galley.cursor_from_pos(local);
         let idx = cursor.ccursor.index;
         build
@@ -3203,31 +3572,6 @@ impl MarkdownRenderer {
                 .max_size(Vec2::splat(size))
                 .sense(egui::Sense::hover()),
         );
-    }
-
-    /// Render table cell spans with proper text wrapping within the given width
-    fn render_table_cell_spans(
-        &self,
-        ui: &mut egui::Ui,
-        spans: &[InlineSpan],
-        max_width: f32,
-        is_header: bool,
-    ) {
-        // Render content with wrapping, forcing exact width to ensure wrapping occurs
-        ui.vertical(|ui| {
-            ui.set_width(max_width); // Force exact width
-            ui.set_max_width(max_width);
-            ui.spacing_mut().item_spacing.y = 0.0;
-
-            // Render all spans in a wrapped horizontal layout
-            ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.set_width(max_width);
-                for span in spans {
-                    self.render_inline_span(ui, span, None, Some(is_header));
-                }
-            });
-        });
     }
 
     fn resolve_table_widths(available: f32, mins: &[f32], desired: &[f32]) -> Vec<f32> {
@@ -4195,7 +4539,7 @@ mod tests {
             "A long column entry that should wrap neatly within the supplied width.".into(),
         )];
         let style = egui::Style::default();
-        let build = renderer.build_layout_job(&style, &spans, 180.0, false);
+        let build = renderer.build_layout_job(&style, &spans, 180.0, false, Align::LEFT);
         assert_eq!(build.job.wrap.max_width, 180.0);
         assert!(
             build.job.text.contains("column entry"),
@@ -4209,7 +4553,7 @@ mod tests {
         renderer.set_highlight_phrase(Some("wrap"));
         let spans = vec![InlineSpan::Text("wrap me, wrap me again".into())];
         let style = egui::Style::default();
-        let build = renderer.build_layout_job(&style, &spans, 200.0, false);
+        let build = renderer.build_layout_job(&style, &spans, 200.0, false, Align::LEFT);
         let highlight_bg = style.visuals.selection.bg_fill;
         assert!(
             build
@@ -4229,7 +4573,7 @@ mod tests {
             url: "https://example.org/docs".into(),
         }];
         let style = egui::Style::default();
-        let build = renderer.build_layout_job(&style, &spans, 220.0, false);
+        let build = renderer.build_layout_job(&style, &spans, 220.0, false, Align::LEFT);
         assert_eq!(build.link_ranges.len(), 1);
         let link = &build.link_ranges[0];
         assert_eq!(link.url, "https://example.org/docs");
@@ -4295,7 +4639,11 @@ mod tests {
         let table = elements
             .iter()
             .find_map(|el| match el {
-                MarkdownElement::Table { headers: _, rows } => Some(rows),
+                MarkdownElement::Table {
+                    headers: _,
+                    rows,
+                    alignments: _,
+                } => Some(rows),
                 _ => None,
             })
             .expect("table present");
@@ -4314,6 +4662,35 @@ mod tests {
     }
 
     #[test]
+    fn table_inline_code_keeps_pipes() {
+        let renderer = MarkdownRenderer::new();
+        let md = "\
+| Col | Notes |
+| --- | --- |
+| code | `a|b|c` |";
+        let elements = renderer.parse(md).expect("parse ok");
+        let rows = elements
+            .iter()
+            .find_map(|el| match el {
+                MarkdownElement::Table {
+                    headers: _,
+                    rows,
+                    alignments: _,
+                } => Some(rows),
+                _ => None,
+            })
+            .expect("table present");
+        let code_text = rows[0][1]
+            .iter()
+            .find_map(|span| match span {
+                InlineSpan::Code(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("code span");
+        assert_eq!(code_text, "a|b|c");
+    }
+
+    #[test]
     fn table_ids_are_unique_per_position() {
         let renderer = MarkdownRenderer::new();
         let md = "\
@@ -4329,9 +4706,11 @@ mod tests {
             .iter()
             .enumerate()
             .filter_map(|(idx, el)| match el {
-                MarkdownElement::Table { headers, rows } => {
-                    Some(renderer.compute_table_id(headers, rows, idx))
-                }
+                MarkdownElement::Table {
+                    headers,
+                    rows,
+                    alignments,
+                } => Some(renderer.compute_table_id(headers, rows, alignments, idx)),
                 _ => None,
             })
             .collect();
@@ -4392,8 +4771,8 @@ fn main() {}
         let spans = vec![InlineSpan::Text("alpha".to_string())];
         let style = egui::Style::default();
 
-        let _ = renderer.cached_layout_job(&style, Some(0), 0, &spans, 120.0, false);
-        let _ = renderer.cached_layout_job(&style, Some(0), 0, &spans, 120.0, false);
+        let _ = renderer.cached_layout_job(&style, Some(0), 0, &spans, 120.0, false, Align::LEFT);
+        let _ = renderer.cached_layout_job(&style, Some(0), 0, &spans, 120.0, false, Align::LEFT);
 
         let (hits, misses) = renderer.table_layout_cache_stats();
         assert!(hits >= 1);
@@ -4508,7 +4887,7 @@ fn main() {}
 
         with_test_ui(|_, ui| {
             let style = ui.style().clone();
-            let build = renderer.build_layout_job(&style, &spans, 200.0, false);
+            let build = renderer.build_layout_job(&style, &spans, 200.0, false, Align::LEFT);
             assert!(build.plain_text.contains("plain"));
             assert_eq!(build.link_ranges.len(), 2);
         });
@@ -4639,6 +5018,7 @@ fn main() {}
                     alt: "Alt".to_string(),
                     title: None,
                 }]]],
+                alignments: Vec::new(),
             },
         ];
         let text = MarkdownRenderer::elements_to_plain_text(&elements);
@@ -4664,7 +5044,11 @@ fn main() {}
                 url: "https://example.com".to_string(),
             }],
         ]];
-        let elements = vec![MarkdownElement::Table { headers, rows }];
+        let elements = vec![MarkdownElement::Table {
+            headers,
+            rows,
+            alignments: Vec::new(),
+        }];
 
         with_test_ui(|_, ui| {
             renderer.render_to_ui(ui, &elements);
@@ -4719,6 +5103,7 @@ fn main() {}
         let table = MarkdownElement::Table {
             headers: vec![vec![InlineSpan::Text("Header".to_string())]],
             rows: vec![vec![vec![InlineSpan::Text("Cell".to_string())]]],
+            alignments: Vec::new(),
         };
 
         assert!(MarkdownRenderer::element_plain_text(&list).contains("Item"));
@@ -4873,6 +5258,70 @@ fn main() {}
         assert!(spans_no_break
             .iter()
             .any(|s| matches!(s, InlineSpan::Text(t) if t.contains(' '))));
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_inline_spans_html_breaks() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![
+            Event::Start(Tag::Paragraph),
+            Event::Text("one".into()),
+            Event::Html("<br>".into()),
+            Event::Text("two".into()),
+            Event::End(Tag::Paragraph),
+        ];
+
+        let (spans, next) =
+            renderer.parse_inline_spans_with_breaks(&events, 1, Tag::Paragraph, true)?;
+        assert_eq!(next, events.len());
+        assert!(spans
+            .iter()
+            .any(|s| matches!(s, InlineSpan::Text(t) if t == "\n")));
+
+        let (spans_no_break, _) = renderer.parse_inline_spans(&events, 1, Tag::Paragraph)?;
+        let text = MarkdownRenderer::spans_plain_text(&spans_no_break);
+        assert!(text.contains("one two"));
+
+        let attr_events = vec![
+            Event::Start(Tag::Paragraph),
+            Event::Text("alpha".into()),
+            Event::Html("<br class=\"tight\">".into()),
+            Event::Text("beta".into()),
+            Event::End(Tag::Paragraph),
+        ];
+        let (spans, next) =
+            renderer.parse_inline_spans_with_breaks(&attr_events, 1, Tag::Paragraph, true)?;
+        assert_eq!(next, attr_events.len());
+        assert!(spans
+            .iter()
+            .any(|s| matches!(s, InlineSpan::Text(t) if t == "\n")));
+
+        let strong_events = vec![
+            Event::Start(Tag::Paragraph),
+            Event::Start(Tag::Strong),
+            Event::Text("alpha".into()),
+            Event::Html("<br>".into()),
+            Event::Text("beta".into()),
+            Event::End(Tag::Strong),
+            Event::End(Tag::Paragraph),
+        ];
+        let (spans, next) =
+            renderer.parse_inline_spans_with_breaks(&strong_events, 1, Tag::Paragraph, true)?;
+        assert_eq!(next, strong_events.len());
+        assert!(spans
+            .iter()
+            .any(|s| { matches!(s, InlineSpan::Strong(text) if text.contains('\n')) }));
+
+        let (spans_no_break, _) = renderer.parse_inline_spans(&strong_events, 1, Tag::Paragraph)?;
+        let strong_text = spans_no_break.iter().find_map(|span| {
+            if let InlineSpan::Strong(text) = span {
+                Some(text.as_str())
+            } else {
+                None
+            }
+        });
+        assert!(matches!(strong_text, Some(text) if text.contains("alpha beta")));
         Ok(())
     }
 
@@ -5084,7 +5533,7 @@ fn main() {}
             title: None,
         };
         with_test_ui(|_, ui| {
-            renderer.render_overhauled_cell(ui, &[], 120.0, false, Some(0), 0);
+            renderer.render_overhauled_cell(ui, &[], 120.0, false, Some(0), 0, Align::LEFT);
             renderer.render_overhauled_cell(
                 ui,
                 &[emoji_span.clone(), image_span.clone()],
@@ -5092,6 +5541,7 @@ fn main() {}
                 false,
                 Some(1),
                 1,
+                Align::LEFT,
             );
         });
     }
@@ -5111,8 +5561,9 @@ fn main() {}
             ui.allocate_ui_at_rect(
                 egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 80.0)),
                 |ui| {
-                    let build = renderer.build_layout_job(ui.style(), &spans, 30.0, false);
-                    renderer.paint_table_text_job(ui, 120.0, build);
+                    let build =
+                        renderer.build_layout_job(ui.style(), &spans, 30.0, false, Align::LEFT);
+                    renderer.paint_table_text_job(ui, 120.0, build, Align::LEFT);
                 },
             );
         });
@@ -5122,8 +5573,9 @@ fn main() {}
             ui.allocate_ui_at_rect(
                 egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 80.0)),
                 |ui| {
-                    let build = renderer.build_layout_job(ui.style(), &spans, 30.0, false);
-                    renderer.paint_table_text_job(ui, 120.0, build);
+                    let build =
+                        renderer.build_layout_job(ui.style(), &spans, 30.0, false, Align::LEFT);
+                    renderer.paint_table_text_job(ui, 120.0, build, Align::LEFT);
                 },
             );
         });
@@ -5138,8 +5590,8 @@ fn main() {}
             vec![InlineSpan::Text("B".to_string())],
         ]];
         with_test_ui(|_, ui| {
-            renderer.render_table_tablebuilder(ui, &headers, &rows, 0);
-            renderer.render_table_tablebuilder(ui, &headers, &[], 1);
+            renderer.render_table_tablebuilder(ui, &headers, &rows, &[], 0);
+            renderer.render_table_tablebuilder(ui, &headers, &[], &[], 1);
         });
     }
 

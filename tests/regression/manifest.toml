@@ -107,3 +107,20 @@ id = "016-table-wide"
 path = "cases/016-table-wide.md"
 title = "Wide tables"
 table_wrap = false
+
+[[case]]
+id = "017-table-line-breaks"
+path = "cases/017-table-line-breaks.md"
+title = "Table line breaks"
+
+[[case]]
+id = "018-table-missing-nowrap"
+path = "cases/018-table-missing-nowrap.md"
+title = "Table missing cells (no wrap)"
+table_wrap = false
+
+[[case]]
+id = "019-table-multi-nowrap"
+path = "cases/019-table-multi-nowrap.md"
+title = "Multiple tables (no wrap)"
+table_wrap = false
