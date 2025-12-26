@@ -76,3 +76,34 @@ scroll = 0.0
 [[case.snapshots]]
 name = "mid"
 scroll = 0.5
+
+[[case]]
+id = "011-table-alignments"
+path = "cases/011-table-alignments.md"
+title = "Table alignments and pipes"
+
+[[case]]
+id = "012-table-wrap-long"
+path = "cases/012-table-wrap-long.md"
+title = "Table wrapping and long content"
+
+[[case]]
+id = "013-table-escaping"
+path = "cases/013-table-escaping.md"
+title = "Table escaping and pipes"
+
+[[case]]
+id = "014-table-missing-cells"
+path = "cases/014-table-missing-cells.md"
+title = "Table missing or extra cells"
+
+[[case]]
+id = "015-table-inline-elements"
+path = "cases/015-table-inline-elements.md"
+title = "Table inline elements"
+
+[[case]]
+id = "016-table-wide"
+path = "cases/016-table-wide.md"
+title = "Wide tables"
+table_wrap = false

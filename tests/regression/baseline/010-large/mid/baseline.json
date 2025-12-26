@@ -13,8 +13,8 @@
   "pixels_per_point": 1.000,
   "wait_ms": 2000,
   "settle_frames": 3,
-  "stable_frames": 6,
+  "stable_frames": 4,
   "timed_out": false,
   "font_source": null,
-  "elapsed_ms": 169
+  "elapsed_ms": 190
 }

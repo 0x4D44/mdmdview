@@ -1,0 +1,14 @@
+{
+  "renderer": "markdown-it",
+  "renderer_version": "3.0.0",
+  "playwright_version": "unknown",
+  "browser_version": "143.0.7499.4",
+  "css_hash": "52101734e0c906a54ea1c187a7a3a0d569d8e2290f2600cc2801a8582dd3bdba",
+  "viewport": {
+    "width": 1280,
+    "height": 720,
+    "dpr": 1.0
+  },
+  "theme": "light",
+  "input": "C:\\language\\mdmdview\\tests\\regression\\cases\\016-table-wide.md"
+}
