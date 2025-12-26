@@ -11,7 +11,7 @@ use egui::{
     Align, Color32, Context, FontSelection, Painter, RichText, Stroke, Vec2, Visuals,
 };
 use egui_extras::TableBuilder;
-use pulldown_cmark::{Event, LinkType, Options, Parser, Tag};
+use pulldown_cmark::{Alignment, Event, LinkType, Options, Parser, Tag};
 use std::cell::RefCell;
 use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
@@ -243,6 +243,7 @@ pub enum MarkdownElement {
     Table {
         headers: Vec<Vec<InlineSpan>>,   // header cells as inline spans
         rows: Vec<Vec<Vec<InlineSpan>>>, // rows -> cells -> spans
+        alignments: Vec<Alignment>,
     },
 }
 
@@ -787,9 +788,13 @@ impl MarkdownRenderer {
                 }
                 Ok(next_idx)
             }
-            Event::Start(Tag::Table(_)) => {
+            Event::Start(Tag::Table(alignments)) => {
                 let (headers, rows, next_idx) = self.parse_table(events, start + 1)?;
-                elements.push(MarkdownElement::Table { headers, rows });
+                elements.push(MarkdownElement::Table {
+                    headers,
+                    rows,
+                    alignments: alignments.to_vec(),
+                });
                 Ok(next_idx)
             }
             _ => {
@@ -885,7 +890,11 @@ impl MarkdownRenderer {
                         result.push_str(&Self::spans_plain_text(line));
                     }
                 }
-                MarkdownElement::Table { headers, rows } => {
+                MarkdownElement::Table {
+                    headers,
+                    rows,
+                    alignments: _,
+                } => {
                     // Headers
                     for header in headers {
                         if !result.is_empty() {
@@ -1497,8 +1506,12 @@ impl MarkdownRenderer {
                         ui.separator();
                         ui.add_space(8.0);
                     }
-                    MarkdownElement::Table { headers, rows } => {
-                        self.render_table(ui, headers, rows, element_idx);
+                    MarkdownElement::Table {
+                        headers,
+                        rows,
+                        alignments,
+                    } => {
+                        self.render_table(ui, headers, rows, alignments, element_idx);
                     }
                 }
             });
@@ -3394,7 +3407,11 @@ impl MarkdownRenderer {
                 out
             }
             MarkdownElement::HorizontalRule => String::from("---"),
-            MarkdownElement::Table { headers, rows } => {
+            MarkdownElement::Table {
+                headers,
+                rows,
+                alignments: _,
+            } => {
                 let mut out = String::new();
                 for h in headers {
                     if !out.is_empty() {
