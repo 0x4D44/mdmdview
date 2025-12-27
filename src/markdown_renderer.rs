@@ -700,7 +700,6 @@ impl MarkdownRenderer {
         let mut fence_char = '\0';
         let mut fence_len = 0usize;
         let mut fence_blockquote_level: Option<usize> = None;
-        let mut fence_in_list = false;
 
         let lines: Vec<&str> = markdown.split_inclusive('\n').collect();
         let mut i = 0;
@@ -708,50 +707,80 @@ impl MarkdownRenderer {
             let line = lines[i];
             let (blockquote_level, rest) = Self::table_line_info(line);
             let list_info = Self::list_marker_info(rest);
-            let list_stripped = list_info.map(|(content, _, _)| content).unwrap_or(rest);
-            let trimmed_list = list_stripped.trim_start();
-            let trimmed = rest.trim_start();
-            let trimmed_raw = line.trim_start();
+            let mut list_indent = list_info.map(|(_, _, content_indent)| content_indent);
+            let mut list_stripped = list_info.map(|(content, _, _)| content).unwrap_or(rest);
+            let mut list_marker_present = list_info.is_some();
+            let mut parent_list_indent = None;
+
+            if !list_marker_present && i > 0 {
+                parent_list_indent =
+                    Self::parent_list_indent_for_line(&lines, i, blockquote_level, rest);
+                if let Some(parent_indent) = parent_list_indent {
+                    if let Some((content, _indent_after, content_indent, leading_spaces)) =
+                        Self::list_marker_info_any_indent(rest)
+                    {
+                        if leading_spaces >= parent_indent && leading_spaces < parent_indent + 4 {
+                            list_marker_present = true;
+                            list_indent = Some(content_indent);
+                            list_stripped = content;
+                        }
+                    }
+                    if list_indent.is_none() {
+                        let strip = Self::strip_indent_columns(rest, parent_indent);
+                        let code_strip = Self::strip_indent_columns(rest, parent_indent + 4);
+                        if strip.is_some() && code_strip.is_none() {
+                            list_indent = Some(parent_indent);
+                        }
+                    }
+                }
+            }
+            let (fence_line_level, fence_line_rest) = if list_marker_present {
+                Self::table_line_info(list_stripped)
+            } else if let Some(indent) = list_indent {
+                if let Some(stripped) = Self::strip_indent_columns(line, indent) {
+                    Self::table_line_info(stripped)
+                } else {
+                    Self::table_line_info(line)
+                }
+            } else {
+                Self::table_line_info(line)
+            };
+            let trimmed_fence = fence_line_rest.trim_start();
 
             if in_fenced_block {
-                let mut fence_end = Self::is_fence_end(trimmed_raw, fence_char, fence_len);
-                if fence_blockquote_level == Some(blockquote_level) {
-                    fence_end |= Self::is_fence_end(trimmed, fence_char, fence_len);
-                }
-                if fence_in_list {
-                    fence_end |= Self::is_fence_end(trimmed_list, fence_char, fence_len);
-                }
+                let fence_end = fence_blockquote_level == Some(fence_line_level)
+                    && Self::is_fence_end(trimmed_fence, fence_char, fence_len);
                 if fence_end {
                     in_fenced_block = false;
                     fence_char = '\0';
                     fence_len = 0;
                     fence_blockquote_level = None;
-                    fence_in_list = false;
                 }
                 out.push_str(line);
                 i += 1;
                 continue;
             }
 
-            if let Some((ch, len)) = Self::fence_start(trimmed_list) {
+            if let Some((ch, len)) = Self::fence_start(trimmed_fence) {
                 in_fenced_block = true;
                 fence_char = ch;
                 fence_len = len;
-                fence_blockquote_level = Some(blockquote_level);
-                fence_in_list = list_info.is_some();
+                fence_blockquote_level = Some(fence_line_level);
                 out.push_str(line);
                 i += 1;
                 continue;
             }
 
             if in_table {
-                let (level, rest) = Self::table_line_info_with_list(line, table_list_indent);
-                if table_blockquote_level == Some(level) {
-                    let candidate = Some(rest);
-                    if candidate.is_some_and(Self::is_table_row_candidate) {
-                        out.push_str(&Self::escape_pipes_in_inline_code_line(line));
-                        i += 1;
-                        continue;
+                if let Some((level, rest)) = Self::table_line_info_in_list(line, table_list_indent)
+                {
+                    if table_blockquote_level == Some(level) {
+                        let candidate = Some(rest);
+                        if candidate.is_some_and(Self::is_table_row_candidate) {
+                            out.push_str(&Self::escape_pipes_in_inline_code_line(line));
+                            i += 1;
+                            continue;
+                        }
                     }
                 }
                 in_table = false;
@@ -763,52 +792,14 @@ impl MarkdownRenderer {
             }
 
             if i + 1 < lines.len() {
-                let (raw_level, rest) = Self::table_line_info(line);
-                let mut list_indent = list_info.map(|(_, _, indent)| indent);
-                let mut header_line = if list_info.is_some() {
+                let mut header_line = if list_marker_present {
                     Some(list_stripped)
                 } else {
                     Some(rest)
                 };
-                let mut header_from_list_marker = list_info.is_some();
-                let mut parent_list_indent: Option<usize> = None;
+                let mut header_from_list_marker = list_marker_present;
 
-                if list_info.is_none() && i > 0 {
-                    let mut prev_idx = i;
-                    while prev_idx > 0 {
-                        prev_idx -= 1;
-                        let (prev_level, prev_rest) = Self::table_line_info(lines[prev_idx]);
-                        if prev_level != raw_level {
-                            break;
-                        }
-                        if prev_rest.trim().is_empty() {
-                            continue;
-                        }
-                        let mut prev_indent = None;
-                        if let Some((_, _indent_after, content_indent)) =
-                            Self::list_marker_info(prev_rest)
-                        {
-                            prev_indent = Some(content_indent);
-                        } else if let Some((_, _indent_after, content_indent, _)) =
-                            Self::list_marker_info_any_indent(prev_rest)
-                        {
-                            prev_indent = Some(content_indent);
-                        }
-                        if let Some(content_indent) = prev_indent {
-                            if Self::strip_indent_columns(rest, content_indent).is_some() {
-                                parent_list_indent = Some(content_indent);
-                                break;
-                            }
-                            continue;
-                        }
-                        let trimmed = prev_rest.trim_start_matches([' ', '\t']);
-                        if trimmed.len() == prev_rest.len() {
-                            break;
-                        }
-                    }
-                }
-
-                if list_info.is_none() {
+                if !list_marker_present {
                     if let Some(parent_indent) = parent_list_indent {
                         if let Some((content, _indent_after, content_indent, leading_spaces)) =
                             Self::list_marker_info_any_indent(rest)
@@ -831,7 +822,11 @@ impl MarkdownRenderer {
                     }
                 }
 
-                let (level, rest) = Self::table_line_info_with_list(line, list_indent);
+                let (level, rest) = if list_marker_present {
+                    Self::table_line_info(list_stripped)
+                } else {
+                    Self::table_line_info_with_list(line, list_indent)
+                };
                 let (next_level, next_rest) =
                     Self::table_line_info_with_list(lines[i + 1], list_indent);
                 if let Some(line) = header_line {
@@ -950,21 +945,33 @@ impl MarkdownRenderer {
         }
     }
 
+    fn tab_advance(col: usize) -> usize {
+        let rem = col % 4;
+        if rem == 0 {
+            4
+        } else {
+            4 - rem
+        }
+    }
+
     fn is_indented_code_line(line: &str) -> bool {
-        let mut spaces = 0usize;
+        let mut col = 0usize;
         for ch in line.chars() {
             match ch {
                 ' ' => {
-                    spaces += 1;
-                    if spaces >= 4 {
+                    col += 1;
+                    if col >= 4 {
                         return true;
                     }
                 }
-                '\t' => return true,
+                '\t' => {
+                    col += Self::tab_advance(col);
+                    return col >= 4;
+                }
                 _ => break,
             }
         }
-        false
+        col >= 4
     }
 
     fn table_line_info(line: &str) -> (usize, &str) {
@@ -978,7 +985,7 @@ impl MarkdownRenderer {
             }
             if idx < bytes.len() && bytes[idx] == b'>' {
                 idx += 1;
-                if idx < bytes.len() && bytes[idx] == b' ' {
+                if idx < bytes.len() && (bytes[idx] == b' ' || bytes[idx] == b'\t') {
                     idx += 1;
                 }
                 level += 1;
@@ -997,6 +1004,15 @@ impl MarkdownRenderer {
             }
         }
         Self::table_line_info(line)
+    }
+
+    fn table_line_info_in_list(line: &str, list_indent: Option<usize>) -> Option<(usize, &str)> {
+        if let Some(indent) = list_indent {
+            let stripped = Self::strip_indent_columns(line, indent)?;
+            Some(Self::table_line_info(stripped))
+        } else {
+            Some(Self::table_line_info(line))
+        }
     }
 
     fn list_marker_info(line: &str) -> Option<(&str, usize, usize)> {
@@ -1037,15 +1053,19 @@ impl MarkdownRenderer {
         let marker_width = idx.saturating_sub(marker_start);
         let mut indent = 0usize;
         let mut has_ws = false;
+        let mut col = spaces + marker_width;
         while idx < bytes.len() {
             match bytes[idx] {
                 b' ' => {
                     indent += 1;
+                    col += 1;
                     idx += 1;
                     has_ws = true;
                 }
                 b'\t' => {
-                    indent += 4;
+                    let advance = Self::tab_advance(col);
+                    indent += advance;
+                    col += advance;
                     idx += 1;
                     has_ws = true;
                 }
@@ -1055,20 +1075,27 @@ impl MarkdownRenderer {
         if !has_ws {
             return None;
         }
-        let content_indent = spaces + marker_width + indent;
+        let content_indent = col;
         Some((&line[idx..], indent, content_indent))
     }
 
     fn list_marker_info_any_indent(line: &str) -> Option<(&str, usize, usize, usize)> {
         let bytes = line.as_bytes();
         let mut idx = 0usize;
-        let mut spaces = 0usize;
-        while idx < bytes.len() && bytes[idx] == b' ' {
-            idx += 1;
-            spaces += 1;
-        }
-        if idx < bytes.len() && bytes[idx] == b'\t' {
-            return None;
+        let mut leading_cols = 0usize;
+        while idx < bytes.len() {
+            match bytes[idx] {
+                b' ' => {
+                    idx += 1;
+                    leading_cols += 1;
+                }
+                b'\t' => {
+                    let advance = Self::tab_advance(leading_cols);
+                    idx += 1;
+                    leading_cols += advance;
+                }
+                _ => break,
+            }
         }
         if idx >= bytes.len() {
             return None;
@@ -1097,15 +1124,19 @@ impl MarkdownRenderer {
         let marker_width = idx.saturating_sub(marker_start);
         let mut indent = 0usize;
         let mut has_ws = false;
+        let mut col = leading_cols + marker_width;
         while idx < bytes.len() {
             match bytes[idx] {
                 b' ' => {
                     indent += 1;
+                    col += 1;
                     idx += 1;
                     has_ws = true;
                 }
                 b'\t' => {
-                    indent += 4;
+                    let advance = Self::tab_advance(col);
+                    indent += advance;
+                    col += advance;
                     idx += 1;
                     has_ws = true;
                 }
@@ -1115,8 +1146,45 @@ impl MarkdownRenderer {
         if !has_ws {
             return None;
         }
-        let content_indent = spaces + marker_width + indent;
-        Some((&line[idx..], indent, content_indent, spaces))
+        let content_indent = col;
+        Some((&line[idx..], indent, content_indent, leading_cols))
+    }
+
+    fn parent_list_indent_for_line(
+        lines: &[&str],
+        idx: usize,
+        level: usize,
+        line_rest: &str,
+    ) -> Option<usize> {
+        if idx == 0 {
+            return None;
+        }
+        for back_idx in (0..idx).rev() {
+            let (prev_level, prev_rest) = Self::table_line_info(lines[back_idx]);
+            if prev_level < level {
+                break;
+            }
+            if prev_level > level {
+                continue;
+            }
+            if prev_rest.trim().is_empty() {
+                continue;
+            }
+            if let Some((_, _, content_indent)) = Self::list_marker_info(prev_rest) {
+                if Self::strip_indent_columns(line_rest, content_indent).is_some() {
+                    return Some(content_indent);
+                }
+            } else if let Some((_, _, content_indent, _)) =
+                Self::list_marker_info_any_indent(prev_rest)
+            {
+                if Self::strip_indent_columns(line_rest, content_indent).is_some() {
+                    return Some(content_indent);
+                }
+            } else if !prev_rest.starts_with(' ') && !prev_rest.starts_with('\t') {
+                break;
+            }
+        }
+        None
     }
 
     fn strip_indent_columns(line: &str, indent: usize) -> Option<&str> {
@@ -1135,7 +1203,7 @@ impl MarkdownRenderer {
                     cut = idx + ch.len_utf8();
                 }
                 '\t' => {
-                    col += 4;
+                    col += Self::tab_advance(col);
                     cut = idx + ch.len_utf8();
                 }
                 _ => return None,
@@ -1155,7 +1223,6 @@ impl MarkdownRenderer {
         let mut in_code = false;
         let mut delimiter_len = 0usize;
         let mut backslash_run = 0usize;
-        let mut pipe_in_open_code = false;
         let mut chars = line.chars().peekable();
 
         while let Some(ch) = chars.next() {
@@ -1180,27 +1247,19 @@ impl MarkdownRenderer {
                     if run_len == delimiter_len {
                         in_code = false;
                         delimiter_len = 0;
-                        pipe_in_open_code = false;
                     }
                 } else {
                     in_code = true;
                     delimiter_len = run_len;
-                    pipe_in_open_code = false;
                 }
                 continue;
             }
 
             if ch == '|' {
-                if in_code {
-                    pipe_in_open_code = true;
-                } else {
+                if !in_code && !escaped {
                     return true;
                 }
             }
-        }
-
-        if in_code {
-            return pipe_in_open_code;
         }
 
         false
@@ -5171,6 +5230,17 @@ mod tests {
     }
 
     #[test]
+    fn blockquote_tab_table_inline_code_escapes_pipes() {
+        let md = ">\t| Col | Notes |\n>\t| --- | --- |\n>\t| code | `a|b|c` |";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
+        assert!(
+            prepared.contains(&expected),
+            "Expected escaped pipes in blockquote table inline code with tab"
+        );
+    }
+
+    #[test]
     fn blockquote_indented_code_block_preserves_pipes() {
         let md = "\
 >     | Col | Notes |
@@ -5208,6 +5278,34 @@ mod tests {
     }
 
     #[test]
+    fn list_blockquote_fenced_code_block_preserves_pipes() {
+        let md = "\
+- Item
+    > ```
+    > | Col | Notes |
+    > | --- | --- |
+    > | code | `a|b|c` |
+    > ```";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert!(prepared.contains("`a|b|c`"));
+        assert!(!prepared.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
+    fn nested_list_fenced_code_block_preserves_pipes() {
+        let md = "\
+- Outer
+    - ```
+      | Col | Notes |
+      | --- | --- |
+      | code | `a|b|c` |
+      ```";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert!(prepared.contains("`a|b|c`"));
+        assert!(!prepared.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
     fn list_item_code_block_preserves_pipes() {
         let md = "\
 - Item
@@ -5231,6 +5329,17 @@ mod tests {
         assert!(
             prepared.contains(&expected),
             "Expected escaped pipes for table inside nested list"
+        );
+    }
+
+    #[test]
+    fn nested_list_tab_table_inline_code_escapes_pipes() {
+        let md = "- Outer\n\t- | Col | Notes |\n\t  | --- | --- |\n\t  | code | `a|b|c` |";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
+        assert!(
+            prepared.contains(&expected),
+            "Expected escaped pipes for tab-indented nested list table"
         );
     }
 
@@ -5307,6 +5416,20 @@ mod tests {
     }
 
     #[test]
+    fn list_marker_blockquote_table_inline_code_escapes_pipes() {
+        let md = "\
+- > | Col | Notes |
+  > | --- | --- |
+  > | code | `a|b|c` |";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
+        assert!(
+            prepared.contains(&expected),
+            "Expected escaped pipes for blockquote table starting on list marker line"
+        );
+    }
+
+    #[test]
     fn list_marker_line_table_inline_code_escapes_pipes() {
         let md = "\
 10. 
@@ -5319,6 +5442,23 @@ mod tests {
             prepared.contains(&expected),
             "Expected escaped pipes for table after ordered list marker line"
         );
+    }
+
+    #[test]
+    fn list_marker_tab_after_marker_uses_tab_stops() {
+        let line = "-\titem";
+        let (_content, indent, content_indent) =
+            MarkdownRenderer::list_marker_info(line).expect("list marker");
+        assert_eq!(indent, 3);
+        assert_eq!(content_indent, 4);
+    }
+
+    #[test]
+    fn list_marker_any_indent_tab_stops_leading_whitespace() {
+        let line = " \t- item";
+        let (_content, _indent, _content_indent, leading) =
+            MarkdownRenderer::list_marker_info_any_indent(line).expect("list marker");
+        assert_eq!(leading, 4);
     }
 
     #[test]
@@ -5337,6 +5477,80 @@ Paragraph with `x|y` inline.";
         assert!(
             prepared.contains("`x|y`"),
             "Expected inline code pipes outside table to remain unescaped"
+        );
+    }
+
+    #[test]
+    fn table_ends_before_escaped_pipe_paragraph() {
+        let md = "\
+| Col | Notes |
+| --- | --- |
+| code | `a|b|c` |
+Paragraph with escaped \\| pipe.";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
+        assert!(
+            prepared.contains(&expected),
+            "Expected escaped pipes inside table inline code"
+        );
+        assert!(
+            prepared.contains("escaped \\| pipe"),
+            "Expected escaped pipe outside table to remain unescaped"
+        );
+    }
+
+    #[test]
+    fn list_table_ends_on_dedent_with_pipe_paragraph() {
+        let md = "\
+- | Col | Notes |
+  | --- | --- |
+  | code | `a|b|c` |
+Paragraph with `x|y` and pipe | outside.";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
+        assert!(
+            prepared.contains(&expected),
+            "Expected escaped pipes inside list table inline code"
+        );
+        assert!(
+            prepared.contains("`x|y`"),
+            "Expected inline code pipes after list table to remain unescaped"
+        );
+    }
+
+    #[test]
+    fn nested_list_table_ends_on_dedent_with_pipe_paragraph() {
+        let md = "\
+- Outer
+  - | Col | Notes |
+    | --- | --- |
+    | code | `a|b|c` |
+  Paragraph with `x|y` and pipe | outside.";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
+        assert!(
+            prepared.contains(&expected),
+            "Expected escaped pipes inside nested list table inline code"
+        );
+        assert!(
+            prepared.contains("`x|y`"),
+            "Expected inline code pipes after nested list table to remain unescaped"
+        );
+    }
+
+    #[test]
+    fn list_table_tab_dedent_keeps_inline_code_unescaped() {
+        let md =
+            "- Outer\n\t- | Col | Notes |\n\t  | --- | --- |\n\t  | code | `a|b|c` |\nParagraph with `x|y` and pipe | outside.";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
+        assert!(
+            prepared.contains(&expected),
+            "Expected escaped pipes inside tab-indented list table inline code"
+        );
+        assert!(
+            prepared.contains("`x|y`"),
+            "Expected inline code pipes after tab-indented list table to remain unescaped"
         );
     }
 
