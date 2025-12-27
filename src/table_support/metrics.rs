@@ -13,6 +13,7 @@ pub struct TableMetricEntry {
     pub rows: Vec<RowMetrics>,
     pub rendered_rows: usize,
     pub total_rows: usize,
+    pub header_height: f32,
     pub resolved_widths: Vec<f32>,
     pub last_width_frame: u64,
     pub last_discard_frame: Option<u64>,
@@ -101,6 +102,24 @@ impl TableMetricEntry {
         self.last_width_frame = frame_id;
 
         change
+    }
+
+    pub fn header_height(&self) -> Option<f32> {
+        if self.header_height > 0.0 {
+            Some(self.header_height)
+        } else {
+            None
+        }
+    }
+
+    pub fn update_header_height(&mut self, height: f32) -> bool {
+        let clamped = height.max(0.0);
+        if (self.header_height - clamped).abs() > 0.5 {
+            self.header_height = clamped;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn current_widths(&self) -> &[f32] {
@@ -242,6 +261,17 @@ mod tests {
 
         assert_eq!(entry.update_widths(&[50.0, 60.0], 2), WidthChange::None);
         assert_eq!(entry.update_widths(&[50.0], 3), WidthChange::Large);
+    }
+
+    #[test]
+    fn header_height_updates_when_changed() {
+        let mut entry = TableMetricEntry::default();
+        assert!(entry.header_height().is_none());
+        assert!(entry.update_header_height(24.0));
+        assert_eq!(entry.header_height(), Some(24.0));
+        assert!(!entry.update_header_height(24.2));
+        assert!(entry.update_header_height(30.0));
+        assert_eq!(entry.header_height(), Some(30.0));
     }
 
     #[test]
