@@ -12,7 +12,7 @@ use egui::{
 };
 use egui_extras::TableBuilder;
 use pulldown_cmark::{Alignment, Event, LinkType, Options, Parser, Tag};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
@@ -309,10 +309,18 @@ impl MarkdownRenderer {
             };
 
         for (idx, span) in spans.iter().enumerate() {
-            if let Some(emoji_key) = self.span_is_single_emoji(span) {
-                flush_run(&mut run_start, idx, &mut fragments);
-                fragments.push(CellFragment::Emoji(emoji_key));
-                continue;
+            if matches!(
+                span,
+                InlineSpan::Text(_)
+                    | InlineSpan::Strong(_)
+                    | InlineSpan::Emphasis(_)
+                    | InlineSpan::Strikethrough(_)
+            ) {
+                if let Some(emoji_key) = self.span_is_single_emoji(span) {
+                    flush_run(&mut run_start, idx, &mut fragments);
+                    fragments.push(CellFragment::Emoji(emoji_key));
+                    continue;
+                }
             }
 
             if matches!(span, InlineSpan::Image { .. }) {
@@ -686,57 +694,83 @@ impl MarkdownRenderer {
     fn escape_table_pipes_in_inline_code(markdown: &str) -> String {
         let mut out = String::with_capacity(markdown.len());
         let mut in_table = false;
+        let mut table_blockquote_level: Option<usize> = None;
         let mut in_fenced_block = false;
         let mut fence_char = '\0';
         let mut fence_len = 0usize;
+        let mut fence_blockquote_level: Option<usize> = None;
+        let mut fence_in_list = false;
 
         let lines: Vec<&str> = markdown.split_inclusive('\n').collect();
         let mut i = 0;
         while i < lines.len() {
             let line = lines[i];
-            let trimmed = line.trim_start();
+            let (blockquote_level, rest) = Self::table_line_info(line);
+            let list_info = Self::list_marker_info(rest);
+            let list_stripped = list_info.map(|(content, _)| content).unwrap_or(rest);
+            let trimmed_list = list_stripped.trim_start();
+            let trimmed = rest.trim_start();
+            let trimmed_raw = line.trim_start();
 
             if in_fenced_block {
-                if Self::is_fence_end(trimmed, fence_char, fence_len) {
+                let mut fence_end = Self::is_fence_end(trimmed_raw, fence_char, fence_len);
+                if fence_blockquote_level == Some(blockquote_level) {
+                    fence_end |= Self::is_fence_end(trimmed, fence_char, fence_len);
+                }
+                if fence_in_list {
+                    fence_end |= Self::is_fence_end(trimmed_list, fence_char, fence_len);
+                }
+                if fence_end {
                     in_fenced_block = false;
                     fence_char = '\0';
                     fence_len = 0;
+                    fence_blockquote_level = None;
+                    fence_in_list = false;
                 }
                 out.push_str(line);
                 i += 1;
                 continue;
             }
 
-            if let Some((ch, len)) = Self::fence_start(trimmed) {
+            if let Some((ch, len)) = Self::fence_start(trimmed_list) {
                 in_fenced_block = true;
                 fence_char = ch;
                 fence_len = len;
+                fence_blockquote_level = Some(blockquote_level);
+                fence_in_list = list_info.is_some();
                 out.push_str(line);
                 i += 1;
                 continue;
             }
 
             if in_table {
-                if Self::is_table_row_candidate(line) {
+                let (level, rest) = Self::table_line_info(line);
+                if table_blockquote_level == Some(level) && Self::is_table_row_candidate(rest) {
                     out.push_str(&Self::escape_pipes_in_inline_code_line(line));
                     i += 1;
                     continue;
                 }
                 in_table = false;
+                table_blockquote_level = None;
                 out.push_str(line);
                 i += 1;
                 continue;
             }
 
-            if Self::is_table_row_candidate(line)
-                && i + 1 < lines.len()
-                && Self::is_table_delimiter_line(lines[i + 1])
-            {
-                out.push_str(&Self::escape_pipes_in_inline_code_line(line));
-                out.push_str(lines[i + 1]);
-                in_table = true;
-                i += 2;
-                continue;
+            if i + 1 < lines.len() {
+                let (level, rest) = Self::table_line_info(line);
+                let (next_level, next_rest) = Self::table_line_info(lines[i + 1]);
+                if level == next_level
+                    && Self::is_table_row_candidate(rest)
+                    && Self::is_table_delimiter_line(next_rest)
+                {
+                    out.push_str(&Self::escape_pipes_in_inline_code_line(line));
+                    out.push_str(lines[i + 1]);
+                    in_table = true;
+                    table_blockquote_level = Some(level);
+                    i += 2;
+                    continue;
+                }
             }
 
             out.push_str(line);
@@ -750,13 +784,28 @@ impl MarkdownRenderer {
         if !line.contains('|') || !line.contains('`') {
             return line.to_string();
         }
-        let mut out = String::with_capacity(line.len());
+        let mut out: Vec<char> = Vec::with_capacity(line.len());
         let mut in_code = false;
         let mut delimiter_len = 0usize;
+        let mut pending_pipes: Vec<usize> = Vec::new();
+        let mut backslash_run = 0usize;
         let mut chars = line.chars().peekable();
 
         while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                backslash_run += 1;
+                out.push(ch);
+                continue;
+            }
+
+            let escaped = !in_code && backslash_run % 2 == 1;
+            backslash_run = 0;
+
             if ch == '`' {
+                if escaped {
+                    out.push('`');
+                    continue;
+                }
                 let mut run_len = 1usize;
                 while matches!(chars.peek(), Some('`')) {
                     chars.next();
@@ -766,10 +815,12 @@ impl MarkdownRenderer {
                     if run_len == delimiter_len {
                         in_code = false;
                         delimiter_len = 0;
+                        pending_pipes.clear();
                     }
                 } else {
                     in_code = true;
                     delimiter_len = run_len;
+                    pending_pipes.clear();
                 }
                 for _ in 0..run_len {
                     out.push('`');
@@ -778,13 +829,22 @@ impl MarkdownRenderer {
             }
 
             if in_code && ch == '|' {
+                pending_pipes.push(out.len());
                 out.push(PIPE_SENTINEL);
             } else {
                 out.push(ch);
             }
         }
 
-        out
+        if in_code {
+            for idx in pending_pipes {
+                if let Some(slot) = out.get_mut(idx) {
+                    *slot = '|';
+                }
+            }
+        }
+
+        out.into_iter().collect()
     }
 
     fn is_html_line_break(html: &str) -> bool {
@@ -806,7 +866,113 @@ impl MarkdownRenderer {
         }
     }
 
+    fn is_indented_code_line(line: &str) -> bool {
+        let mut spaces = 0usize;
+        for ch in line.chars() {
+            match ch {
+                ' ' => {
+                    spaces += 1;
+                    if spaces >= 4 {
+                        return true;
+                    }
+                }
+                '\t' => return true,
+                _ => break,
+            }
+        }
+        false
+    }
+
+    fn table_line_info(line: &str) -> (usize, &str) {
+        let mut rest = line;
+        let mut level = 0usize;
+        loop {
+            let bytes = rest.as_bytes();
+            let mut idx = 0usize;
+            while idx < bytes.len() && idx < 3 && bytes[idx] == b' ' {
+                idx += 1;
+            }
+            if idx < bytes.len() && bytes[idx] == b'>' {
+                idx += 1;
+                if idx < bytes.len() && bytes[idx] == b' ' {
+                    idx += 1;
+                }
+                level += 1;
+                rest = &rest[idx..];
+                continue;
+            }
+            break;
+        }
+        (level, rest)
+    }
+
+    fn list_marker_info(line: &str) -> Option<(&str, usize)> {
+        let bytes = line.as_bytes();
+        let mut idx = 0usize;
+        let mut spaces = 0usize;
+        while idx < bytes.len() && spaces < 3 && bytes[idx] == b' ' {
+            idx += 1;
+            spaces += 1;
+        }
+        if idx < bytes.len() && bytes[idx] == b'\t' {
+            return None;
+        }
+        if idx >= bytes.len() {
+            return None;
+        }
+        match bytes[idx] {
+            b'-' | b'+' | b'*' => {
+                idx += 1;
+            }
+            b'0'..=b'9' => {
+                let start = idx;
+                while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+                    idx += 1;
+                }
+                if start == idx {
+                    return None;
+                }
+                if idx < bytes.len() && (bytes[idx] == b'.' || bytes[idx] == b')') {
+                    idx += 1;
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+        let mut indent = 0usize;
+        let mut has_ws = false;
+        while idx < bytes.len() {
+            match bytes[idx] {
+                b' ' => {
+                    indent += 1;
+                    idx += 1;
+                    has_ws = true;
+                }
+                b'\t' => {
+                    indent += 4;
+                    idx += 1;
+                    has_ws = true;
+                }
+                _ => break,
+            }
+        }
+        if !has_ws {
+            return None;
+        }
+        Some((&line[idx..], indent))
+    }
+
+    fn is_list_indented_code_line(line: &str) -> bool {
+        Self::list_marker_info(line)
+            .map(|(_, indent)| indent >= 4)
+            .unwrap_or(false)
+    }
+
     fn is_table_row_candidate(line: &str) -> bool {
+        if Self::is_indented_code_line(line) || Self::is_list_indented_code_line(line) {
+            return false;
+        }
         let trimmed = line.trim_end_matches(['\r', '\n']).trim();
         if trimmed.is_empty() {
             return false;
@@ -815,19 +981,24 @@ impl MarkdownRenderer {
     }
 
     fn is_table_delimiter_line(line: &str) -> bool {
+        if Self::is_indented_code_line(line) || Self::is_list_indented_code_line(line) {
+            return false;
+        }
         let trimmed = line.trim_end_matches(['\r', '\n']).trim();
         if trimmed.is_empty() {
             return false;
         }
         let mut has_dash = false;
+        let mut has_pipe = false;
         for ch in trimmed.chars() {
             match ch {
                 '-' => has_dash = true,
-                '|' | ':' | ' ' | '\t' => {}
+                '|' => has_pipe = true,
+                ':' | ' ' | '\t' => {}
                 _ => return false,
             }
         }
-        has_dash
+        has_dash && has_pipe
     }
 
     fn fence_start(line: &str) -> Option<(char, usize)> {
@@ -3050,25 +3221,40 @@ impl MarkdownRenderer {
             ui.spacing_mut().item_spacing.x = 6.0;
         }
 
+        let cached_header_height = self
+            .table_metrics
+            .borrow()
+            .entry(table_id)
+            .and_then(|entry| entry.header_height());
         // Rough header height estimation using equally divided width; refines on next frame via cache.
-        let mut header_height = self.row_height_fallback();
-        if !column_specs.is_empty() {
-            let approx_width = (ui.available_width() / column_specs.len() as f32)
-                .max(self.font_sizes.body * 6.0)
-                .max(48.0);
-            let style = ui.style().clone();
-            header_height = headers
-                .iter()
-                .enumerate()
-                .map(|(ci, spans)| {
-                    let halign = column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
-                    let build =
-                        self.cached_layout_job(&style, None, ci, spans, approx_width, true, halign);
-                    ui.fonts(|f| f.layout_job(build.job.clone()).size().y + 6.0)
-                })
-                .fold(header_height, |acc, h| acc.max(h));
-            header_height = header_height.min(self.row_height_fallback() * 3.0);
-        }
+        let header_height = cached_header_height.unwrap_or_else(|| {
+            let mut estimate = self.row_height_fallback();
+            if !column_specs.is_empty() {
+                let approx_width = (ui.available_width() / column_specs.len() as f32)
+                    .max(self.font_sizes.body * 6.0)
+                    .max(48.0);
+                let style = ui.style().clone();
+                estimate = headers
+                    .iter()
+                    .enumerate()
+                    .map(|(ci, spans)| {
+                        let halign = column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
+                        let build = self.cached_layout_job(
+                            &style,
+                            None,
+                            ci,
+                            spans,
+                            approx_width,
+                            true,
+                            halign,
+                        );
+                        ui.fonts(|f| f.layout_job(build.job.clone()).size().y + 6.0)
+                    })
+                    .fold(estimate, |acc, h| acc.max(h));
+                estimate = estimate.min(self.row_height_fallback() * 3.0);
+            }
+            estimate
+        });
 
         let mut table = TableBuilder::new(ui).striped(true);
         for spec in &column_specs {
@@ -3102,6 +3288,7 @@ impl MarkdownRenderer {
         let mut ctx_snapshot: Option<Context> = None;
 
         let mut height_growth = false;
+        let header_height_actual = Cell::new(0.0f32);
         table
             .header(header_height, |mut header| {
                 for (ci, _) in column_specs.iter().enumerate() {
@@ -3109,8 +3296,9 @@ impl MarkdownRenderer {
                         let width = ui.available_width().max(1.0);
                         let spans = headers.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
                         let halign = column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
-                        let _ =
+                        let cell_height =
                             self.render_overhauled_cell(ui, spans, width, true, None, ci, halign);
+                        header_height_actual.set(header_height_actual.get().max(cell_height));
                         // NOTE: Do NOT capture ui.min_rect().width() here - that's the content width,
                         // not the column width. Column widths are captured from body.widths() below.
                         // Extend header_rect (not body_rect) for accurate header bounds.
@@ -3184,6 +3372,12 @@ impl MarkdownRenderer {
         let widths = column_widths.into_inner();
         let layout_rect = body_layout_rect.into_inner();
         let body_clip = body_clip_rect.into_inner();
+        let measured_header_height = header_height_actual.get();
+        if measured_header_height > 0.0
+            && self.update_header_height(table_id, measured_header_height)
+        {
+            ui.ctx().request_repaint();
+        }
 
         // Combine header and body clip rects to ensure dividers respect scroll bounds.
         let clip_rect = match (header_clip_rect, body_clip) {
@@ -3279,6 +3473,12 @@ impl MarkdownRenderer {
         let row = entry.ensure_row(idx);
         row.max_height = clamped;
         row.dirty = false;
+    }
+
+    fn update_header_height(&self, table_id: u64, height: f32) -> bool {
+        let mut metrics = self.table_metrics.borrow_mut();
+        let entry = metrics.entry_mut(table_id);
+        entry.update_header_height(height)
     }
 
     fn begin_table_pass(&self, table_id: u64, total_rows: usize) {
@@ -3468,7 +3668,7 @@ impl MarkdownRenderer {
         let text_origin = Self::aligned_text_origin(rect, width, galley.size().x, halign);
         ui.painter_at(rect)
             .galley(text_origin, galley.clone(), text_color);
-        if galley.rows.len() > 1 {
+        if galley.rows.len() > 1 || galley.size().x > width + 0.5 {
             response = response.on_hover_text(build.plain_text.clone());
         }
         response.context_menu(|ui| {
@@ -3492,7 +3692,7 @@ impl MarkdownRenderer {
         galley_width: f32,
         halign: Align,
     ) -> egui::Pos2 {
-        let extra = (width - galley_width).max(0.0);
+        let extra = width - galley_width;
         let x_offset = if halign == Align::RIGHT {
             extra
         } else if halign == Align::Center {
@@ -4533,6 +4733,24 @@ mod tests {
     }
 
     #[test]
+    fn test_cell_fragments_keep_link_emoji_interactive() {
+        let renderer = MarkdownRenderer::new();
+        let rocket = crate::emoji_catalog::shortcode_map()
+            .get(":rocket:")
+            .expect("rocket shortcode");
+        let spans = vec![InlineSpan::Link {
+            text: (*rocket).to_string(),
+            url: "https://example.com".to_string(),
+        }];
+        let fragments = renderer.cell_fragments(&spans);
+        assert_eq!(fragments.len(), 1);
+        match &fragments[0] {
+            CellFragment::Text(slice) => assert!(matches!(slice[0], InlineSpan::Link { .. })),
+            other => panic!("expected text fragment, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn test_layout_job_builder_respects_wrap_width() {
         let renderer = MarkdownRenderer::new();
         let spans = vec![InlineSpan::Text(
@@ -4688,6 +4906,114 @@ mod tests {
             })
             .expect("code span");
         assert_eq!(code_text, "a|b|c");
+    }
+
+    #[test]
+    fn indented_code_block_table_like_preserves_pipes() {
+        let md = "\
+    | Col | Notes |
+    | --- | --- |
+    | code | `a|b|c` |";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert!(prepared.contains("`a|b|c`"));
+        assert!(!prepared.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
+    fn blockquote_table_inline_code_escapes_pipes() {
+        let md = "\
+> | Col | Notes |
+> | --- | --- |
+> | code | `a|b|c` |";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
+        assert!(
+            prepared.contains(&expected),
+            "Expected escaped pipes in blockquote table inline code"
+        );
+    }
+
+    #[test]
+    fn blockquote_indented_code_block_preserves_pipes() {
+        let md = "\
+>     | Col | Notes |
+>     | --- | --- |
+>     | code | `a|b|c` |";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert!(prepared.contains("`a|b|c`"));
+        assert!(!prepared.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
+    fn blockquote_fenced_code_block_preserves_pipes() {
+        let md = "\
+> ```
+> | Col | Notes |
+> | --- | --- |
+> | code | `a|b|c` |
+> ```";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert!(prepared.contains("`a|b|c`"));
+        assert!(!prepared.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
+    fn list_fenced_code_block_preserves_pipes() {
+        let md = "\
+- ```
+  | Col | Notes |
+  | --- | --- |
+  | code | `a|b|c` |
+  ```";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert!(prepared.contains("`a|b|c`"));
+        assert!(!prepared.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
+    fn list_indented_code_block_preserves_pipes() {
+        let md = "\
+-    | Col | Notes |
+     | --- | --- |
+     | code | `a|b|c` |";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert!(prepared.contains("`a|b|c`"));
+        assert!(!prepared.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
+    fn table_delimiter_requires_pipe() {
+        let md = "\
+`a|b` | Header
+---
+Not a table";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert!(prepared.contains("`a|b`"));
+        assert!(!prepared.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
+    fn table_unmatched_backticks_do_not_escape_pipes() {
+        let md = "\
+| Col | Notes |
+| --- | --- |
+| code | `a|b |";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert!(
+            !prepared.contains(PIPE_SENTINEL),
+            "Unmatched backticks should not trigger pipe escaping"
+        );
+    }
+
+    #[test]
+    fn table_escaped_backticks_do_not_escape_pipes() {
+        let md = "\
+| Col | Notes |
+| --- | --- |
+| text | \\`a|b\\` |";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert!(prepared.contains("\\`a|b\\`"));
+        assert!(!prepared.contains(PIPE_SENTINEL));
     }
 
     #[test]
@@ -5579,6 +5905,24 @@ fn main() {}
                 },
             );
         });
+    }
+
+    #[test]
+    fn test_aligned_text_origin_allows_overflow_alignment() {
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 20.0));
+        let right_origin = MarkdownRenderer::aligned_text_origin(rect, 100.0, 200.0, Align::RIGHT);
+        assert!(
+            right_origin.x < rect.left(),
+            "Right-aligned overflow should shift left"
+        );
+        let center_origin =
+            MarkdownRenderer::aligned_text_origin(rect, 100.0, 200.0, Align::Center);
+        assert!(
+            center_origin.x < rect.left(),
+            "Center-aligned overflow should shift left"
+        );
+        let left_origin = MarkdownRenderer::aligned_text_origin(rect, 100.0, 200.0, Align::LEFT);
+        assert_eq!(left_origin.x, rect.left());
     }
 
     #[test]
