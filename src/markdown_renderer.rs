@@ -101,18 +101,6 @@ pub enum InlineSpan {
 }
 
 impl InlineSpan {
-    fn text_content(&self) -> Option<&str> {
-        match self {
-            InlineSpan::Text(t)
-            | InlineSpan::Code(t)
-            | InlineSpan::Strong(t)
-            | InlineSpan::Emphasis(t)
-            | InlineSpan::Strikethrough(t) => Some(t.as_str()),
-            InlineSpan::Link { text, .. } => Some(text.as_str()),
-            InlineSpan::Image { .. } => None,
-        }
-    }
-
     fn is_text_like(&self) -> bool {
         !matches!(self, InlineSpan::Image { .. })
     }
@@ -154,6 +142,7 @@ struct CellLayoutKey {
     width: u32,
     align: u8,
     strong: bool,
+    text_color: [u8; 4],
     highlight_hash: u64,
     content_hash: u64,
 }
@@ -220,6 +209,11 @@ impl CellLayoutCache {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ListItem {
+    pub blocks: Vec<MarkdownElement>,
+}
+
 /// Represents a rendered markdown element
 #[derive(Debug, Clone)]
 pub enum MarkdownElement {
@@ -235,11 +229,11 @@ pub enum MarkdownElement {
     },
     List {
         ordered: bool,
-        items: Vec<Vec<InlineSpan>>,
-    }, // List items are also inline spans
+        items: Vec<ListItem>,
+    }, // List items can contain block elements
     Quote {
         depth: u8,
-        lines: Vec<Vec<InlineSpan>>,
+        blocks: Vec<MarkdownElement>,
     },
     HorizontalRule,
     Table {
@@ -252,8 +246,8 @@ pub enum MarkdownElement {
 /// Type alias for table parsing result
 type TableParseResult = (Vec<Vec<InlineSpan>>, Vec<Vec<Vec<InlineSpan>>>, usize);
 
-/// Type alias for quote lines (each line is a sequence of inline spans)
-type QuoteLines = Vec<Vec<InlineSpan>>;
+/// Type alias for quote blocks (nested markdown elements)
+type QuoteBlocks = Vec<MarkdownElement>;
 
 struct ImageCacheEntry {
     texture: egui::TextureHandle,
@@ -274,6 +268,8 @@ pub struct MarkdownRenderer {
     pending_anchor: RefCell<Option<String>>,
     // Unique counter to avoid egui Id collisions for repeated links
     link_counter: RefCell<u64>,
+    // Per-frame table counter to build stable table ids in render order
+    table_counter: RefCell<u64>,
     // Per-frame rect for each top-level element in render order
     element_rects: RefCell<Vec<egui::Rect>>,
     // Optional highlight phrase (lowercased) for in-text highlighting
@@ -297,6 +293,9 @@ impl Default for MarkdownRenderer {
 impl MarkdownRenderer {
     #[cfg_attr(not(test), allow(dead_code))]
     fn cell_fragments<'a>(&'a self, spans: &'a [InlineSpan]) -> Vec<CellFragment<'a>> {
+        if let Some(emoji) = self.cell_single_emoji(spans) {
+            return vec![CellFragment::Emoji(emoji)];
+        }
         let mut fragments = Vec::new();
         let mut run_start: Option<usize> = None;
         let flush_run =
@@ -309,20 +308,6 @@ impl MarkdownRenderer {
             };
 
         for (idx, span) in spans.iter().enumerate() {
-            if matches!(
-                span,
-                InlineSpan::Text(_)
-                    | InlineSpan::Strong(_)
-                    | InlineSpan::Emphasis(_)
-                    | InlineSpan::Strikethrough(_)
-            ) {
-                if let Some(emoji_key) = self.span_is_single_emoji(span) {
-                    flush_run(&mut run_start, idx, &mut fragments);
-                    fragments.push(CellFragment::Emoji(emoji_key));
-                    continue;
-                }
-            }
-
             if matches!(span, InlineSpan::Image { .. }) {
                 flush_run(&mut run_start, idx, &mut fragments);
                 fragments.push(CellFragment::Image(span));
@@ -341,8 +326,20 @@ impl MarkdownRenderer {
         fragments
     }
 
-    fn span_is_single_emoji(&self, span: &InlineSpan) -> Option<String> {
-        let text = span.text_content()?;
+    fn cell_single_emoji(&self, spans: &[InlineSpan]) -> Option<String> {
+        let mut text = String::new();
+        for span in spans {
+            match span {
+                InlineSpan::Text(t)
+                | InlineSpan::Strong(t)
+                | InlineSpan::Emphasis(t)
+                | InlineSpan::Strikethrough(t) => text.push_str(t),
+                InlineSpan::Code(_) | InlineSpan::Link { .. } | InlineSpan::Image { .. } => {
+                    return None;
+                }
+            }
+        }
+
         let trimmed = text.trim();
         if trimmed.is_empty() {
             return None;
@@ -647,6 +644,10 @@ impl MarkdownRenderer {
                 if text_color.is_none() {
                     text_color = Some(visuals.selection.stroke.color);
                 }
+            } else if text_color.is_none() && inline_style.strong {
+                if let Some(override_color) = visuals.override_text_color {
+                    text_color = Some(override_color);
+                }
             }
             if let Some(color) = text_color {
                 rich = rich.color(color);
@@ -668,6 +669,7 @@ impl MarkdownRenderer {
             header_rects: RefCell::new(HashMap::new()),
             pending_anchor: RefCell::new(None),
             link_counter: RefCell::new(0),
+            table_counter: RefCell::new(0),
             element_rects: RefCell::new(Vec::new()),
             highlight_phrase: RefCell::new(None),
             base_dir: RefCell::new(None),
@@ -735,15 +737,10 @@ impl MarkdownRenderer {
                 }
             }
             let (fence_line_level, fence_line_rest) = if list_marker_present {
-                Self::table_line_info(list_stripped)
-            } else if let Some(indent) = list_indent {
-                if let Some(stripped) = Self::strip_indent_columns(line, indent) {
-                    Self::table_line_info(stripped)
-                } else {
-                    Self::table_line_info(line)
-                }
+                let (nested_level, nested_rest) = Self::table_line_info(list_stripped);
+                (blockquote_level + nested_level, nested_rest)
             } else {
-                Self::table_line_info(line)
+                Self::table_line_info_with_list(line, list_indent)
             };
             let trimmed_fence = fence_line_rest.trim_start();
 
@@ -823,12 +820,16 @@ impl MarkdownRenderer {
                 }
 
                 let (level, rest) = if list_marker_present {
-                    Self::table_line_info(list_stripped)
+                    let (nested_level, nested_rest) = Self::table_line_info(list_stripped);
+                    (blockquote_level + nested_level, nested_rest)
                 } else {
                     Self::table_line_info_with_list(line, list_indent)
                 };
-                let (next_level, next_rest) =
-                    Self::table_line_info_with_list(lines[i + 1], list_indent);
+                let next_info = if list_indent.is_some() {
+                    Self::table_line_info_in_list(lines[i + 1], list_indent)
+                } else {
+                    Some(Self::table_line_info(lines[i + 1]))
+                };
                 if let Some(line) = header_line {
                     if header_from_list_marker {
                         let (_, stripped) = Self::table_line_info(line);
@@ -838,16 +839,30 @@ impl MarkdownRenderer {
                     }
                 }
 
-                if level == next_level && header_line.is_some_and(Self::is_table_row_candidate) {
-                    let delimiter_line = Some(next_rest);
-                    if delimiter_line.is_some_and(Self::is_table_delimiter_line) {
-                        out.push_str(&Self::escape_pipes_in_inline_code_line(line));
-                        out.push_str(lines[i + 1]);
-                        in_table = true;
-                        table_blockquote_level = Some(level);
-                        table_list_indent = list_indent;
-                        i += 2;
-                        continue;
+                if let Some((next_level, next_rest)) = next_info {
+                    if level == next_level && header_line.is_some_and(Self::is_table_row_candidate)
+                    {
+                        let delimiter_line = Some(next_rest);
+                        if delimiter_line.is_some_and(Self::is_table_delimiter_line) {
+                            if !header_from_list_marker && i > 0 {
+                                let (prev_level, prev_rest) =
+                                    Self::table_line_info_with_list(lines[i - 1], list_indent);
+                                if prev_level == level && !prev_rest.trim().is_empty() {
+                                    let prefix_len = line.len().saturating_sub(rest.len());
+                                    out.push_str(&line[..prefix_len]);
+                                    let newline =
+                                        if line.ends_with("\r\n") { "\r\n" } else { "\n" };
+                                    out.push_str(newline);
+                                }
+                            }
+                            out.push_str(&Self::escape_pipes_in_inline_code_line(line));
+                            out.push_str(lines[i + 1]);
+                            in_table = true;
+                            table_blockquote_level = Some(level);
+                            table_list_indent = list_indent;
+                            i += 2;
+                            continue;
+                        }
                     }
                 }
             }
@@ -998,21 +1013,30 @@ impl MarkdownRenderer {
     }
 
     fn table_line_info_with_list(line: &str, list_indent: Option<usize>) -> (usize, &str) {
+        let (level, rest) = Self::table_line_info(line);
         if let Some(indent) = list_indent {
+            if let Some(stripped) = Self::strip_indent_columns(rest, indent) {
+                let (nested_level, nested_rest) = Self::table_line_info(stripped);
+                return (level + nested_level, nested_rest);
+            }
             if let Some(stripped) = Self::strip_indent_columns(line, indent) {
                 return Self::table_line_info(stripped);
             }
         }
-        Self::table_line_info(line)
+        (level, rest)
     }
 
     fn table_line_info_in_list(line: &str, list_indent: Option<usize>) -> Option<(usize, &str)> {
+        let (level, rest) = Self::table_line_info(line);
         if let Some(indent) = list_indent {
+            if let Some(stripped) = Self::strip_indent_columns(rest, indent) {
+                let (nested_level, nested_rest) = Self::table_line_info(stripped);
+                return Some((level + nested_level, nested_rest));
+            }
             let stripped = Self::strip_indent_columns(line, indent)?;
-            Some(Self::table_line_info(stripped))
-        } else {
-            Some(Self::table_line_info(line))
+            return Some(Self::table_line_info(stripped));
         }
+        Some((level, rest))
     }
 
     fn list_marker_info(line: &str) -> Option<(&str, usize, usize)> {
@@ -1432,7 +1456,7 @@ impl MarkdownRenderer {
                 Ok(next_idx)
             }
             Event::Start(Tag::List(first_item)) => {
-                let (items, next_idx) = self.parse_list(events, start + 1, *first_item, 0)?;
+                let (items, next_idx) = self.parse_list(events, start + 1, slug_counts)?;
                 elements.push(MarkdownElement::List {
                     ordered: first_item.is_some(),
                     items,
@@ -1444,10 +1468,11 @@ impl MarkdownRenderer {
                 Ok(start + 1)
             }
             Event::Start(Tag::BlockQuote) => {
-                let (quotes, next_idx) = self.collect_blockquotes(events, start + 1, 1)?;
-                for (depth, lines) in quotes {
-                    if !lines.is_empty() {
-                        elements.push(MarkdownElement::Quote { depth, lines });
+                let (quotes, next_idx) =
+                    self.collect_blockquotes(events, start + 1, 1, slug_counts)?;
+                for (depth, blocks) in quotes {
+                    if !blocks.is_empty() {
+                        elements.push(MarkdownElement::Quote { depth, blocks });
                     }
                 }
                 Ok(next_idx)
@@ -1540,18 +1565,20 @@ impl MarkdownRenderer {
                 }
                 MarkdownElement::List { items, .. } => {
                     for item in items {
-                        if !result.is_empty() {
-                            result.push('\n');
+                        for block in &item.blocks {
+                            if !result.is_empty() {
+                                result.push('\n');
+                            }
+                            result.push_str(&Self::element_plain_text(block));
                         }
-                        result.push_str(&Self::spans_plain_text(item));
                     }
                 }
-                MarkdownElement::Quote { lines, .. } => {
-                    for line in lines {
+                MarkdownElement::Quote { blocks, .. } => {
+                    for block in blocks {
                         if !result.is_empty() {
                             result.push('\n');
                         }
-                        result.push_str(&Self::spans_plain_text(line));
+                        result.push_str(&Self::element_plain_text(block));
                     }
                 }
                 MarkdownElement::Table {
@@ -1586,88 +1613,184 @@ impl MarkdownRenderer {
         result
     }
 
-    /// Collect blockquotes into (depth, lines) entries; supports nesting and multi-line content
+    /// Collect blockquotes into (depth, blocks) entries; supports nesting and block elements.
     fn collect_blockquotes(
         &self,
         events: &[Event],
         start: usize,
         depth: u8,
-    ) -> Result<(Vec<(u8, QuoteLines)>, usize), anyhow::Error> {
+        slug_counts: &mut HashMap<String, usize>,
+    ) -> Result<(Vec<(u8, QuoteBlocks)>, usize), anyhow::Error> {
         let mut i = start;
-        let mut result: Vec<(u8, QuoteLines)> = Vec::new();
-        let mut lines: QuoteLines = Vec::new();
-        let mut current: Vec<InlineSpan> = Vec::new();
+        let mut result: Vec<(u8, QuoteBlocks)> = Vec::new();
+        let mut blocks: QuoteBlocks = Vec::new();
+        let mut spans: Vec<InlineSpan> = Vec::new();
 
-        let push_line = |current: &mut Vec<InlineSpan>, lines: &mut QuoteLines| {
-            lines.push(std::mem::take(current));
+        let flush_inline = |blocks: &mut QuoteBlocks, spans: &mut Vec<InlineSpan>| {
+            if !spans.is_empty() {
+                blocks.push(MarkdownElement::Paragraph(std::mem::take(spans)));
+            }
         };
 
         while i < events.len() {
             match &events[i] {
                 Event::Start(Tag::Paragraph) => {
-                    let (mut para, next) =
+                    flush_inline(&mut blocks, &mut spans);
+                    let (ps, next) =
                         self.parse_inline_spans_with_breaks(events, i + 1, Tag::Paragraph, true)?;
-                    // Split para into lines on explicit "\n"
-                    let mut line: Vec<InlineSpan> = Vec::new();
-                    while let Some(span) = para.first().cloned() {
-                        para.remove(0);
-                        match span {
-                            InlineSpan::Text(t) if t.contains('\n') => {
-                                let parts: Vec<&str> = t.split('\n').collect();
-                                for (pi, part) in parts.iter().enumerate() {
-                                    if !part.is_empty() {
-                                        line.push(InlineSpan::Text(part.to_string()));
-                                    }
-                                    if pi < parts.len() - 1 {
-                                        push_line(&mut line, &mut lines);
-                                        line = Vec::new();
-                                    }
-                                }
-                            }
-                            other => line.push(other),
-                        }
-                    }
-                    if !line.is_empty() {
-                        push_line(&mut line, &mut lines);
+                    if !ps.is_empty() {
+                        blocks.push(MarkdownElement::Paragraph(ps));
                     }
                     i = next;
                 }
-                Event::SoftBreak | Event::HardBreak => {
-                    push_line(&mut current, &mut lines);
+                Event::Start(Tag::Heading(level, _, _)) => {
+                    flush_inline(&mut blocks, &mut spans);
+                    let (ps, next) =
+                        self.parse_inline_spans(events, i + 1, Tag::Heading(*level, None, vec![]))?;
+                    let title_text = Self::spans_plain_text(&ps);
+                    let base = Self::slugify(&title_text);
+                    let count = slug_counts.entry(base.clone()).or_insert(0);
+                    let id = if *count == 0 {
+                        base.clone()
+                    } else {
+                        format!("{}-{}", base, *count)
+                    };
+                    *count += 1;
+                    blocks.push(MarkdownElement::Header {
+                        level: *level as u8,
+                        spans: ps,
+                        id,
+                    });
+                    i = next;
+                }
+                Event::Start(Tag::Table(alignments)) => {
+                    flush_inline(&mut blocks, &mut spans);
+                    let (headers, rows, next_idx) = self.parse_table(events, i + 1)?;
+                    blocks.push(MarkdownElement::Table {
+                        headers,
+                        rows,
+                        alignments: alignments.to_vec(),
+                    });
+                    i = next_idx;
+                }
+                Event::Start(Tag::List(first_item)) => {
+                    flush_inline(&mut blocks, &mut spans);
+                    let (items, next_idx) = self.parse_list(events, i + 1, slug_counts)?;
+                    blocks.push(MarkdownElement::List {
+                        ordered: first_item.is_some(),
+                        items,
+                    });
+                    i = next_idx;
+                }
+                Event::Start(Tag::CodeBlock(_)) => {
+                    flush_inline(&mut blocks, &mut spans);
+                    let (code_text, language, next_idx) = self.parse_code_block(events, i)?;
+                    blocks.push(MarkdownElement::CodeBlock {
+                        language,
+                        text: code_text,
+                    });
+                    i = next_idx;
+                }
+                Event::Rule => {
+                    flush_inline(&mut blocks, &mut spans);
+                    blocks.push(MarkdownElement::HorizontalRule);
                     i += 1;
                 }
                 Event::Start(Tag::BlockQuote) => {
-                    // flush current collected lines for this depth
-                    if !current.is_empty() {
-                        push_line(&mut current, &mut lines);
+                    flush_inline(&mut blocks, &mut spans);
+                    if !blocks.is_empty() {
+                        result.push((depth, std::mem::take(&mut blocks)));
                     }
-                    if !lines.is_empty() {
-                        result.push((depth, std::mem::take(&mut lines)));
-                    }
-                    // collect nested
-                    let (nested, next) = self.collect_blockquotes(events, i + 1, depth + 1)?;
+                    let (nested, next) =
+                        self.collect_blockquotes(events, i + 1, depth + 1, slug_counts)?;
                     result.extend(nested);
                     i = next;
                 }
                 Event::End(Tag::BlockQuote) => {
-                    if !current.is_empty() {
-                        push_line(&mut current, &mut lines);
-                    }
-                    if !lines.is_empty() {
-                        result.push((depth, lines));
+                    flush_inline(&mut blocks, &mut spans);
+                    if !blocks.is_empty() {
+                        result.push((depth, blocks));
                     }
                     return Ok((result, i + 1));
+                }
+                Event::Text(t) => {
+                    spans.push(InlineSpan::Text(Self::restore_pipe_sentinel(t)));
+                    i += 1;
+                }
+                Event::Code(code) => {
+                    spans.push(InlineSpan::Code(Self::restore_pipe_sentinel(code)));
+                    i += 1;
+                }
+                Event::Start(Tag::Emphasis) => {
+                    let (inner_text, next) =
+                        self.collect_until_tag_end(events, i + 1, Tag::Emphasis, true)?;
+                    spans.push(InlineSpan::Emphasis(inner_text));
+                    i = next;
+                }
+                Event::Start(Tag::Strong) => {
+                    let (inner_text, next) =
+                        self.collect_until_tag_end(events, i + 1, Tag::Strong, true)?;
+                    spans.push(InlineSpan::Strong(inner_text));
+                    i = next;
+                }
+                Event::Start(Tag::Strikethrough) => {
+                    let (inner_text, next) =
+                        self.collect_until_tag_end(events, i + 1, Tag::Strikethrough, true)?;
+                    spans.push(InlineSpan::Strikethrough(inner_text));
+                    i = next;
+                }
+                Event::Start(Tag::Link(_, url, _)) => {
+                    let url_str = url.to_string();
+                    let (link_text, next) = self.collect_until_tag_end(
+                        events,
+                        i + 1,
+                        Tag::Link(LinkType::Inline, "".into(), "".into()),
+                        true,
+                    )?;
+                    spans.push(InlineSpan::Link {
+                        text: link_text,
+                        url: url_str,
+                    });
+                    i = next;
+                }
+                Event::Start(Tag::Image(_, url, title)) => {
+                    let url_str = url.to_string();
+                    let (alt_text, next) = self.collect_until_tag_end(
+                        events,
+                        i + 1,
+                        Tag::Image(LinkType::Inline, "".into(), "".into()),
+                        true,
+                    )?;
+                    spans.push(InlineSpan::Image {
+                        src: url_str,
+                        alt: alt_text,
+                        title: if title.is_empty() {
+                            None
+                        } else {
+                            Some(title.to_string())
+                        },
+                    });
+                    i = next;
+                }
+                Event::SoftBreak | Event::HardBreak => {
+                    spans.push(InlineSpan::Text("\n".to_string()));
+                    i += 1;
+                }
+                Event::Html(html) => {
+                    if Self::is_html_line_break(html) {
+                        spans.push(InlineSpan::Text("\n".to_string()));
+                    }
+                    i += 1;
                 }
                 _ => {
                     i += 1;
                 }
             }
         }
-        if !current.is_empty() {
-            push_line(&mut current, &mut lines);
-        }
-        if !lines.is_empty() {
-            result.push((depth, lines));
+
+        flush_inline(&mut blocks, &mut spans);
+        if !blocks.is_empty() {
+            result.push((depth, blocks));
         }
         Ok((result, i))
     }
@@ -1914,24 +2037,30 @@ impl MarkdownRenderer {
         Ok((code_text, language, i))
     }
 
-    /// Parse a list with basic nested-list flattening
+    /// Parse a list item into block-level markdown elements.
     fn parse_list(
         &self,
         events: &[Event],
         start: usize,
-        first_item: Option<u64>,
-        depth: usize,
-    ) -> Result<(Vec<Vec<InlineSpan>>, usize), anyhow::Error> {
-        let mut items: Vec<Vec<InlineSpan>> = Vec::new();
+        slug_counts: &mut HashMap<String, usize>,
+    ) -> Result<(Vec<ListItem>, usize), anyhow::Error> {
+        let mut items: Vec<ListItem> = Vec::new();
         let mut i = start;
-        let _is_ordered = first_item.is_some();
 
         while i < events.len() {
             match &events[i] {
                 Event::End(Tag::List(_)) => return Ok((items, i + 1)),
                 Event::Start(Tag::Item) => {
                     i += 1;
+                    let mut blocks: Vec<MarkdownElement> = Vec::new();
                     let mut spans: Vec<InlineSpan> = Vec::new();
+                    let flush_inline =
+                        |blocks: &mut Vec<MarkdownElement>, spans: &mut Vec<InlineSpan>| {
+                            if !spans.is_empty() {
+                                blocks.push(MarkdownElement::Paragraph(std::mem::take(spans)));
+                            }
+                        };
+
                     loop {
                         if i >= events.len() {
                             break;
@@ -1942,10 +2071,85 @@ impl MarkdownRenderer {
                                 break;
                             }
                             Event::Start(Tag::Paragraph) => {
+                                flush_inline(&mut blocks, &mut spans);
                                 let (ps, next) =
                                     self.parse_inline_spans(events, i + 1, Tag::Paragraph)?;
-                                spans.extend(ps);
+                                if !ps.is_empty() {
+                                    blocks.push(MarkdownElement::Paragraph(ps));
+                                }
                                 i = next;
+                            }
+                            Event::Start(Tag::Heading(level, _, _)) => {
+                                flush_inline(&mut blocks, &mut spans);
+                                let (ps, next) = self.parse_inline_spans(
+                                    events,
+                                    i + 1,
+                                    Tag::Heading(*level, None, vec![]),
+                                )?;
+                                let title_text = Self::spans_plain_text(&ps);
+                                let base = Self::slugify(&title_text);
+                                let count = slug_counts.entry(base.clone()).or_insert(0);
+                                let id = if *count == 0 {
+                                    base.clone()
+                                } else {
+                                    format!("{}-{}", base, *count)
+                                };
+                                *count += 1;
+                                blocks.push(MarkdownElement::Header {
+                                    level: *level as u8,
+                                    spans: ps,
+                                    id,
+                                });
+                                i = next;
+                            }
+                            Event::Start(Tag::Table(alignments)) => {
+                                flush_inline(&mut blocks, &mut spans);
+                                let (headers, rows, next_idx) = self.parse_table(events, i + 1)?;
+                                blocks.push(MarkdownElement::Table {
+                                    headers,
+                                    rows,
+                                    alignments: alignments.to_vec(),
+                                });
+                                i = next_idx;
+                            }
+                            Event::Start(Tag::CodeBlock(_)) => {
+                                flush_inline(&mut blocks, &mut spans);
+                                let (code_text, language, next_idx) =
+                                    self.parse_code_block(events, i)?;
+                                blocks.push(MarkdownElement::CodeBlock {
+                                    language,
+                                    text: code_text,
+                                });
+                                i = next_idx;
+                            }
+                            Event::Start(Tag::BlockQuote) => {
+                                flush_inline(&mut blocks, &mut spans);
+                                let (quotes, next_idx) =
+                                    self.collect_blockquotes(events, i + 1, 1, slug_counts)?;
+                                for (depth, quote_blocks) in quotes {
+                                    if !quote_blocks.is_empty() {
+                                        blocks.push(MarkdownElement::Quote {
+                                            depth,
+                                            blocks: quote_blocks,
+                                        });
+                                    }
+                                }
+                                i = next_idx;
+                            }
+                            Event::Start(Tag::List(child_first)) => {
+                                flush_inline(&mut blocks, &mut spans);
+                                let (child_items, next) =
+                                    self.parse_list(events, i + 1, slug_counts)?;
+                                blocks.push(MarkdownElement::List {
+                                    ordered: child_first.is_some(),
+                                    items: child_items,
+                                });
+                                i = next;
+                            }
+                            Event::Rule => {
+                                flush_inline(&mut blocks, &mut spans);
+                                blocks.push(MarkdownElement::HorizontalRule);
+                                i += 1;
                             }
                             Event::Code(code) => {
                                 spans.push(InlineSpan::Code(code.to_string()));
@@ -2010,24 +2214,6 @@ impl MarkdownRenderer {
                                 });
                                 i = next;
                             }
-                            Event::Start(Tag::List(child_first)) => {
-                                let (child_items, next) =
-                                    self.parse_list(events, i + 1, *child_first, depth + 1)?;
-                                i = next;
-                                let ordered_child = child_first.is_some();
-                                for (idx, child) in child_items.into_iter().enumerate() {
-                                    spans.push(InlineSpan::Text("\n".to_string()));
-                                    // Indentation: 4 spaces per nested level
-                                    let indent = " ".repeat(4 * (depth + 1));
-                                    let marker = if ordered_child {
-                                        format!("{}.", idx + 1)
-                                    } else {
-                                        "-".to_string()
-                                    };
-                                    spans.push(InlineSpan::Text(format!("{}{} ", indent, marker)));
-                                    spans.extend(child);
-                                }
-                            }
                             Event::Text(t) => {
                                 spans.push(InlineSpan::Text(t.to_string()));
                                 i += 1;
@@ -2041,7 +2227,9 @@ impl MarkdownRenderer {
                             }
                         }
                     }
-                    items.push(spans);
+
+                    flush_inline(&mut blocks, &mut spans);
+                    items.push(ListItem { blocks });
                 }
                 _ => i += 1,
             }
@@ -2117,113 +2305,116 @@ impl MarkdownRenderer {
         Ok((headers, rows, i))
     }
 
+    fn render_element_body(&self, ui: &mut egui::Ui, element: &MarkdownElement) {
+        match element {
+            MarkdownElement::Paragraph(spans) => {
+                self.render_inline_spans(ui, spans);
+                ui.add_space(4.0);
+            }
+            MarkdownElement::Quote { depth, blocks } => {
+                ui.add_space(4.0);
+                let bar_width = 3.0;
+                let bar_gap = 6.0;
+                let left_pad = 10.0 + (*depth as f32) * (bar_width + bar_gap);
+                // Substack-like styling: dark grey block with orange accent bars and white text
+                let bg = Color32::from_rgb(24, 24, 24);
+
+                let resp = egui::Frame::none()
+                    .fill(bg)
+                    .stroke(Stroke::new(1.0, Color32::from_rgb(40, 40, 40)))
+                    .rounding(egui::Rounding::same(6.0))
+                    .inner_margin(egui::Margin {
+                        left: left_pad,
+                        right: 10.0,
+                        top: 8.0,
+                        bottom: 8.0,
+                    })
+                    .show(ui, |ui| {
+                        let prev_override = ui.style().visuals.override_text_color;
+                        // White text for quote content
+                        ui.style_mut().visuals.override_text_color = Some(Color32::WHITE);
+                        for block in blocks {
+                            self.render_element_body(ui, block);
+                        }
+                        ui.style_mut().visuals.override_text_color = prev_override;
+                    });
+
+                // Draw vertical orange quote bars on the left of the frame
+                let rect = resp.response.rect;
+                let top = rect.top() + 6.0;
+                let bottom = rect.bottom() - 6.0;
+                let bar_color = Color32::from_rgb(255, 103, 25); // Substack-like orange
+                for d in 0..*depth {
+                    let x = rect.left() + 6.0 + (d as f32) * (bar_width + bar_gap);
+                    let bar_rect = egui::Rect::from_min_max(
+                        egui::pos2(x, top),
+                        egui::pos2(x + bar_width, bottom),
+                    );
+                    ui.painter().rect_filled(bar_rect, 2.0, bar_color);
+                }
+
+                ui.add_space(6.0);
+            }
+            MarkdownElement::Header { level, spans, id } => {
+                let font_size = match level {
+                    1 => self.font_sizes.h1,
+                    2 => self.font_sizes.h2,
+                    3 => self.font_sizes.h3,
+                    4 => self.font_sizes.h4,
+                    5 => self.font_sizes.h5,
+                    6 => self.font_sizes.h6,
+                    _ => self.font_sizes.body,
+                };
+
+                ui.add_space(8.0);
+                let resp = ui.horizontal_wrapped(|ui| {
+                    // Avoid artificial gaps between header fragments
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for span in spans {
+                        self.render_inline_span(ui, span, Some(font_size), Some(true));
+                    }
+                });
+                // Record the header rect for in-document navigation
+                self.header_rects
+                    .borrow_mut()
+                    .insert(id.clone(), resp.response.rect);
+                ui.add_space(6.0);
+            }
+            MarkdownElement::CodeBlock { language, text } => {
+                self.render_code_block(ui, language.as_deref(), text);
+            }
+            MarkdownElement::List { ordered, items } => {
+                self.render_list(ui, *ordered, items);
+            }
+            MarkdownElement::HorizontalRule => {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(8.0);
+            }
+            MarkdownElement::Table {
+                headers,
+                rows,
+                alignments,
+            } => {
+                self.render_table(ui, headers, rows, alignments);
+            }
+        }
+    }
+
     /// Render parsed markdown elements to egui UI
     pub fn render_to_ui(&self, ui: &mut egui::Ui, elements: &[MarkdownElement]) {
         // Clear header rects before rendering a new frame
         self.header_rects.borrow_mut().clear();
         // Reset per-frame link counter to ensure link IDs are stable across frames
         *self.link_counter.borrow_mut() = 0;
+        // Reset per-frame table counter
+        *self.table_counter.borrow_mut() = 0;
         // Reset per-frame element rects
         self.element_rects.borrow_mut().clear();
-        for (element_idx, element) in elements.iter().enumerate() {
+        for element in elements.iter() {
             // Wrap each element in a no-op frame to capture its rect
             let ir = egui::Frame::none().show(ui, |ui| {
-                match element {
-                    MarkdownElement::Paragraph(spans) => {
-                        self.render_inline_spans(ui, spans);
-                        ui.add_space(4.0);
-                    }
-                    MarkdownElement::Quote { depth, lines } => {
-                        ui.add_space(4.0);
-                        let bar_width = 3.0;
-                        let bar_gap = 6.0;
-                        let left_pad = 10.0 + (*depth as f32) * (bar_width + bar_gap);
-                        // Substack-like styling: dark grey block with orange accent bars and white text
-                        let bg = Color32::from_rgb(24, 24, 24);
-
-                        let resp = egui::Frame::none()
-                            .fill(bg)
-                            .stroke(Stroke::new(1.0, Color32::from_rgb(40, 40, 40)))
-                            .rounding(egui::Rounding::same(6.0))
-                            .inner_margin(egui::Margin {
-                                left: left_pad,
-                                right: 10.0,
-                                top: 8.0,
-                                bottom: 8.0,
-                            })
-                            .show(ui, |ui| {
-                                for (li, line) in lines.iter().enumerate() {
-                                    // White text for quote content
-                                    ui.style_mut().visuals.override_text_color =
-                                        Some(Color32::WHITE);
-                                    self.render_inline_spans(ui, line);
-                                    ui.style_mut().visuals.override_text_color = None;
-                                    if li + 1 < lines.len() {
-                                        ui.add_space(3.0);
-                                    }
-                                }
-                            });
-
-                        // Draw vertical orange quote bars on the left of the frame
-                        let rect = resp.response.rect;
-                        let top = rect.top() + 6.0;
-                        let bottom = rect.bottom() - 6.0;
-                        let bar_color = Color32::from_rgb(255, 103, 25); // Substack-like orange
-                        for d in 0..*depth {
-                            let x = rect.left() + 6.0 + (d as f32) * (bar_width + bar_gap);
-                            let bar_rect = egui::Rect::from_min_max(
-                                egui::pos2(x, top),
-                                egui::pos2(x + bar_width, bottom),
-                            );
-                            ui.painter().rect_filled(bar_rect, 2.0, bar_color);
-                        }
-
-                        ui.add_space(6.0);
-                    }
-                    MarkdownElement::Header { level, spans, id } => {
-                        let font_size = match level {
-                            1 => self.font_sizes.h1,
-                            2 => self.font_sizes.h2,
-                            3 => self.font_sizes.h3,
-                            4 => self.font_sizes.h4,
-                            5 => self.font_sizes.h5,
-                            6 => self.font_sizes.h6,
-                            _ => self.font_sizes.body,
-                        };
-
-                        ui.add_space(8.0);
-                        let resp = ui.horizontal_wrapped(|ui| {
-                            // Avoid artificial gaps between header fragments
-                            ui.spacing_mut().item_spacing.x = 0.0;
-                            for span in spans {
-                                self.render_inline_span(ui, span, Some(font_size), Some(true));
-                            }
-                        });
-                        // Record the header rect for in-document navigation
-                        self.header_rects
-                            .borrow_mut()
-                            .insert(id.clone(), resp.response.rect);
-                        ui.add_space(6.0);
-                    }
-                    MarkdownElement::CodeBlock { language, text } => {
-                        self.render_code_block(ui, language.as_deref(), text);
-                    }
-                    MarkdownElement::List { ordered, items } => {
-                        self.render_list(ui, *ordered, items);
-                    }
-                    MarkdownElement::HorizontalRule => {
-                        ui.add_space(8.0);
-                        ui.separator();
-                        ui.add_space(8.0);
-                    }
-                    MarkdownElement::Table {
-                        headers,
-                        rows,
-                        alignments,
-                    } => {
-                        self.render_table(ui, headers, rows, alignments, element_idx);
-                    }
-                }
+                self.render_element_body(ui, element);
             });
             self.element_rects.borrow_mut().push(ir.response.rect);
         }
@@ -2559,7 +2750,13 @@ impl MarkdownRenderer {
         if style.strike {
             rich = rich.strikethrough();
         }
-        if let Some(color) = style.color {
+        let mut text_color = style.color;
+        if text_color.is_none() && style.strong {
+            if let Some(override_color) = ui.visuals().override_text_color {
+                text_color = Some(override_color);
+            }
+        }
+        if let Some(color) = text_color {
             rich = rich.color(color);
         }
         let response = ui.add(egui::Label::new(rich).wrap(true));
@@ -2716,8 +2913,11 @@ impl MarkdownRenderer {
 
     // Rough width measurement for inline spans without wrapping
     fn measure_inline_spans(&self, ui: &egui::Ui, spans: &[InlineSpan]) -> f32 {
-        let mut width = 0.0f32;
+        let mut max_line_width = 0.0f32;
+        let mut current_line_width = 0.0f32;
         ui.fonts(|fonts| {
+            let body = egui::FontId::proportional(self.font_sizes.body);
+            let mono = egui::FontId::monospace(self.font_sizes.code);
             for span in spans {
                 match span {
                     InlineSpan::Text(t)
@@ -2725,23 +2925,55 @@ impl MarkdownRenderer {
                     | InlineSpan::Emphasis(t)
                     | InlineSpan::Strikethrough(t)
                     | InlineSpan::Link { text: t, .. } => {
-                        let body = egui::FontId::proportional(self.font_sizes.body);
-                        // Expand shortcodes to better estimate width and count emojis
-                        let expanded = Self::expand_shortcodes(t);
-                        let galley = fonts.layout_no_wrap(expanded.clone(), body, Color32::WHITE);
-                        width += galley.size().x;
-                        // Add a small extra width for emoji images (drawn larger than text)
-                        let emoji_extra = expanded
-                            .chars()
-                            .filter(|c| Self::is_known_emoji(*c))
-                            .count() as f32
-                            * (self.font_sizes.body * 0.2);
-                        width += emoji_extra;
+                        // Normalize to match render path before measuring.
+                        let mut normalized = self.fix_unicode_chars(t);
+                        normalized = Self::expand_shortcodes(&normalized);
+                        normalized = Self::expand_superscripts(&normalized);
+                        for (line_idx, line) in normalized.split('\n').enumerate() {
+                            if line_idx > 0 {
+                                max_line_width = max_line_width.max(current_line_width);
+                                current_line_width = 0.0;
+                            }
+                            if line.is_empty() {
+                                continue;
+                            }
+                            let galley = fonts.layout_no_wrap(
+                                line.to_string(),
+                                body.clone(),
+                                Color32::WHITE,
+                            );
+                            let mut line_width = galley.size().x;
+                            // Add a small extra width for emoji images (drawn larger than text).
+                            let emoji_extra =
+                                line.chars().filter(|c| Self::is_known_emoji(*c)).count() as f32
+                                    * (self.font_sizes.body * 0.2);
+                            line_width += emoji_extra;
+                            if current_line_width > 0.0 {
+                                current_line_width += 4.0;
+                            }
+                            current_line_width += line_width;
+                        }
                     }
                     InlineSpan::Code(code) => {
-                        let mono = egui::FontId::monospace(self.font_sizes.code);
-                        let galley = fonts.layout_no_wrap(code.to_string(), mono, Color32::WHITE);
-                        width += galley.size().x + 6.0; // small padding for code background
+                        for (line_idx, line) in code.split('\n').enumerate() {
+                            if line_idx > 0 {
+                                max_line_width = max_line_width.max(current_line_width);
+                                current_line_width = 0.0;
+                            }
+                            if line.is_empty() {
+                                continue;
+                            }
+                            let galley = fonts.layout_no_wrap(
+                                line.to_string(),
+                                mono.clone(),
+                                Color32::WHITE,
+                            );
+                            let line_width = galley.size().x + 6.0; // padding for code background
+                            if current_line_width > 0.0 {
+                                current_line_width += 4.0;
+                            }
+                            current_line_width += line_width;
+                        }
                     }
                     InlineSpan::Image { src, .. } => {
                         // Use cached texture size if available; otherwise a conservative thumbnail.
@@ -2752,13 +2984,16 @@ impl MarkdownRenderer {
                             .get(src)
                             .map(|entry| entry.size[0] as f32 * self.ui_scale());
                         let approx = cached.unwrap_or(self.font_sizes.body * 12.0);
-                        width += approx.min(cap);
+                        let line_width = approx.min(cap);
+                        if current_line_width > 0.0 {
+                            current_line_width += 4.0;
+                        }
+                        current_line_width += line_width;
                     }
                 }
-                width += 4.0; // spacing between spans
             }
         });
-        width
+        max_line_width.max(current_line_width)
     }
 
     fn is_known_emoji(c: char) -> bool {
@@ -2964,80 +3199,149 @@ impl MarkdownRenderer {
         img
     }
 
-    /// Render a list with proper inline formatting, including simple nested lines
-    /// Render a list with proper inline formatting, including simple nested lines
-    fn render_list(&self, ui: &mut egui::Ui, ordered: bool, items: &[Vec<InlineSpan>]) {
-        if items.is_empty() {
-            return;
-        }
-
-        ui.add_space(4.0);
-
-        for (index, spans) in items.iter().enumerate() {
-            // Split into lines on embedded '\n'
-            let mut lines: Vec<Vec<InlineSpan>> = vec![Vec::new()];
-            for s in spans.clone() {
-                match s {
-                    InlineSpan::Text(t) if t.contains('\n') => {
-                        let parts: Vec<&str> = t.split('\n').collect();
-                        for (pi, part) in parts.iter().enumerate() {
-                            if !part.is_empty() {
-                                lines
-                                    .last_mut()
-                                    .unwrap()
-                                    .push(InlineSpan::Text(part.to_string()));
-                            }
-                            if pi < parts.len() - 1 {
-                                lines.push(Vec::new());
-                            }
+    fn render_list_paragraph(
+        &self,
+        ui: &mut egui::Ui,
+        marker: Option<&str>,
+        marker_color: Color32,
+        indent_px: f32,
+        spans: &[InlineSpan],
+    ) {
+        // Split into lines on embedded '\n'
+        let mut lines: Vec<Vec<InlineSpan>> = vec![Vec::new()];
+        for s in spans.to_vec() {
+            match s {
+                InlineSpan::Text(t) if t.contains('\n') => {
+                    let parts: Vec<&str> = t.split('\n').collect();
+                    for (pi, part) in parts.iter().enumerate() {
+                        if !part.is_empty() {
+                            lines
+                                .last_mut()
+                                .unwrap()
+                                .push(InlineSpan::Text(part.to_string()));
+                        }
+                        if pi < parts.len() - 1 {
+                            lines.push(Vec::new());
                         }
                     }
-                    other => lines.last_mut().unwrap().push(other),
                 }
+                other => lines.last_mut().unwrap().push(other),
             }
+        }
 
-            for (li, mut line) in lines.into_iter().enumerate() {
-                ui.horizontal_wrapped(|ui| {
-                    if li == 0 {
-                        let marker = if ordered {
-                            format!("{}.", index + 1)
-                        } else {
-                            "-".to_string()
-                        };
-                        let marker_color = if ui.visuals().dark_mode {
-                            Color32::from_rgb(180, 180, 180)
-                        } else {
-                            Color32::BLACK
-                        };
+        for (li, mut line) in lines.into_iter().enumerate() {
+            ui.horizontal_wrapped(|ui| {
+                if li == 0 {
+                    if let Some(marker) = marker {
                         ui.label(
                             RichText::new(format!("{} ", marker))
                                 .size(self.font_sizes.body)
                                 .color(marker_color),
                         );
                     } else {
-                        // Determine additional indentation from leading spaces in this line
-                        let mut leading_spaces = 0usize;
-                        if let Some(InlineSpan::Text(t0)) = line.first() {
-                            leading_spaces = t0.chars().take_while(|c| *c == ' ').count();
-                        }
-                        if leading_spaces > 0 {
-                            if let Some(InlineSpan::Text(t0)) = line.get_mut(0) {
-                                let trimmed = t0.trim_start_matches(' ').to_string();
-                                *t0 = trimmed;
-                            }
-                        }
-                        let indent_px = 18.0 + (leading_spaces as f32) * 6.0;
                         ui.add_space(indent_px);
                     }
-                    ui.spacing_mut().item_spacing.x = 0.0;
-                    for span in &line {
-                        self.render_inline_span(ui, span, None, None);
+                } else {
+                    // Determine additional indentation from leading spaces in this line
+                    let mut leading_spaces = 0usize;
+                    if let Some(InlineSpan::Text(t0)) = line.first() {
+                        leading_spaces = t0.chars().take_while(|c| *c == ' ').count();
                     }
+                    if leading_spaces > 0 {
+                        if let Some(InlineSpan::Text(t0)) = line.get_mut(0) {
+                            let trimmed = t0.trim_start_matches(' ').to_string();
+                            *t0 = trimmed;
+                        }
+                    }
+                    let indent = indent_px + (leading_spaces as f32) * 6.0;
+                    ui.add_space(indent);
+                }
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for span in &line {
+                    self.render_inline_span(ui, span, None, None);
+                }
+            });
+        }
+    }
+
+    /// Render a list with proper inline formatting, including nested block content
+    fn render_list(&self, ui: &mut egui::Ui, ordered: bool, items: &[ListItem]) {
+        if items.is_empty() {
+            return;
+        }
+
+        ui.add_space(4.0);
+        let marker_color = ui.visuals().text_color();
+        let indent_px = 18.0;
+
+        for (index, item) in items.iter().enumerate() {
+            let marker = if ordered {
+                format!("{}.", index + 1)
+            } else {
+                "-".to_string()
+            };
+
+            let mut blocks = item.blocks.iter();
+            if let Some(first_block) = blocks.next() {
+                match first_block {
+                    MarkdownElement::Paragraph(spans) => {
+                        self.render_list_paragraph(
+                            ui,
+                            Some(&marker),
+                            marker_color,
+                            indent_px,
+                            spans,
+                        );
+                    }
+                    _ => {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(
+                                RichText::new(format!("{} ", marker))
+                                    .size(self.font_sizes.body)
+                                    .color(marker_color),
+                            );
+                        });
+                        self.render_list_block(ui, first_block, indent_px, marker_color);
+                    }
+                }
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!("{} ", marker))
+                            .size(self.font_sizes.body)
+                            .color(marker_color),
+                    );
                 });
+            }
+
+            for block in blocks {
+                self.render_list_block(ui, block, indent_px, marker_color);
             }
         }
 
         ui.add_space(4.0);
+    }
+
+    fn render_list_block(
+        &self,
+        ui: &mut egui::Ui,
+        block: &MarkdownElement,
+        indent_px: f32,
+        marker_color: Color32,
+    ) {
+        match block {
+            MarkdownElement::Paragraph(spans) => {
+                self.render_list_paragraph(ui, None, marker_color, indent_px, spans);
+            }
+            _ => {
+                ui.horizontal(|ui| {
+                    ui.add_space(indent_px);
+                    ui.vertical(|ui| {
+                        self.render_element_body(ui, block);
+                    });
+                });
+            }
+        }
     }
 
     /// Render a code block with syntax highlighting
@@ -3255,18 +3559,25 @@ impl MarkdownRenderer {
         }
     }
 
+    fn next_table_index(&self) -> u64 {
+        let mut counter = self.table_counter.borrow_mut();
+        let idx = *counter;
+        *counter += 1;
+        idx
+    }
+
     fn compute_table_id(
         &self,
         headers: &[Vec<InlineSpan>],
         rows: &[Vec<Vec<InlineSpan>>],
         alignments: &[Alignment],
-        element_index: usize,
+        table_index: u64,
     ) -> u64 {
         let mut hasher = DefaultHasher::new();
         if let Some(base) = self.base_dir.borrow().as_ref() {
             base.hash(&mut hasher);
         }
-        hasher.write_usize(element_index);
+        hasher.write_u64(table_index);
         hasher.write_u64(self.compute_table_content_hash(headers, rows, alignments));
         hasher.finish()
     }
@@ -3333,15 +3644,15 @@ impl MarkdownRenderer {
         headers: &[Vec<InlineSpan>],
         rows: &[Vec<Vec<InlineSpan>>],
         alignments: &[Alignment],
-        element_index: usize,
     ) {
         if headers.is_empty() {
             return;
         }
 
-        let table_id = self.compute_table_id(headers, rows, alignments, element_index);
+        let table_index = self.next_table_index();
+        let table_id = self.compute_table_id(headers, rows, alignments, table_index);
         if self.table_wrap_overhaul_enabled {
-            self.render_table_tablebuilder(ui, headers, rows, alignments, element_index);
+            self.render_table_tablebuilder(ui, headers, rows, alignments, table_id);
             ui.add_space(8.0);
             return;
         }
@@ -3383,14 +3694,17 @@ impl MarkdownRenderer {
             }
         }
 
+        let column_spacing = ui.spacing().item_spacing.x;
+        let spacing_total = column_spacing * column_count.saturating_sub(1) as f32;
         let available = ui.available_width().max(100.0);
+        let available_for_cells = (available - spacing_total).max(1.0);
         let desired_total: f32 = desired_widths.iter().sum();
-        let widths = if desired_total <= available {
-            Self::resolve_table_widths(available, &min_widths, &desired_widths)
+        let widths = if desired_total <= available_for_cells {
+            Self::resolve_table_widths(available_for_cells, &min_widths, &desired_widths)
         } else {
             desired_widths.clone()
         };
-        let use_hscroll = desired_total > available + 0.5;
+        let use_hscroll = desired_total + spacing_total > available + 0.5;
 
         self.render_table_legacy(
             ui,
@@ -3414,56 +3728,57 @@ impl MarkdownRenderer {
         use_hscroll: bool,
         table_id: u64,
     ) {
-        let total_width: f32 = widths.iter().sum();
+        let column_spacing = ui.spacing().item_spacing.x;
+        let total_width: f32 =
+            widths.iter().sum::<f32>() + column_spacing * widths.len().saturating_sub(1) as f32;
         let column_count = widths.len().max(headers.len());
         let render_grid = |ui: &mut egui::Ui| {
-            egui::Frame::none()
-                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
-                .show(ui, |ui| {
-                    egui::Grid::new(("md_table", table_id))
-                        .striped(true)
-                        .show(ui, |ui| {
+            let border = ui.visuals().window_stroke();
+            egui::Frame::none().stroke(border).show(ui, |ui| {
+                egui::Grid::new(("md_table", table_id))
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for ci in 0..column_count {
+                            let w = widths.get(ci).copied().unwrap_or(120.0);
+                            let header = headers.get(ci).map(|h| h.as_slice()).unwrap_or(&[]);
+                            let halign = Self::alignment_for_column(alignments, ci);
+                            ui.push_id(("header", ci), |ui| {
+                                self.render_overhauled_cell(ui, header, w, true, None, ci, halign);
+                            });
+                        }
+                        ui.end_row();
+
+                        for (ri, row) in rows.iter().enumerate() {
                             for ci in 0..column_count {
                                 let w = widths.get(ci).copied().unwrap_or(120.0);
-                                let header = headers.get(ci).map(|h| h.as_slice()).unwrap_or(&[]);
+                                let cell = row.get(ci).map(|c| c.as_slice()).unwrap_or(&[]);
                                 let halign = Self::alignment_for_column(alignments, ci);
-                                ui.push_id(("header", ci), |ui| {
+                                ui.push_id(("cell", ri, ci), |ui| {
                                     self.render_overhauled_cell(
-                                        ui, header, w, true, None, ci, halign,
+                                        ui,
+                                        cell,
+                                        w,
+                                        false,
+                                        Some(ri),
+                                        ci,
+                                        halign,
                                     );
                                 });
                             }
                             ui.end_row();
-
-                            for (ri, row) in rows.iter().enumerate() {
-                                for ci in 0..column_count {
-                                    let w = widths.get(ci).copied().unwrap_or(120.0);
-                                    let cell = row.get(ci).map(|c| c.as_slice()).unwrap_or(&[]);
-                                    let halign = Self::alignment_for_column(alignments, ci);
-                                    ui.push_id(("cell", ri, ci), |ui| {
-                                        self.render_overhauled_cell(
-                                            ui,
-                                            cell,
-                                            w,
-                                            false,
-                                            Some(ri),
-                                            ci,
-                                            halign,
-                                        );
-                                    });
-                                }
-                                ui.end_row();
-                            }
-                        });
-                });
+                        }
+                    });
+            });
         };
 
         if use_hscroll {
-            egui::ScrollArea::horizontal().show(ui, |ui| {
-                ui.set_width(total_width);
-                ui.set_min_width(total_width);
-                render_grid(ui);
-            });
+            egui::ScrollArea::horizontal()
+                .id_source(("md_table_hscroll", table_id))
+                .show(ui, |ui| {
+                    ui.set_width(total_width);
+                    ui.set_min_width(total_width);
+                    render_grid(ui);
+                });
         } else {
             render_grid(ui);
         }
@@ -3490,9 +3805,8 @@ impl MarkdownRenderer {
         headers: &[Vec<InlineSpan>],
         rows: &[Vec<Vec<InlineSpan>>],
         alignments: &[Alignment],
-        element_index: usize,
+        table_id: u64,
     ) {
-        let table_id = self.compute_table_id(headers, rows, alignments, element_index);
         let column_stats = self.column_stats_for_table(table_id, headers, rows, alignments);
         let ctx =
             TableColumnContext::new(headers, rows, &column_stats, self.font_sizes.body, table_id);
@@ -3501,245 +3815,523 @@ impl MarkdownRenderer {
         let target_cols = column_specs.len().max(row_max).max(1);
         while column_specs.len() < target_cols {
             column_specs.push(ColumnSpec::new(
+                column_specs.len(),
                 format!("Column {}", column_specs.len() + 1),
                 crate::table_support::ColumnPolicy::Remainder { clip: false },
                 None,
             ));
         }
+        // Ensure the final column owns the remainder width when any remainder columns exist.
+        // This prevents remainder sizing from collapsing trailing columns in table layouts.
+        let last_idx = column_specs.len().saturating_sub(1);
+        if column_specs
+            .iter()
+            .any(|spec| matches!(spec.policy, ColumnPolicy::Remainder { .. }))
+            && !matches!(column_specs[last_idx].policy, ColumnPolicy::Remainder { .. })
+        {
+            let swap_idx = column_specs
+                .iter()
+                .position(|spec| matches!(spec.policy, ColumnPolicy::Remainder { .. }));
+            if let Some(idx) = swap_idx {
+                if !matches!(column_specs[last_idx].policy, ColumnPolicy::Fixed { .. }) {
+                    let last_policy = column_specs[last_idx].policy.clone();
+                    column_specs[last_idx].set_policy(ColumnPolicy::Remainder { clip: false });
+                    column_specs[idx].set_policy(last_policy);
+                }
+            }
+        }
+        self.apply_persisted_widths(table_id, &mut column_specs);
         let column_aligns: Vec<Align> = (0..column_specs.len())
             .map(|ci| Self::alignment_for_column(alignments, ci))
             .collect();
-        self.begin_table_pass(table_id, rows.len());
-        self.apply_persisted_widths(table_id, &mut column_specs);
 
-        let prev_spacing = ui.spacing().item_spacing;
-        if prev_spacing.x < 6.0 {
-            ui.spacing_mut().item_spacing.x = 6.0;
-        }
+        let column_spacing = ui.spacing().item_spacing.x.max(6.0);
+        let available_width = ui.available_width().max(1.0);
+        let desired_total_width =
+            self.estimate_table_total_width(table_id, &column_specs, column_spacing);
+        let content_width = desired_total_width.max(available_width);
+        let use_hscroll = desired_total_width > available_width + 0.5;
 
-        let cached_header_height = self
-            .table_metrics
-            .borrow()
-            .entry(table_id)
-            .and_then(|entry| entry.header_height());
-        // Rough header height estimation using equally divided width; refines on next frame via cache.
-        let header_height = cached_header_height.unwrap_or_else(|| {
-            let mut estimate = self.row_height_fallback();
-            if !column_specs.is_empty() {
-                let approx_width = (ui.available_width() / column_specs.len() as f32)
-                    .max(self.font_sizes.body * 6.0)
-                    .max(48.0);
-                let style = ui.style().clone();
-                estimate = headers
-                    .iter()
-                    .enumerate()
-                    .map(|(ci, spans)| {
-                        let halign = column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
-                        let build = self.cached_layout_job(
-                            &style,
-                            None,
-                            ci,
-                            spans,
-                            approx_width,
-                            true,
-                            halign,
-                        );
-                        ui.fonts(|f| f.layout_job(build.job.clone()).size().y + 6.0)
-                    })
-                    .fold(estimate, |acc, h| acc.max(h));
-                estimate = estimate.min(self.row_height_fallback() * 3.0);
-            }
-            estimate
-        });
+        let render_table = |ui: &mut egui::Ui, max_width: f32| {
+            let width_bucket = max_width.round() as i32;
+            ui.push_id((table_id, width_bucket), |ui| {
+                let layout = *ui.layout();
+                ui.allocate_ui_with_layout(Vec2::new(max_width, 0.0), layout, |ui| {
+                    ui.set_width(max_width);
+                    let needs_estimate = {
+                        let metrics = self.table_metrics.borrow();
+                        metrics
+                            .entry(table_id)
+                            .map_or(true, |entry| entry.rows.is_empty())
+                    };
+                    self.begin_table_pass(table_id, rows.len());
 
-        let mut table = TableBuilder::new(ui).striped(true);
-        for spec in &column_specs {
-            table = table.column(spec.as_column());
-        }
+                    let prev_spacing = ui.spacing().item_spacing;
+                    if (prev_spacing.x - column_spacing).abs() > f32::EPSILON {
+                        ui.spacing_mut().item_spacing.x = column_spacing;
+                    }
 
-        let fallback_row_height = self.row_height_fallback();
-        let row_heights: Vec<f32> = (0..rows.len())
-            .map(|idx| self.row_height_hint(table_id, idx))
-            .collect();
-
-        // Use RefCell to allow capturing widths from body closure.
-        // BUG FIX: Previously captured ui.min_rect().width() which is the cell *content* width.
-        // Now we capture body.widths() which gives the actual *allocated* column widths.
-        // See: https://docs.rs/egui_extras/latest/egui_extras/struct.TableBody.html#method.widths
-        let column_widths: RefCell<Vec<f32>> = RefCell::new(vec![0.0f32; column_specs.len()]);
-        // Track header and body rects separately for accurate table bounds calculation.
-        // The header rect captures the header row bounds, body_rect captures body row bounds.
-        // These are combined after rendering to get the full table rect.
-        let mut header_rect: Option<egui::Rect> = None;
-        let mut body_rect: Option<egui::Rect> = None;
-        // body_layout_rect captures the allocated layout region from body.max_rect(),
-        // which is more accurate than union of cell min_rects for table width.
-        let body_layout_rect: RefCell<Option<egui::Rect>> = RefCell::new(None);
-        // Track clip rects separately for header and body, then union them.
-        // This ensures dividers respect scroll boundaries for both regions.
-        let mut header_clip_rect: Option<egui::Rect> = None;
-        let body_clip_rect: RefCell<Option<egui::Rect>> = RefCell::new(None);
-        let mut painter: Option<Painter> = None;
-        let mut visuals: Option<Visuals> = None;
-        let mut ctx_snapshot: Option<Context> = None;
-
-        let mut height_growth = false;
-        let header_height_actual = Cell::new(0.0f32);
-        table
-            .header(header_height, |mut header| {
-                for (ci, _) in column_specs.iter().enumerate() {
-                    header.col(|ui| {
-                        let width = ui.available_width().max(1.0);
-                        let spans = headers.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
-                        let halign = column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
-                        let cell_height =
-                            self.render_overhauled_cell(ui, spans, width, true, None, ci, halign);
-                        header_height_actual.set(header_height_actual.get().max(cell_height));
-                        // NOTE: Do NOT capture ui.min_rect().width() here - that's the content width,
-                        // not the column width. Column widths are captured from body.widths() below.
-                        // Extend header_rect (not body_rect) for accurate header bounds.
-                        Self::extend_table_rect(&mut header_rect, ui.min_rect());
-                        if header_clip_rect.is_none() {
-                            header_clip_rect = Some(ui.clip_rect());
-                            painter = Some(ui.painter().clone());
-                            visuals = Some(ui.visuals().clone());
-                            ctx_snapshot = Some(ui.ctx().clone());
+                    let cached_header_height = self
+                        .table_metrics
+                        .borrow()
+                        .entry(table_id)
+                        .and_then(|entry| entry.header_height());
+                    // Rough header height estimation using equally divided width; refines on next frame via cache.
+                    let header_height = cached_header_height.unwrap_or_else(|| {
+                        let mut estimate = self.row_height_fallback();
+                        if !column_specs.is_empty() {
+                            let approx_width = (ui.available_width() / column_specs.len() as f32)
+                                .max(self.font_sizes.body * 6.0)
+                                .max(48.0);
+                            let style = ui.style().clone();
+                            estimate = headers
+                                .iter()
+                                .enumerate()
+                                .map(|(ci, spans)| {
+                                    let halign =
+                                        column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
+                                    let build = self.cached_layout_job(
+                                        &style,
+                                        None,
+                                        ci,
+                                        spans,
+                                        approx_width,
+                                        true,
+                                        halign,
+                                    );
+                                    ui.fonts(|f| f.layout_job(build.job.clone()).size().y + 6.0)
+                                })
+                                .fold(estimate, |acc, h| acc.max(h));
+                            estimate = estimate.min(self.row_height_fallback() * 3.0);
                         }
+                        estimate
                     });
-                }
-            })
-            .body(|body| {
-                // Capture the actual allocated column widths from the table layout system.
-                // This MUST be done before heterogeneous_rows() consumes the body.
-                *column_widths.borrow_mut() = body.widths().to_vec();
 
-                // Capture body's layout rect for accurate table width calculation.
-                // This is the allocated region, not the content bounds.
-                *body_layout_rect.borrow_mut() = Some(body.max_rect());
-
-                let row_height_hints = row_heights.clone();
-                body.heterogeneous_rows(row_height_hints.into_iter(), |mut row| {
-                    let idx = row.index();
-                    let row_cells = rows.get(idx);
-                    let mut row_height = fallback_row_height;
-                    for (ci, _) in column_specs.iter().enumerate() {
-                        let mut cell_height = fallback_row_height;
-                        row.col(|ui| {
-                            let width = ui.available_width().max(1.0);
-                            let spans = row_cells
-                                .and_then(|cells| cells.get(ci))
-                                .map(|cell| cell.as_slice())
-                                .unwrap_or(&[]);
-                            let halign = column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
-                            cell_height = self.render_overhauled_cell(
-                                ui,
-                                spans,
-                                width,
-                                false,
-                                Some(idx),
-                                ci,
-                                halign,
-                            );
-                            // Extend body_rect (not header_rect) for accurate body bounds.
-                            Self::extend_table_rect(&mut body_rect, ui.min_rect());
-                            if body_clip_rect.borrow().is_none() {
-                                *body_clip_rect.borrow_mut() = Some(ui.clip_rect());
-                                // Also capture painter/visuals/ctx if not already captured from header
-                                if painter.is_none() {
-                                    painter = Some(ui.painter().clone());
-                                    visuals = Some(ui.visuals().clone());
-                                    ctx_snapshot = Some(ui.ctx().clone());
+                    let fallback_row_height = self.row_height_fallback();
+                    let mut row_heights: Vec<f32> = (0..rows.len())
+                        .map(|idx| self.row_height_hint(table_id, idx))
+                        .collect();
+                    if needs_estimate {
+                        let approx_widths = self.estimate_table_column_widths(
+                            &column_specs,
+                            max_width,
+                            column_spacing,
+                        );
+                        let style = ui.style().clone();
+                        for (idx, row) in rows.iter().enumerate() {
+                            if self.row_needs_height_estimate(row) {
+                                let estimate = self.estimate_table_row_height(
+                                    ui,
+                                    &style,
+                                    row,
+                                    &column_aligns,
+                                    &approx_widths,
+                                    fallback_row_height,
+                                );
+                                if estimate > row_heights[idx] {
+                                    row_heights[idx] = estimate;
                                 }
                             }
-                        });
-                        row_height = row_height.max(cell_height);
-                        if cell_height > row_heights[idx] + 0.5 {
-                            height_growth = true;
                         }
                     }
-                    self.update_row_height(table_id, idx, row_height);
-                    self.note_row_rendered(table_id);
+
+                    let mut table = TableBuilder::new(ui).striped(true).vscroll(false);
+                    for spec in &column_specs {
+                        table = table.column(spec.as_column());
+                    }
+
+                    // Use RefCell to allow capturing widths from body closure.
+                    // BUG FIX: Previously captured ui.min_rect().width() which is the cell *content* width.
+                    // Now we capture body.widths() which gives the actual *allocated* column widths.
+                    // See: https://docs.rs/egui_extras/latest/egui_extras/struct.TableBody.html#method.widths
+                    let column_widths: RefCell<Vec<f32>> =
+                        RefCell::new(vec![0.0f32; column_specs.len()]);
+                    // Track header and body rects separately for accurate table bounds calculation.
+                    // The header rect captures the header row bounds, body_rect captures body row bounds.
+                    // These are combined after rendering to get the full table rect.
+                    let mut header_rect: Option<egui::Rect> = None;
+                    let mut body_rect: Option<egui::Rect> = None;
+                    // body_layout_rect captures the allocated layout region from body.max_rect(),
+                    // which is more accurate than union of cell min_rects for table width.
+                    let body_layout_rect: RefCell<Option<egui::Rect>> = RefCell::new(None);
+                    // Track clip rects separately for header and body, then union them.
+                    // This ensures dividers respect scroll boundaries for both regions.
+                    let mut header_clip_rect: Option<egui::Rect> = None;
+                    let body_clip_rect: RefCell<Option<egui::Rect>> = RefCell::new(None);
+                    let mut painter: Option<Painter> = None;
+                    let mut visuals: Option<Visuals> = None;
+                    let mut ctx_snapshot: Option<Context> = None;
+
+                    let mut height_change = false;
+                    let header_height_actual = Cell::new(0.0f32);
+                    table
+                        .header(header_height, |mut header| {
+                            for (ci, _) in column_specs.iter().enumerate() {
+                                header.col(|ui| {
+                                    let width = ui.available_width().max(1.0);
+                                    let spans =
+                                        headers.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
+                                    let halign =
+                                        column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
+                                    let cell_height = self.render_overhauled_cell(
+                                        ui, spans, width, true, None, ci, halign,
+                                    );
+                                    header_height_actual
+                                        .set(header_height_actual.get().max(cell_height));
+                                    // NOTE: Do NOT capture ui.min_rect().width() here - that's the content width,
+                                    // not the column width. Column widths are captured from body.widths() below.
+                                    // Extend header_rect (not body_rect) for accurate header bounds.
+                                    Self::extend_table_rect(&mut header_rect, ui.min_rect());
+                                    if header_clip_rect.is_none() {
+                                        header_clip_rect = Some(ui.clip_rect());
+                                        painter = Some(ui.painter().clone());
+                                        visuals = Some(ui.visuals().clone());
+                                        ctx_snapshot = Some(ui.ctx().clone());
+                                    }
+                                });
+                            }
+                        })
+                        .body(|body| {
+                            // Capture the actual allocated column widths from the table layout system.
+                            // This MUST be done before heterogeneous_rows() consumes the body.
+                            *column_widths.borrow_mut() = body.widths().to_vec();
+
+                            // Capture body's layout rect for accurate table width calculation.
+                            // This is the allocated region, not the content bounds.
+                            *body_layout_rect.borrow_mut() = Some(body.max_rect());
+
+                            let row_height_hints = row_heights.clone();
+                            body.heterogeneous_rows(row_height_hints.into_iter(), |mut row| {
+                                let idx = row.index();
+                                let row_cells = rows.get(idx);
+                                let mut row_height = fallback_row_height;
+                                for (ci, _) in column_specs.iter().enumerate() {
+                                    let mut cell_height = fallback_row_height;
+                                    row.col(|ui| {
+                                        let width = ui.available_width().max(1.0);
+                                        let spans = row_cells
+                                            .and_then(|cells| cells.get(ci))
+                                            .map(|cell| cell.as_slice())
+                                            .unwrap_or(&[]);
+                                        let halign =
+                                            column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
+                                        cell_height = self.render_overhauled_cell(
+                                            ui,
+                                            spans,
+                                            width,
+                                            false,
+                                            Some(idx),
+                                            ci,
+                                            halign,
+                                        );
+                                        // Extend body_rect (not header_rect) for accurate body bounds.
+                                        Self::extend_table_rect(&mut body_rect, ui.min_rect());
+                                        if body_clip_rect.borrow().is_none() {
+                                            *body_clip_rect.borrow_mut() = Some(ui.clip_rect());
+                                            // Also capture painter/visuals/ctx if not already captured from header
+                                            if painter.is_none() {
+                                                painter = Some(ui.painter().clone());
+                                                visuals = Some(ui.visuals().clone());
+                                                ctx_snapshot = Some(ui.ctx().clone());
+                                            }
+                                        }
+                                    });
+                                    row_height = row_height.max(cell_height);
+                                }
+                                if (row_height - row_heights[idx]).abs() > 0.5 {
+                                    height_change = true;
+                                }
+                                self.update_row_height(table_id, idx, row_height);
+                                self.note_row_rendered(table_id);
+                            });
+                        });
+
+                    ui.spacing_mut().item_spacing = prev_spacing;
+
+                    // Extract column widths from RefCell for use in divider painting
+                    let widths = column_widths.into_inner();
+                    let layout_rect = body_layout_rect.into_inner();
+                    let body_clip = body_clip_rect.into_inner();
+                    let measured_header_height = header_height_actual.get();
+                    if measured_header_height > 0.0
+                        && self.update_header_height(table_id, measured_header_height)
+                    {
+                        ui.ctx().request_repaint();
+                    }
+
+                    // Combine header and body clip rects to ensure dividers respect scroll bounds.
+                    let clip_rect = match (header_clip_rect, body_clip) {
+                        (Some(h), Some(b)) => Some(h.union(b)),
+                        (Some(h), None) => Some(h),
+                        (None, Some(b)) => Some(b),
+                        (None, None) => None,
+                    };
+
+                    // Calculate accurate table width from column widths.
+                    // This is more accurate than union of cell min_rects which may be smaller
+                    // than the allocated column space.
+                    let calculated_width: f32 = widths.iter().sum::<f32>()
+                        + column_spacing * widths.len().saturating_sub(1) as f32;
+
+                    // Combine header/body bounds with layout bounds for accurate borders,
+                    // especially when the first column is centered or right-aligned.
+                    let table_rect = if calculated_width > 0.0 {
+                        let left = layout_rect
+                            .map(|rect| rect.left())
+                            .or_else(|| header_rect.map(|rect| rect.left()))
+                            .or_else(|| body_rect.map(|rect| rect.left()));
+                        let right = left.map(|value| value + calculated_width);
+                        let top = header_rect
+                            .map(|rect| rect.top())
+                            .or_else(|| body_rect.map(|rect| rect.top()))
+                            .or_else(|| layout_rect.map(|rect| rect.top()));
+                        let bottom = body_rect
+                            .map(|rect| rect.bottom())
+                            .or_else(|| header_rect.map(|rect| rect.bottom()))
+                            .or_else(|| layout_rect.map(|rect| rect.bottom()));
+                        match (left, right, top, bottom) {
+                            (Some(left), Some(right), Some(top), Some(bottom)) => {
+                                Some(egui::Rect::from_min_max(
+                                    egui::pos2(left, top),
+                                    egui::pos2(right, bottom),
+                                ))
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        match (header_rect, body_rect, layout_rect) {
+                            (Some(h), Some(b), _) => Some(h.union(b)),
+                            (Some(h), None, _) => Some(h),
+                            (None, Some(b), _) => Some(b),
+                            (None, None, Some(layout)) => Some(layout),
+                            (None, None, None) => None,
+                        }
+                    };
+
+                    if let (Some(rect), Some(clip_rect), Some(painter), Some(visuals), Some(ctx)) =
+                        (table_rect, clip_rect, painter, visuals, ctx_snapshot)
+                    {
+                        if column_specs.len() == widths.len() && widths.iter().any(|w| *w > 0.0) {
+                            let frame_id = ctx.frame_nr();
+                            let change = self.record_resolved_widths(table_id, frame_id, &widths);
+                            self.persist_resizable_widths(table_id, &column_specs, &widths);
+                            self.handle_width_change(&ctx, table_id, change);
+                            self.paint_table_dividers(
+                                &painter,
+                                &visuals,
+                                rect,
+                                clip_rect,
+                                &widths,
+                                header_height,
+                                column_spacing,
+                            );
+                        }
+                    }
+                    if height_change {
+                        ui.ctx().request_repaint();
+                    }
                 });
             });
+        };
 
-        ui.spacing_mut().item_spacing = prev_spacing;
+        if use_hscroll {
+            egui::ScrollArea::horizontal()
+                .id_source(("md_table_hscroll_overhaul", table_id))
+                .auto_shrink([false, true])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                .show(ui, |ui| {
+                    ui.set_min_width(content_width);
+                    render_table(ui, content_width);
+                });
+        } else {
+            render_table(ui, available_width);
+        }
+    }
 
-        // Extract column widths from RefCell for use in divider painting
-        let widths = column_widths.into_inner();
-        let layout_rect = body_layout_rect.into_inner();
-        let body_clip = body_clip_rect.into_inner();
-        let measured_header_height = header_height_actual.get();
-        if measured_header_height > 0.0
-            && self.update_header_height(table_id, measured_header_height)
-        {
-            ui.ctx().request_repaint();
+    fn row_needs_height_estimate(&self, row: &[Vec<InlineSpan>]) -> bool {
+        row.iter().any(|cell| {
+            cell.iter().any(|span| match span {
+                InlineSpan::Image { .. } => true,
+                InlineSpan::Text(text)
+                | InlineSpan::Code(text)
+                | InlineSpan::Strong(text)
+                | InlineSpan::Emphasis(text)
+                | InlineSpan::Strikethrough(text)
+                | InlineSpan::Link { text, .. } => text.contains('\n'),
+            })
+        })
+    }
+
+    fn estimate_table_column_widths(
+        &self,
+        column_specs: &[ColumnSpec],
+        max_width: f32,
+        column_spacing: f32,
+    ) -> Vec<f32> {
+        let column_count = column_specs.len().max(1);
+        let spacing_total = column_spacing * column_count.saturating_sub(1) as f32;
+        let available = (max_width - spacing_total).max(1.0);
+        let min_floor = (self.font_sizes.body * 6.0).max(48.0);
+        let mut widths: Vec<f32> = column_specs
+            .iter()
+            .map(|spec| match spec.policy {
+                ColumnPolicy::Fixed { width, .. } => width,
+                ColumnPolicy::Resizable { min, .. } => min,
+                ColumnPolicy::Remainder { .. } => min_floor,
+                ColumnPolicy::Auto => min_floor,
+            })
+            .map(|width| width.max(1.0))
+            .collect();
+
+        if widths.is_empty() {
+            return vec![available];
+        }
+        let sum: f32 = widths.iter().sum();
+        if sum > available && sum > 0.0 {
+            let scale = available / sum;
+            for width in &mut widths {
+                *width = (*width * scale).max(1.0);
+            }
+        }
+        widths
+    }
+
+    fn estimate_table_total_width(
+        &self,
+        table_id: u64,
+        column_specs: &[ColumnSpec],
+        column_spacing: f32,
+    ) -> f32 {
+        if column_specs.is_empty() {
+            return 0.0;
         }
 
-        // Combine header and body clip rects to ensure dividers respect scroll bounds.
-        let clip_rect = match (header_clip_rect, body_clip) {
-            (Some(h), Some(b)) => Some(h.union(b)),
-            (Some(h), None) => Some(h),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+        let stored_widths = {
+            let metrics = self.table_metrics.borrow();
+            metrics
+                .entry(table_id)
+                .map(|entry| entry.current_widths().to_vec())
+                .unwrap_or_default()
         };
+        let min_floor = (self.font_sizes.body * 6.0).max(48.0);
+        let widths: Vec<f32> = column_specs
+            .iter()
+            .enumerate()
+            .map(|(idx, spec)| {
+                let stored = stored_widths
+                    .get(idx)
+                    .copied()
+                    .filter(|width| width.is_finite() && *width > 0.0);
+                let width = match spec.policy {
+                    ColumnPolicy::Fixed { width, .. } => width,
+                    ColumnPolicy::Resizable { min, preferred, .. } => stored
+                        .unwrap_or(preferred.max(min))
+                        .max(min),
+                    ColumnPolicy::Remainder { .. } => min_floor,
+                    ColumnPolicy::Auto => stored.unwrap_or(min_floor).max(min_floor),
+                };
+                width.max(1.0)
+            })
+            .collect();
 
-        // Calculate accurate table width from column widths.
-        // This is more accurate than union of cell min_rects which may be smaller
-        // than the allocated column space.
-        let calculated_width: f32 = widths.iter().sum();
+        let spacing_total = column_spacing * widths.len().saturating_sub(1) as f32;
+        widths.iter().sum::<f32>() + spacing_total
+    }
 
-        // Combine header and body rects into the full table rect.
-        // Use calculated width for accuracy when column widths are available.
-        let table_rect = match (header_rect, body_rect, layout_rect) {
-            // Best case: use header for top/left, body for bottom, calculated width for right
-            (Some(h), Some(b), _) if calculated_width > 0.0 => {
-                let left = h.left().min(b.left());
-                let top = h.top();
-                let bottom = b.bottom();
-                let right = left + calculated_width;
-                Some(egui::Rect::from_min_max(
-                    egui::pos2(left, top),
-                    egui::pos2(right, bottom),
-                ))
+    fn estimate_table_row_height(
+        &self,
+        ui: &egui::Ui,
+        style: &egui::Style,
+        row: &[Vec<InlineSpan>],
+        column_aligns: &[Align],
+        widths: &[f32],
+        fallback: f32,
+    ) -> f32 {
+        let mut max_height = fallback;
+        let column_count = widths.len().max(row.len()).max(1);
+        for ci in 0..column_count {
+            let spans = row.get(ci).map(|cell| cell.as_slice()).unwrap_or(&[]);
+            if spans.is_empty() {
+                continue;
             }
-            // Fallback: use union of header and body
-            (Some(h), Some(b), _) => Some(h.union(b)),
-            // Header only with layout rect
-            (Some(h), None, Some(layout)) if calculated_width > 0.0 => {
-                let left = h.left().min(layout.left());
-                let right = left + calculated_width;
-                Some(egui::Rect::from_min_max(
-                    egui::pos2(left, h.top()),
-                    egui::pos2(right, h.bottom()),
-                ))
-            }
-            (Some(h), None, _) => Some(h),
-            (None, Some(b), _) => Some(b),
-            (None, None, Some(layout)) => Some(layout),
-            (None, None, None) => None,
-        };
+            let width = widths
+                .get(ci)
+                .copied()
+                .or_else(|| widths.last().copied())
+                .unwrap_or(1.0);
+            let halign = column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
+            let height = self.estimate_table_cell_height(style, ui, spans, width, halign, fallback);
+            max_height = max_height.max(height);
+        }
+        max_height
+    }
 
-        if let (Some(rect), Some(clip_rect), Some(painter), Some(visuals), Some(ctx)) =
-            (table_rect, clip_rect, painter, visuals, ctx_snapshot)
-        {
-            if column_specs.len() == widths.len() && widths.iter().any(|w| *w > 0.0) {
-                let frame_id = ctx.frame_nr();
-                let change = self.record_resolved_widths(table_id, frame_id, &widths);
-                self.persist_resizable_widths(table_id, &column_specs, &widths);
-                self.handle_width_change(&ctx, table_id, change);
-                self.paint_table_dividers(
-                    &painter,
-                    &visuals,
-                    rect,
-                    clip_rect,
-                    &widths,
-                    header_height,
-                );
-                if height_growth {
-                    ctx.request_repaint();
+    fn estimate_table_cell_height(
+        &self,
+        style: &egui::Style,
+        ui: &egui::Ui,
+        spans: &[InlineSpan],
+        width: f32,
+        halign: Align,
+        fallback: f32,
+    ) -> f32 {
+        if spans.is_empty() {
+            return fallback;
+        }
+        let fragments = self.cell_fragments(spans);
+        if fragments.is_empty() {
+            return fallback;
+        }
+        let mut total = 0.0;
+        for (idx, fragment) in fragments.into_iter().enumerate() {
+            if idx > 0 {
+                total += 2.0;
+            }
+            match fragment {
+                CellFragment::Text(slice) => {
+                    let build = self.build_layout_job(style, slice, width, false, halign);
+                    let height = ui.fonts(|f| f.layout_job(build.job.clone()).size().y);
+                    total += height;
+                }
+                CellFragment::Emoji(_) => {
+                    total += self.font_sizes.body * 1.2;
+                }
+                CellFragment::Image(span) => {
+                    total += self.estimate_table_image_height(ui, span, width);
                 }
             }
         }
+        total.max(fallback)
+    }
+
+    fn estimate_table_image_height(
+        &self,
+        ui: &egui::Ui,
+        span: &InlineSpan,
+        available_w: f32,
+    ) -> f32 {
+        let InlineSpan::Image { src, title, .. } = span else {
+            return self.font_sizes.body * 1.2;
+        };
+        let resolved = self.resolve_image_path(src);
+        let (tw, th) = self
+            .get_or_load_image_texture(ui, &resolved)
+            .map(|(_, w, h)| (w as f32, h as f32))
+            .unwrap_or((self.font_sizes.body * 12.0, self.font_sizes.body * 8.0));
+        let base_scale = self.ui_scale();
+        let scaled_w = tw * base_scale;
+        let scale = if scaled_w > available_w {
+            (available_w / tw).clamp(0.01, 4.0)
+        } else {
+            base_scale
+        };
+        let mut height = (th * scale).round();
+        if let Some(text) = title {
+            if !text.is_empty() {
+                height += 2.0 + (self.font_sizes.body - 2.0).max(1.0);
+            }
+        }
+        height + 6.0
     }
 
     fn row_height_fallback(&self) -> f32 {
@@ -3861,8 +4453,9 @@ impl MarkdownRenderer {
         clip_rect: egui::Rect,
         widths: &[f32],
         header_height: f32,
+        column_spacing: f32,
     ) {
-        if widths.len() <= 1 {
+        if widths.is_empty() {
             return;
         }
         let separator_color = visuals
@@ -3876,11 +4469,18 @@ impl MarkdownRenderer {
         let painter = painter.with_clip_rect(clip_rect);
 
         // Draw vertical dividers between columns
-        let mut x = rect.left();
-        for width in widths.iter().take(widths.len().saturating_sub(1)) {
-            x += *width;
-            let x_pos = (x.round() + 0.5).clamp(rect.left(), rect.right());
-            painter.vline(x_pos, rect.y_range(), separator_stroke);
+        if widths.len() > 1 {
+            let mut x = rect.left();
+            for (idx, width) in widths
+                .iter()
+                .take(widths.len().saturating_sub(1))
+                .enumerate()
+            {
+                x += *width;
+                let divider_x = x + column_spacing * (idx as f32 + 0.5);
+                let x_pos = (divider_x.round() + 0.5).clamp(rect.left(), rect.right());
+                painter.vline(x_pos, rect.y_range(), separator_stroke);
+            }
         }
 
         // Draw horizontal separator below header row
@@ -3934,7 +4534,7 @@ impl MarkdownRenderer {
                                 is_header,
                                 halign,
                             );
-                            self.paint_table_text_job(ui, width, build, halign);
+                            self.paint_table_text_job(ui, width, build);
                         }
                         CellFragment::Emoji(key) => {
                             self.render_table_emoji(ui, &key);
@@ -3954,14 +4554,13 @@ impl MarkdownRenderer {
         ui: &mut egui::Ui,
         width: f32,
         build: LayoutJobBuild,
-        halign: Align,
     ) -> egui::Response {
         let galley = ui.fonts(|f| f.layout_job(build.job.clone()));
         let height = galley.size().y;
         let (rect, mut response) =
             ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::click());
         let text_color = ui.visuals().text_color();
-        let text_origin = Self::aligned_text_origin(rect, width, galley.size().x, halign);
+        let text_origin = Self::aligned_text_origin(rect, &galley, build.job.halign);
         ui.painter_at(rect)
             .galley(text_origin, galley.clone(), text_color);
         if galley.rows.len() > 1 || galley.size().x > width + 0.5 {
@@ -3980,23 +4579,6 @@ impl MarkdownRenderer {
         }
 
         response
-    }
-
-    fn aligned_text_origin(
-        rect: egui::Rect,
-        width: f32,
-        galley_width: f32,
-        halign: Align,
-    ) -> egui::Pos2 {
-        let extra = width - galley_width;
-        let x_offset = if halign == Align::RIGHT {
-            extra
-        } else if halign == Align::Center {
-            extra * 0.5
-        } else {
-            0.0
-        };
-        rect.left_top() + egui::vec2(x_offset, 0.0)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4020,12 +4602,14 @@ impl MarkdownRenderer {
             .map(|s| Self::hash_str(s))
             .unwrap_or(0);
         let content_hash = Self::hash_inline_spans(spans);
+        let text_color = style.visuals.text_color().to_array();
         let key = CellLayoutKey {
             row: row_idx,
             col: col_idx,
             width: width.round() as u32,
             align: Self::align_to_u8(halign),
             strong: is_header,
+            text_color,
             highlight_hash,
             content_hash,
         };
@@ -4047,7 +4631,7 @@ impl MarkdownRenderer {
         text_origin: egui::Pos2,
     ) -> Option<&'a LinkRange> {
         let pointer = response.hover_pos()?;
-        let text_rect = egui::Rect::from_min_size(text_origin, galley.size());
+        let text_rect = galley.rect.translate(text_origin.to_vec2());
         if !text_rect.contains(pointer) {
             return None;
         }
@@ -4058,6 +4642,18 @@ impl MarkdownRenderer {
             .link_ranges
             .iter()
             .find(|range| range.char_range.contains(&idx))
+    }
+
+    fn aligned_text_origin(rect: egui::Rect, galley: &Galley, halign: Align) -> egui::Pos2 {
+        let galley_rect = galley.rect;
+        let x = if halign == Align::RIGHT {
+            rect.right() - galley_rect.right()
+        } else if halign == Align::Center {
+            rect.center().x - galley_rect.center().x
+        } else {
+            rect.left() - galley_rect.left()
+        };
+        egui::pos2(x, rect.top() - galley_rect.top())
     }
 
     fn render_table_emoji(&self, ui: &mut egui::Ui, emoji: &str) {
@@ -4187,14 +4783,17 @@ impl MarkdownRenderer {
 
     /// Set or clear the highlight phrase (case-insensitive)
     pub fn set_highlight_phrase(&self, phrase: Option<&str>) {
-        if let Some(p) = phrase {
-            self.highlight_phrase
-                .borrow_mut()
-                .replace(p.case_fold().nfkc().collect());
-        } else {
-            self.highlight_phrase.borrow_mut().take();
+        let normalized = phrase
+            .map(|p| p.case_fold().nfkc().collect::<String>())
+            .filter(|value| !value.is_empty());
+        {
+            let mut current = self.highlight_phrase.borrow_mut();
+            if *current == normalized {
+                return;
+            }
+            *current = normalized;
         }
-        self.clear_table_layout_cache();
+        self.table_layout_cache.borrow_mut().clear();
     }
 
     pub fn set_table_wrap_overhaul_enabled(&mut self, enabled: bool) {
@@ -4229,20 +4828,22 @@ impl MarkdownRenderer {
             MarkdownElement::List { items, .. } => {
                 let mut out = String::new();
                 for item in items {
-                    if !out.is_empty() {
-                        out.push('\n');
+                    for block in &item.blocks {
+                        if !out.is_empty() {
+                            out.push('\n');
+                        }
+                        out.push_str(&Self::element_plain_text(block));
                     }
-                    out.push_str(&Self::spans_plain_text(item));
                 }
                 out
             }
-            MarkdownElement::Quote { lines, .. } => {
+            MarkdownElement::Quote { blocks, .. } => {
                 let mut out = String::new();
-                for line in lines {
+                for block in blocks {
                     if !out.is_empty() {
                         out.push('\n');
                     }
-                    out.push_str(&Self::spans_plain_text(line));
+                    out.push_str(&Self::element_plain_text(block));
                 }
                 out
             }
@@ -4512,6 +5113,7 @@ mod tests {
     use image::codecs::png::PngEncoder;
     use image::ColorType;
     use image::ImageEncoder;
+    use std::fs;
     use tempfile::tempdir;
 
     struct ForcedRenderActions {
@@ -4691,6 +5293,7 @@ mod tests {
         let mut renderer = MarkdownRenderer::new();
         let table_id = 7u64;
         let specs = vec![ColumnSpec::new(
+            0,
             "A",
             ColumnPolicy::Resizable {
                 min: 20.0,
@@ -4732,6 +5335,32 @@ mod tests {
     }
 
     #[test]
+    fn highlight_phrase_keeps_persisted_table_widths() {
+        let renderer = MarkdownRenderer::new();
+        let table_id = 11u64;
+        let specs = vec![ColumnSpec::new(
+            0,
+            "A",
+            ColumnPolicy::Resizable {
+                min: 20.0,
+                preferred: 100.0,
+                clip: false,
+            },
+            None,
+        )];
+        let widths = vec![120.0f32];
+        let policy_hash = specs[0].policy_hash;
+
+        renderer.persist_resizable_widths(table_id, &specs, &widths);
+        renderer.set_highlight_phrase(Some("alpha"));
+        renderer.set_highlight_phrase(Some("beta"));
+
+        let metrics = renderer.table_metrics.borrow();
+        let entry = metrics.entry(table_id).expect("entry exists");
+        assert_eq!(entry.persisted_width(policy_hash), Some(120.0));
+    }
+
+    #[test]
     fn test_tight_list_inline_code_and_styles() {
         let renderer = MarkdownRenderer::new();
         let md = "- Use `code` and **bold** and *italic* and ~~strike~~\\n";
@@ -4741,7 +5370,10 @@ mod tests {
             MarkdownElement::List { ordered, items } => {
                 assert!(!ordered);
                 assert_eq!(items.len(), 1);
-                let spans = &items[0];
+                let spans = match items[0].blocks.as_slice() {
+                    [MarkdownElement::Paragraph(spans)] => spans,
+                    other => panic!("Expected paragraph block, got {:?}", other),
+                };
                 assert!(spans
                     .iter()
                     .any(|s| matches!(s, InlineSpan::Code(c) if c == "code")));
@@ -5010,7 +5642,22 @@ mod tests {
     }
 
     #[test]
-    fn test_cell_fragments_detect_single_emoji_span() {
+    fn test_cell_fragments_detect_single_emoji_cell() {
+        let renderer = MarkdownRenderer::new();
+        let rocket = crate::emoji_catalog::shortcode_map()
+            .get(":rocket:")
+            .expect("rocket shortcode");
+        let spans = vec![InlineSpan::Strong((*rocket).to_string())];
+        let fragments = renderer.cell_fragments(&spans);
+        assert_eq!(fragments.len(), 1);
+        assert!(matches!(
+            &fragments[0],
+            CellFragment::Emoji(e) if !e.is_empty()
+        ));
+    }
+
+    #[test]
+    fn test_cell_fragments_inline_emoji_stays_text() {
         let renderer = MarkdownRenderer::new();
         let rocket = crate::emoji_catalog::shortcode_map()
             .get(":rocket:")
@@ -5020,12 +5667,11 @@ mod tests {
             InlineSpan::Text("tail".into()),
         ];
         let fragments = renderer.cell_fragments(&spans);
-        assert_eq!(fragments.len(), 2);
-        assert!(matches!(
-            &fragments[0],
-            CellFragment::Emoji(e) if !e.is_empty()
-        ));
-        assert!(matches!(fragments[1], CellFragment::Text(_)));
+        assert_eq!(fragments.len(), 1);
+        match &fragments[0] {
+            CellFragment::Text(slice) => assert_eq!(slice.len(), 2),
+            other => panic!("expected text fragment, got {:?}", other),
+        }
     }
 
     #[test]
@@ -5241,6 +5887,59 @@ mod tests {
     }
 
     #[test]
+    fn blockquote_table_after_paragraph_parses() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let md = "\
+> Intro line
+> | Col | Notes |
+> | --- | --- |
+> | A | B |";
+        let elements = renderer.parse(md)?;
+        let blocks = elements
+            .iter()
+            .find_map(|el| match el {
+                MarkdownElement::Quote { blocks, .. } => Some(blocks),
+                _ => None,
+            })
+            .expect("quote block");
+        assert!(blocks
+            .iter()
+            .any(|block| matches!(block, MarkdownElement::Table { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn blockquote_list_table_after_paragraph_parses() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let md = "\
+> - Item:
+>   | Key | Val |
+>   | --- | --- |
+>   | A | 1 |";
+        let elements = renderer.parse(md)?;
+        let blocks = elements
+            .iter()
+            .find_map(|el| match el {
+                MarkdownElement::Quote { blocks, .. } => Some(blocks),
+                _ => None,
+            })
+            .expect("quote block");
+        let list = blocks
+            .iter()
+            .find_map(|block| match block {
+                MarkdownElement::List { items, .. } => Some(items),
+                _ => None,
+            })
+            .expect("list block");
+        let first = list.first().expect("list item");
+        assert!(first
+            .blocks
+            .iter()
+            .any(|block| matches!(block, MarkdownElement::Table { .. })));
+        Ok(())
+    }
+
+    #[test]
     fn blockquote_indented_code_block_preserves_pipes() {
         let md = "\
 >     | Col | Notes |
@@ -5426,6 +6125,31 @@ mod tests {
         assert!(
             prepared.contains(&expected),
             "Expected escaped pipes for blockquote table starting on list marker line"
+        );
+    }
+
+    #[test]
+    fn list_marker_table_dedent_does_not_escape_pipes() {
+        let md = "\
+- | Col | `a|b|c` |
+| --- | --- |
+| row | ok |";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert!(prepared.contains("`a|b|c`"));
+        assert!(!prepared.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
+    fn blockquote_list_table_inline_code_escapes_pipes() {
+        let md = "\
+> - | Col | Notes |
+>   | --- | --- |
+>   | code | `a|b|c` |";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
+        assert!(
+            prepared.contains(&expected),
+            "Expected escaped pipes for table inside blockquote list"
         );
     }
 
@@ -5625,7 +6349,7 @@ Not a table";
                     headers,
                     rows,
                     alignments,
-                } => Some(renderer.compute_table_id(headers, rows, alignments, idx)),
+                } => Some(renderer.compute_table_id(headers, rows, alignments, idx as u64)),
                 _ => None,
             })
             .collect();
@@ -5695,6 +6419,148 @@ fn main() {}
 
         renderer.clear_table_layout_cache();
         assert_eq!(renderer.table_layout_cache_stats(), (0, 0));
+    }
+
+    #[test]
+    fn test_table_layout_cache_separates_text_colors() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![InlineSpan::Text("alpha".to_string())];
+        let mut light_style = egui::Style::default();
+        let mut dark_style = egui::Style::default();
+        light_style.visuals.override_text_color = Some(Color32::WHITE);
+        dark_style.visuals.override_text_color = Some(Color32::BLACK);
+
+        let _ =
+            renderer.cached_layout_job(&light_style, Some(0), 0, &spans, 120.0, false, Align::LEFT);
+        let _ =
+            renderer.cached_layout_job(&dark_style, Some(0), 0, &spans, 120.0, false, Align::LEFT);
+
+        let (hits, misses) = renderer.table_layout_cache_stats();
+        assert_eq!(hits, 0);
+        assert_eq!(misses, 2);
+    }
+
+    #[test]
+    fn test_table_alignment_center_single_column() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let md = "| Item |\n| :---: |\n| Alpha |\n";
+        let elements = renderer.parse(md)?;
+        let alignments = elements
+            .iter()
+            .find_map(|el| match el {
+                MarkdownElement::Table { alignments, .. } => Some(alignments),
+                _ => None,
+            })
+            .expect("table element");
+        assert_eq!(alignments.len(), 1);
+        assert_eq!(alignments[0], Alignment::Center);
+        Ok(())
+    }
+
+    #[test]
+    fn test_single_column_table_parses_one_cell_per_row() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let md =
+            "| Item |\n| :---: |\n| Alpha |\n| line one<br>line two |\n| **bold** and `code` |\n";
+        let elements = renderer.parse(md)?;
+        let (headers, rows) = elements
+            .iter()
+            .find_map(|el| match el {
+                MarkdownElement::Table { headers, rows, .. } => Some((headers, rows)),
+                _ => None,
+            })
+            .expect("table element");
+        assert_eq!(headers.len(), 1);
+        assert!(rows.iter().all(|row| row.len() == 1));
+        Ok(())
+    }
+
+    #[test]
+    fn test_table_first_column_alignment_parses_three_columns() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let md = fs::read_to_string("tests/regression/cases/026-table-first-column-align.md")?;
+        let elements = renderer.parse(&md)?;
+        let tables: Vec<_> = elements
+            .iter()
+            .filter_map(|el| match el {
+                MarkdownElement::Table {
+                    headers,
+                    rows,
+                    alignments,
+                } => Some((headers, rows, alignments)),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            tables.len() >= 3,
+            "expected at least 3 tables, got {}",
+            tables.len()
+        );
+        let (first_headers, first_rows, first_alignments) = tables[0];
+        for (headers, rows, alignments) in tables.iter() {
+            assert_eq!(headers.len(), 3, "header count {:?}", headers.len());
+            assert_eq!(
+                alignments.len(),
+                3,
+                "alignment count {:?}",
+                alignments.len()
+            );
+            assert!(
+                rows.iter().all(|row| row.len() == 3),
+                "row lengths {:?}",
+                rows.iter().map(|row| row.len()).collect::<Vec<_>>()
+            );
+        }
+        let table_id = renderer.compute_table_id(first_headers, first_rows, first_alignments, 0);
+        let available = Cell::new(0.0f32);
+        let spacing = Cell::new(0.0f32);
+        let estimated_before = {
+            let column_stats =
+                renderer.column_stats_for_table(table_id, first_headers, first_rows, first_alignments);
+            let ctx = TableColumnContext::new(
+                first_headers,
+                first_rows,
+                &column_stats,
+                renderer.font_sizes.body,
+                table_id,
+            );
+            let column_specs = derive_column_specs(&ctx);
+            let column_spacing = 6.0f32.max(egui::Style::default().spacing.item_spacing.x);
+            renderer.estimate_table_total_width(table_id, &column_specs, column_spacing)
+        };
+        with_test_ui(|_, ui| {
+            available.set(ui.available_width());
+            spacing.set(ui.spacing().item_spacing.x.max(6.0));
+            renderer.render_table_tablebuilder(
+                ui,
+                first_headers,
+                first_rows,
+                first_alignments,
+                table_id,
+            );
+        });
+        let widths = renderer
+            .table_metrics
+            .borrow()
+            .entry(table_id)
+            .map(|entry| entry.current_widths().to_vec())
+            .unwrap_or_default();
+        assert_eq!(widths.len(), 3, "widths = {:?}", widths);
+        assert!(
+            widths.iter().all(|w| *w > 8.0),
+            "widths too small: {:?}",
+            widths
+        );
+        let total_width = widths.iter().sum::<f32>()
+            + spacing.get() * widths.len().saturating_sub(1) as f32;
+        assert!(
+            !(total_width > available.get() + 1.0 && estimated_before <= available.get() + 0.5),
+            "actual width {} exceeds available {} (estimated {})",
+            total_width,
+            available.get(),
+            estimated_before
+        );
+        Ok(())
     }
 
     #[test]
@@ -5809,6 +6675,19 @@ fn main() {}
     }
 
     #[test]
+    fn test_build_layout_job_strong_uses_override_text_color() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![InlineSpan::Text("Header".to_string())];
+        let mut style = egui::Style::default();
+        let override_color = Color32::from_rgb(10, 20, 30);
+        style.visuals.override_text_color = Some(override_color);
+
+        let build = renderer.build_layout_job(&style, &spans, 200.0, true, Align::LEFT);
+        assert!(!build.job.sections.is_empty());
+        assert_eq!(build.job.sections[0].format.color, override_color);
+    }
+
+    #[test]
     fn test_render_inline_span_variants() {
         let renderer = MarkdownRenderer::new();
         let temp = tempdir().expect("temp dir");
@@ -5919,11 +6798,17 @@ fn main() {}
             },
             MarkdownElement::List {
                 ordered: false,
-                items: vec![vec![InlineSpan::Text("Item".to_string())]],
+                items: vec![ListItem {
+                    blocks: vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+                        "Item".to_string(),
+                    )])],
+                }],
             },
             MarkdownElement::Quote {
                 depth: 1,
-                lines: vec![vec![InlineSpan::Text("Quote".to_string())]],
+                blocks: vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+                    "Quote".to_string(),
+                )])],
             },
             MarkdownElement::HorizontalRule,
             MarkdownElement::Table {
@@ -5995,6 +6880,42 @@ fn main() {}
     }
 
     #[test]
+    fn test_measure_inline_spans_respects_line_breaks() {
+        let renderer = MarkdownRenderer::new();
+        let single_line = vec![InlineSpan::Text(
+            "Short This is a much longer line".to_string(),
+        )];
+        let multi_line = vec![InlineSpan::Text(
+            "Short\nThis is a much longer line".to_string(),
+        )];
+
+        with_test_ui(|_, ui| {
+            let single = renderer.measure_inline_spans(ui, &single_line);
+            let multi = renderer.measure_inline_spans(ui, &multi_line);
+            assert!(
+                multi < single,
+                "multi-line width ({multi}) should be less than single-line width ({single})"
+            );
+        });
+    }
+
+    #[test]
+    fn test_measure_inline_spans_normalizes_unicode() {
+        let renderer = MarkdownRenderer::new();
+        let unicode = vec![InlineSpan::Text("A\u{2192}B".to_string())];
+        let ascii = vec![InlineSpan::Text("A->B".to_string())];
+
+        with_test_ui(|_, ui| {
+            let unicode_width = renderer.measure_inline_spans(ui, &unicode);
+            let ascii_width = renderer.measure_inline_spans(ui, &ascii);
+            assert!(
+                (unicode_width - ascii_width).abs() < 0.5,
+                "normalized width mismatch (unicode {unicode_width}, ascii {ascii_width})"
+            );
+        });
+    }
+
+    #[test]
     fn test_to_superscript_full_mapping() {
         let input = "0123456789+-=()abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ#";
         let out = MarkdownRenderer::to_superscript(input);
@@ -6009,11 +6930,17 @@ fn main() {}
     fn test_element_plain_text_variants() {
         let list = MarkdownElement::List {
             ordered: false,
-            items: vec![vec![InlineSpan::Text("Item".to_string())]],
+            items: vec![ListItem {
+                blocks: vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+                    "Item".to_string(),
+                )])],
+            }],
         };
         let quote = MarkdownElement::Quote {
             depth: 1,
-            lines: vec![vec![InlineSpan::Text("Quote".to_string())]],
+            blocks: vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+                "Quote".to_string(),
+            )])],
         };
         let table = MarkdownElement::Table {
             headers: vec![vec![InlineSpan::Text("Header".to_string())]],
@@ -6102,10 +7029,19 @@ fn main() {}
             Event::End(Tag::List(None)),
         ];
 
-        let (items, next) = renderer.parse_list(&events, 1, None, 0)?;
+        let mut slugs = std::collections::HashMap::new();
+        let (items, next) = renderer.parse_list(&events, 1, &mut slugs)?;
         assert_eq!(next, events.len());
         assert_eq!(items.len(), 1);
-        let spans = &items[0];
+        let item = &items[0];
+        let spans = item
+            .blocks
+            .iter()
+            .find_map(|block| match block {
+                MarkdownElement::Paragraph(spans) => Some(spans),
+                _ => None,
+            })
+            .expect("paragraph block");
         assert!(spans.iter().any(|s| matches!(s, InlineSpan::Emphasis(_))));
         assert!(spans.iter().any(|s| matches!(s, InlineSpan::Strong(_))));
         assert!(spans
@@ -6114,9 +7050,10 @@ fn main() {}
         assert!(spans.iter().any(|s| matches!(s, InlineSpan::Link { .. })));
         assert!(spans.iter().any(|s| matches!(s, InlineSpan::Image { .. })));
         assert!(spans.iter().any(|s| matches!(s, InlineSpan::Code(_))));
-        assert!(spans
+        assert!(item
+            .blocks
             .iter()
-            .any(|s| matches!(s, InlineSpan::Text(t) if t.contains('\n'))));
+            .any(|block| matches!(block, MarkdownElement::List { ordered: true, .. })));
         Ok(())
     }
 
@@ -6256,7 +7193,8 @@ fn main() {}
             Event::End(Tag::BlockQuote),
             Event::End(Tag::BlockQuote),
         ];
-        let (quotes, next) = renderer.collect_blockquotes(&events, 1, 1)?;
+        let mut slugs = HashMap::new();
+        let (quotes, next) = renderer.collect_blockquotes(&events, 1, 1, &mut slugs)?;
         assert_eq!(next, events.len());
         assert!(quotes.iter().any(|(depth, _)| *depth == 1));
         assert!(quotes.iter().any(|(depth, _)| *depth == 2));
@@ -6355,6 +7293,58 @@ fn main() {}
     }
 
     #[test]
+    fn test_table_line_breaks_case_parses_all_rows() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let md = fs::read_to_string("tests/regression/cases/017-table-line-breaks.md")?;
+        let elements = renderer.parse(&md)?;
+        let rows = elements.iter().find_map(|el| match el {
+            MarkdownElement::Table { rows, .. } => Some(rows),
+            _ => None,
+        });
+        let rows = rows.expect("table present");
+        assert_eq!(rows.len(), 7);
+        let plain = MarkdownRenderer::elements_to_plain_text(&elements);
+        assert!(plain.contains("Strong"));
+        assert!(plain.contains("Attr"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_table_line_breaks_case_renders_all_rows() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let md = fs::read_to_string("tests/regression/cases/017-table-line-breaks.md")?;
+        let elements = renderer.parse(&md)?;
+        with_test_ui(|ctx, ui| {
+            ctx.set_visuals(egui::Visuals::light());
+            renderer.render_to_ui(ui, &elements);
+        });
+        let (rendered, total) = renderer.table_render_stats();
+        assert_eq!(rendered, total);
+        assert_eq!(rendered, 7);
+        Ok(())
+    }
+
+    #[test]
+    fn test_table_first_column_alignment_case_parses_columns() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let md = fs::read_to_string("tests/regression/cases/026-table-first-column-align.md")?;
+        let elements = renderer.parse(&md)?;
+        let mut tables = elements.iter().filter_map(|el| match el {
+            MarkdownElement::Table {
+                headers,
+                rows,
+                alignments,
+            } => Some((headers, rows, alignments)),
+            _ => None,
+        });
+        let (headers, rows, alignments) = tables.next().expect("expected table");
+        assert_eq!(headers.len(), 3);
+        assert_eq!(alignments.len(), 3);
+        assert!(rows.iter().all(|row| row.len() == 3));
+        Ok(())
+    }
+
+    #[test]
     fn test_handle_width_change_requests_repaint() {
         let renderer = MarkdownRenderer::new();
         let ctx = egui::Context::default();
@@ -6368,10 +7358,13 @@ fn main() {}
     fn test_render_list_multiline_indent_and_empty() {
         let renderer = MarkdownRenderer::new();
         let spans = vec![InlineSpan::Text("First\n  Nested".to_string())];
+        let item = ListItem {
+            blocks: vec![MarkdownElement::Paragraph(spans.clone())],
+        };
         with_test_ui(|ctx, ui| {
             ctx.set_visuals(egui::Visuals::light());
             renderer.render_list(ui, false, &[]);
-            renderer.render_list(ui, true, std::slice::from_ref(&spans));
+            renderer.render_list(ui, true, std::slice::from_ref(&item));
         });
     }
 
@@ -6478,7 +7471,7 @@ fn main() {}
                 |ui| {
                     let build =
                         renderer.build_layout_job(ui.style(), &spans, 30.0, false, Align::LEFT);
-                    renderer.paint_table_text_job(ui, 120.0, build, Align::LEFT);
+                    renderer.paint_table_text_job(ui, 120.0, build);
                 },
             );
         });
@@ -6490,28 +7483,48 @@ fn main() {}
                 |ui| {
                     let build =
                         renderer.build_layout_job(ui.style(), &spans, 30.0, false, Align::LEFT);
-                    renderer.paint_table_text_job(ui, 120.0, build, Align::LEFT);
+                    renderer.paint_table_text_job(ui, 120.0, build);
                 },
             );
         });
     }
 
     #[test]
-    fn test_aligned_text_origin_allows_overflow_alignment() {
-        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 20.0));
-        let right_origin = MarkdownRenderer::aligned_text_origin(rect, 100.0, 200.0, Align::RIGHT);
-        assert!(
-            right_origin.x < rect.left(),
-            "Right-aligned overflow should shift left"
-        );
-        let center_origin =
-            MarkdownRenderer::aligned_text_origin(rect, 100.0, 200.0, Align::Center);
-        assert!(
-            center_origin.x < rect.left(),
-            "Center-aligned overflow should shift left"
-        );
-        let left_origin = MarkdownRenderer::aligned_text_origin(rect, 100.0, 200.0, Align::LEFT);
+    fn test_aligned_text_origin_anchors_to_rect() {
+        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(100.0, 20.0));
+        let galley = Arc::new(Galley {
+            job: Arc::new(LayoutJob::default()),
+            rows: Vec::new(),
+            elided: false,
+            rect: egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(20.0, 10.0)),
+            mesh_bounds: egui::Rect::NOTHING,
+            num_vertices: 0,
+            num_indices: 0,
+            pixels_per_point: 1.0,
+        });
+        let left_origin = MarkdownRenderer::aligned_text_origin(rect, &galley, Align::LEFT);
+        let center_origin = MarkdownRenderer::aligned_text_origin(rect, &galley, Align::Center);
+        let right_origin = MarkdownRenderer::aligned_text_origin(rect, &galley, Align::RIGHT);
+
         assert_eq!(left_origin.x, rect.left());
+        assert_eq!(center_origin.x, rect.center().x - galley.rect.center().x);
+        assert_eq!(right_origin.x, rect.right() - galley.rect.right());
+        assert_eq!(left_origin.y, rect.top());
+    }
+
+    #[test]
+    fn test_layout_job_center_rect_is_origin() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![InlineSpan::Text("Item".to_string())];
+        with_test_ui(|_, ui| {
+            let build = renderer.build_layout_job(ui.style(), &spans, 200.0, true, Align::Center);
+            let galley = ui.fonts(|f| f.layout_job(build.job.clone()));
+            assert!(
+                galley.rect.center().x.abs() <= 0.01,
+                "center rect should be near 0, got {:?}",
+                galley.rect
+            );
+        });
     }
 
     #[test]
@@ -6523,8 +7536,10 @@ fn main() {}
             vec![InlineSpan::Text("B".to_string())],
         ]];
         with_test_ui(|_, ui| {
-            renderer.render_table_tablebuilder(ui, &headers, &rows, &[], 0);
-            renderer.render_table_tablebuilder(ui, &headers, &[], &[], 1);
+            let table_id = renderer.compute_table_id(&headers, &rows, &[], 0);
+            renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
+            let empty_id = renderer.compute_table_id(&headers, &[], &[], 1);
+            renderer.render_table_tablebuilder(ui, &headers, &[], &[], empty_id);
         });
     }
 

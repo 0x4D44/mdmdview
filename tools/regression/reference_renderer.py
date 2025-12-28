@@ -7,7 +7,8 @@ from pathlib import Path
 
 
 def read_css(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
+    return text.lstrip("\ufeff")
 
 
 def sanitize_font_name(name: str) -> str:
@@ -188,7 +189,7 @@ def main() -> int:
         css = f"{css}\n{font_css}"
     css_hash = hashlib.sha256(css.encode("utf-8")).hexdigest()
 
-    md_text = md_path.read_text(encoding="utf-8")
+    md_text = md_path.read_text(encoding="utf-8").lstrip("\ufeff")
     markdown_html = render_markdown(md_text, args.renderer)
 
     base_href = md_path.parent.resolve().as_uri() + "/"

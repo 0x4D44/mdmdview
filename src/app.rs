@@ -705,7 +705,12 @@ impl MarkdownViewerApp {
     /// Handles Windows (\r\n), Unix (\n), and old Mac (\r) formats
     fn normalize_line_endings(s: &str) -> String {
         // Order matters: replace \r\n first (Windows), then remaining \r (old Mac)
-        s.replace("\r\n", "\n").replace('\r', "\n")
+        let normalized = s.replace("\r\n", "\n").replace('\r', "\n");
+        if let Some(stripped) = normalized.strip_prefix('\u{FEFF}') {
+            stripped.to_string()
+        } else {
+            normalized
+        }
     }
 
     fn read_file_lossy(path: &Path) -> Result<(String, bool)> {
@@ -2550,6 +2555,21 @@ mod tests {
         assert_eq!(lines[1], "Line 2");
         assert_eq!(lines[2], "Line 3");
         assert_eq!(lines[3], "Line 4");
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_file_strips_bom() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let mut temp_file = NamedTempFile::new()?;
+
+        temp_file.write_all(b"\xEF\xBB\xBF# Heading\nContent")?;
+        temp_file.flush()?;
+
+        app.load_file(temp_file.path().to_path_buf(), true)?;
+
+        assert!(!app.current_content.starts_with('\u{FEFF}'));
+        assert!(app.current_content.starts_with("# Heading"));
         Ok(())
     }
 
