@@ -124,3 +124,42 @@ id = "019-table-multi-nowrap"
 path = "cases/019-table-multi-nowrap.md"
 title = "Multiple tables (no wrap)"
 table_wrap = false
+
+[[case]]
+id = "020-table-line-breaks-nowrap"
+path = "cases/020-table-line-breaks-nowrap.md"
+title = "Table line breaks (no wrap)"
+table_wrap = false
+
+[[case]]
+id = "021-table-single-column"
+path = "cases/021-table-single-column.md"
+title = "Table single column"
+
+[[case]]
+id = "022-table-unicode-nowrap"
+path = "cases/022-table-unicode-nowrap.md"
+title = "Table unicode normalization (no wrap)"
+table_wrap = false
+
+[[case]]
+id = "023-table-dark-legacy"
+path = "cases/023-table-dark-legacy.md"
+title = "Table dark theme legacy border"
+theme = "dark"
+table_wrap = false
+
+[[case]]
+id = "024-table-in-list"
+path = "cases/024-table-in-list.md"
+title = "Tables inside lists"
+
+[[case]]
+id = "025-table-in-blockquote"
+path = "cases/025-table-in-blockquote.md"
+title = "Tables inside blockquotes"
+
+[[case]]
+id = "026-table-first-column-align"
+path = "cases/026-table-first-column-align.md"
+title = "Table first column alignment"

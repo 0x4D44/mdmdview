@@ -98,6 +98,7 @@ impl Hash for ColumnPolicy {
 
 #[derive(Debug, Clone)]
 pub struct ColumnSpec {
+    pub index: usize,
     pub ident: String,
     pub policy: ColumnPolicy,
     pub tooltip: Option<String>,
@@ -105,10 +106,16 @@ pub struct ColumnSpec {
 }
 
 impl ColumnSpec {
-    pub fn new(ident: impl Into<String>, policy: ColumnPolicy, tooltip: Option<String>) -> Self {
+    pub fn new(
+        index: usize,
+        ident: impl Into<String>,
+        policy: ColumnPolicy,
+        tooltip: Option<String>,
+    ) -> Self {
         let ident = ident.into();
-        let policy_hash = calculate_policy_hash(&ident, &policy);
+        let policy_hash = calculate_policy_hash(index, &ident, &policy);
         Self {
+            index,
             ident,
             policy,
             tooltip,
@@ -122,7 +129,7 @@ impl ColumnSpec {
 
     pub fn set_policy(&mut self, policy: ColumnPolicy) {
         self.policy = policy;
-        self.policy_hash = calculate_policy_hash(&self.ident, &self.policy);
+        self.policy_hash = calculate_policy_hash(self.index, &self.ident, &self.policy);
     }
 
     pub fn apply_preferred_width(&mut self, width: f32) {
@@ -134,7 +141,7 @@ impl ColumnSpec {
         {
             let clamped = width.max(min);
             *preferred = clamped;
-            self.policy_hash = calculate_policy_hash(&self.ident, &self.policy);
+            self.policy_hash = calculate_policy_hash(self.index, &self.ident, &self.policy);
         }
     }
 }
@@ -183,10 +190,25 @@ impl<'a> TableColumnContext<'a> {
     }
 }
 
-fn calculate_policy_hash(ident: &str, policy: &ColumnPolicy) -> u64 {
+fn calculate_policy_hash(index: usize, ident: &str, policy: &ColumnPolicy) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    index.hash(&mut hasher);
     ident.hash(&mut hasher);
-    policy.hash(&mut hasher);
+    std::mem::discriminant(policy).hash(&mut hasher);
+    match policy {
+        ColumnPolicy::Auto => {}
+        ColumnPolicy::Fixed { width, clip } => {
+            width.to_bits().hash(&mut hasher);
+            clip.hash(&mut hasher);
+        }
+        ColumnPolicy::Remainder { clip } => {
+            clip.hash(&mut hasher);
+        }
+        ColumnPolicy::Resizable { min, clip, .. } => {
+            min.to_bits().hash(&mut hasher);
+            clip.hash(&mut hasher);
+        }
+    }
     hasher.finish()
 }
 
@@ -229,7 +251,7 @@ pub fn derive_column_specs(ctx: &TableColumnContext) -> Vec<ColumnSpec> {
             let policy =
                 classify_column(&label, idx, &mut remainder_assigned, stat, ctx.body_font_px);
             let tooltip = column_tooltip(&label, &policy);
-            ColumnSpec::new(label, policy, tooltip)
+            ColumnSpec::new(idx, label, policy, tooltip)
         })
         .collect();
 
@@ -240,6 +262,17 @@ pub fn derive_column_specs(ctx: &TableColumnContext) -> Vec<ColumnSpec> {
             if matches!(specs[idx].policy, ColumnPolicy::Fixed { .. }) {
                 candidate = None;
             }
+        }
+        let has_non_fixed_other = specs.iter().enumerate().any(|(idx, spec)| {
+            idx != 0 && !matches!(spec.policy, ColumnPolicy::Fixed { .. })
+        });
+        if has_non_fixed_other && (candidate.is_none() || candidate == Some(0)) {
+            candidate = scored_indices
+                .iter()
+                .filter(|(idx, _)| *idx != 0)
+                .filter(|(idx, _)| !matches!(specs[*idx].policy, ColumnPolicy::Fixed { .. }))
+                .max_by_key(|(_, score)| *score)
+                .map(|(idx, _)| *idx);
         }
         if candidate.is_none() {
             candidate = specs
@@ -625,6 +658,35 @@ mod tests {
     }
 
     #[test]
+    fn fallback_avoids_first_column_when_possible() {
+        let headers = vec![
+            vec![span("Center")],
+            vec![span("Left")],
+            vec![span("Right")],
+        ];
+        let rows = vec![vec![
+            vec![span("Centered label with enough words to raise score")],
+            vec![span("L1")],
+            vec![span("R1")],
+        ]];
+        let stats = compute_column_stats(&headers, &rows, 32);
+        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
+        let specs = derive_column_specs(&ctx);
+        assert!(
+            !matches!(specs[0].policy, ColumnPolicy::Remainder { .. }),
+            "policy = {:?}",
+            specs[0].policy
+        );
+        assert!(
+            specs[1..]
+                .iter()
+                .any(|spec| matches!(spec.policy, ColumnPolicy::Remainder { .. })),
+            "remainder policies: {:?}",
+            specs
+        );
+    }
+
+    #[test]
     fn examples_header_prefers_remainder() {
         let headers = vec![vec![span("Examples")], vec![span("Description")]];
         let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
@@ -733,8 +795,9 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_preferred_width_clamps_and_hash_changes() {
+    fn test_apply_preferred_width_clamps_and_hash_stable_for_resizable() {
         let mut spec = ColumnSpec::new(
+            0,
             "body",
             ColumnPolicy::Resizable {
                 min: 50.0,
@@ -751,9 +814,10 @@ mod tests {
             }
             other => panic!("unexpected policy: {:?}", other),
         }
-        assert_ne!(spec.policy_hash, original_hash);
+        assert_eq!(spec.policy_hash, original_hash);
 
         let mut fixed = ColumnSpec::new(
+            1,
             "fixed",
             ColumnPolicy::Fixed {
                 width: 40.0,
@@ -764,6 +828,18 @@ mod tests {
         let fixed_hash = fixed.policy_hash;
         fixed.apply_preferred_width(100.0);
         assert_eq!(fixed.policy_hash, fixed_hash);
+    }
+
+    #[test]
+    fn test_column_spec_hash_includes_index() {
+        let policy = ColumnPolicy::Resizable {
+            min: 40.0,
+            preferred: 120.0,
+            clip: false,
+        };
+        let first = ColumnSpec::new(0, "Header", policy.clone(), None);
+        let second = ColumnSpec::new(1, "Header", policy, None);
+        assert_ne!(first.policy_hash, second.policy_hash);
     }
 
     #[test]

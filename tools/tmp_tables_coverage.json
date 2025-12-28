@@ -1,0 +1,20 @@
+{
+  "version": "1.0.1",
+  "build_timestamp": "2025-12-27T14:03:33.7347362+00:00",
+  "output": "tools/tmp_tables_coverage.png",
+  "theme": "light",
+  "zoom": 1.000,
+  "table_wrap": true,
+  "content_only": false,
+  "scroll_ratio": null,
+  "scroll_offset": 0.000,
+  "viewport_px": {"width": 1280, "height": 720},
+  "content_px": {"width": 1280, "height": 720},
+  "pixels_per_point": 1.000,
+  "wait_ms": 2000,
+  "settle_frames": 3,
+  "stable_frames": 4,
+  "timed_out": false,
+  "font_source": null,
+  "elapsed_ms": 772
+}
