@@ -3821,25 +3821,6 @@ impl MarkdownRenderer {
                 None,
             ));
         }
-        // Ensure the final column owns the remainder width when any remainder columns exist.
-        // This prevents remainder sizing from collapsing trailing columns in table layouts.
-        let last_idx = column_specs.len().saturating_sub(1);
-        if column_specs
-            .iter()
-            .any(|spec| matches!(spec.policy, ColumnPolicy::Remainder { .. }))
-            && !matches!(column_specs[last_idx].policy, ColumnPolicy::Remainder { .. })
-        {
-            let swap_idx = column_specs
-                .iter()
-                .position(|spec| matches!(spec.policy, ColumnPolicy::Remainder { .. }));
-            if let Some(idx) = swap_idx {
-                if !matches!(column_specs[last_idx].policy, ColumnPolicy::Fixed { .. }) {
-                    let last_policy = column_specs[last_idx].policy.clone();
-                    column_specs[last_idx].set_policy(ColumnPolicy::Remainder { clip: false });
-                    column_specs[idx].set_policy(last_policy);
-                }
-            }
-        }
         self.apply_persisted_widths(table_id, &mut column_specs);
         let column_aligns: Vec<Align> = (0..column_specs.len())
             .map(|ci| Self::alignment_for_column(alignments, ci))

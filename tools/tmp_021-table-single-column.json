@@ -1,7 +1,7 @@
 {
   "version": "1.0.1",
   "build_timestamp": "2025-12-27T14:03:33.7347362+00:00",
-  "output": "tools\\tmp_table_alignments.png",
+  "output": "tools\\tmp_021-table-single-column.png",
   "theme": "light",
   "zoom": 1.000,
   "table_wrap": true,
@@ -16,5 +16,5 @@
   "stable_frames": 4,
   "timed_out": false,
   "font_source": null,
-  "elapsed_ms": 842
+  "elapsed_ms": 761
 }
