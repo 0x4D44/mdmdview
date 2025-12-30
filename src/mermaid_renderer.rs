@@ -5,6 +5,7 @@ use std::cell::RefCell;
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::mpsc::Receiver as StdReceiver;
+#[cfg(feature = "mermaid-kroki")]
 use std::time::Duration;
 
 #[cfg(feature = "mermaid-quickjs")]
@@ -106,6 +107,7 @@ where
     }
 }
 
+#[cfg_attr(not(feature = "mermaid-kroki"), allow(dead_code))]
 struct KrokiRequest {
     key: u64,
     url: String,
@@ -214,26 +216,32 @@ impl MermaidRenderer {
         let (tx, rx) = std::sync::mpsc::channel();
         let (job_tx, job_rx): (KrokiJobSender, KrokiJobReceiver) =
             bounded(Self::MAX_KROKI_JOBS * 4);
-        for worker_idx in 0..Self::MAX_KROKI_JOBS {
-            let worker_rx = job_rx.clone();
-            let result_tx = tx.clone();
-            if let Err(err) = std::thread::Builder::new()
-                .name(format!("mdmdview-kroki-{worker_idx}"))
-                .spawn(move || {
-                    let agent = ureq::AgentBuilder::new()
-                        .timeout_connect(Duration::from_secs(5))
-                        .timeout_read(Duration::from_secs(10))
-                        .timeout_write(Duration::from_secs(10))
-                        .build();
-                    for job in worker_rx.iter() {
-                        let result = Self::perform_kroki_with_agent(&agent, &job.url, &job.payload);
-                        let _ = result_tx.send((job.key, result));
-                    }
-                })
-            {
-                eprintln!("Failed to start Kroki worker thread: {}", err);
+        #[cfg(feature = "mermaid-kroki")]
+        {
+            for worker_idx in 0..Self::MAX_KROKI_JOBS {
+                let worker_rx = job_rx.clone();
+                let result_tx = tx.clone();
+                if let Err(err) = std::thread::Builder::new()
+                    .name(format!("mdmdview-kroki-{worker_idx}"))
+                    .spawn(move || {
+                        let agent = ureq::AgentBuilder::new()
+                            .timeout_connect(Duration::from_secs(5))
+                            .timeout_read(Duration::from_secs(10))
+                            .timeout_write(Duration::from_secs(10))
+                            .build();
+                        for job in worker_rx.iter() {
+                            let result =
+                                Self::perform_kroki_with_agent(&agent, &job.url, &job.payload);
+                            let _ = result_tx.send((job.key, result));
+                        }
+                    })
+                {
+                    eprintln!("Failed to start Kroki worker thread: {}", err);
+                }
             }
         }
+        #[cfg(not(feature = "mermaid-kroki"))]
+        let _ = &tx;
         drop(job_rx);
         #[cfg(feature = "mermaid-quickjs")]
         let (mermaid_job_tx, mermaid_job_rx): (MermaidJobSender, MermaidJobReceiver) =
@@ -269,26 +277,32 @@ impl MermaidRenderer {
         }
     }
 
-    fn mermaid_renderer_preference() -> MermaidRenderPreference {
+    fn mermaid_renderer_preference() -> (MermaidRenderPreference, bool) {
+        let has_embedded = cfg!(feature = "mermaid-quickjs");
+        let has_kroki = cfg!(feature = "mermaid-kroki");
         if let Ok(raw) = std::env::var("MDMDVIEW_MERMAID_RENDERER") {
             let normalized = raw.trim().to_ascii_lowercase();
             return match normalized.as_str() {
-                "off" => MermaidRenderPreference::Off,
-                "kroki" => MermaidRenderPreference::Kroki,
-                "embedded" => MermaidRenderPreference::Embedded,
+                "off" => (MermaidRenderPreference::Off, true),
+                "kroki" => (MermaidRenderPreference::Kroki, true),
+                "embedded" => (MermaidRenderPreference::Embedded, true),
                 _ => {
-                    if cfg!(feature = "mermaid-quickjs") {
-                        MermaidRenderPreference::Embedded
+                    if has_embedded {
+                        (MermaidRenderPreference::Embedded, false)
+                    } else if has_kroki {
+                        (MermaidRenderPreference::Kroki, false)
                     } else {
-                        MermaidRenderPreference::Kroki
+                        (MermaidRenderPreference::Off, false)
                     }
                 }
             };
         }
-        if cfg!(feature = "mermaid-quickjs") {
-            MermaidRenderPreference::Embedded
+        if has_embedded {
+            (MermaidRenderPreference::Embedded, false)
+        } else if has_kroki {
+            (MermaidRenderPreference::Kroki, false)
         } else {
-            MermaidRenderPreference::Kroki
+            (MermaidRenderPreference::Off, false)
         }
     }
 
@@ -313,7 +327,7 @@ impl MermaidRenderer {
         code_font_size: f32,
     ) -> bool {
         self.poll_kroki_results();
-        let preference = Self::mermaid_renderer_preference();
+        let (preference, explicit) = Self::mermaid_renderer_preference();
 
         if preference == MermaidRenderPreference::Off {
             egui::Frame::none()
@@ -333,12 +347,35 @@ impl MermaidRenderer {
             return false;
         }
 
+        if explicit
+            && preference == MermaidRenderPreference::Embedded
+            && !cfg!(feature = "mermaid-quickjs")
+        {
+            egui::Frame::none()
+                .fill(Color32::from_rgb(25, 25, 25))
+                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(
+                            "Mermaid rendering via embedded JS is unavailable (feature not enabled).",
+                        )
+                        .color(Color32::from_rgb(200, 160, 80))
+                        .family(egui::FontFamily::Monospace)
+                        .size(code_font_size),
+                    );
+                });
+            return false;
+        }
+
         #[cfg(feature = "mermaid-quickjs")]
         {
+            let allow_kroki_fallback = matches!(preference, MermaidRenderPreference::Kroki)
+                || (!explicit && matches!(preference, MermaidRenderPreference::Embedded));
             if preference == MermaidRenderPreference::Embedded
                 && mermaid_embed::MERMAID_JS.is_empty()
             {
-                if !Self::kroki_enabled() {
+                if !allow_kroki_fallback || !Self::kroki_enabled() {
                     egui::Frame::none()
                         .fill(Color32::from_rgb(25, 25, 25))
                         .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
@@ -382,7 +419,7 @@ impl MermaidRenderer {
                 let svg_error = self.mermaid_errors.borrow_mut().get(&svg_key);
                 let texture_error = self.mermaid_texture_errors.borrow_mut().get(&texture_key);
                 if let Some(err) = svg_error.or(texture_error) {
-                    if !Self::kroki_enabled() {
+                    if !allow_kroki_fallback || !Self::kroki_enabled() {
                         egui::Frame::none()
                             .fill(Color32::from_rgb(25, 25, 25))
                             .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
@@ -441,7 +478,7 @@ impl MermaidRenderer {
                                 self.mermaid_errors
                                     .borrow_mut()
                                     .insert(svg_key, "Mermaid worker pool unavailable".to_string());
-                                if !Self::kroki_enabled() {
+                                if !allow_kroki_fallback || !Self::kroki_enabled() {
                                     egui::Frame::none()
                                         .fill(Color32::from_rgb(25, 25, 25))
                                         .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
@@ -493,6 +530,24 @@ impl MermaidRenderer {
         }
 
         let key = Self::hash_str(code);
+
+        if !cfg!(feature = "mermaid-kroki") {
+            egui::Frame::none()
+                .fill(Color32::from_rgb(25, 25, 25))
+                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(
+                            "Mermaid rendering via Kroki is unavailable (feature not enabled).",
+                        )
+                        .color(Color32::from_rgb(200, 160, 80))
+                        .family(egui::FontFamily::Monospace)
+                        .size(code_font_size),
+                    );
+                });
+            return false;
+        }
 
         if !Self::kroki_enabled() {
             egui::Frame::none()
@@ -826,6 +881,7 @@ impl MermaidRenderer {
         }
     }
 
+    #[cfg(feature = "mermaid-kroki")]
     fn kroki_enabled() -> bool {
         match std::env::var("MDMDVIEW_ENABLE_KROKI") {
             Ok(value) => {
@@ -834,6 +890,11 @@ impl MermaidRenderer {
             }
             Err(_) => false,
         }
+    }
+
+    #[cfg(not(feature = "mermaid-kroki"))]
+    fn kroki_enabled() -> bool {
+        false
     }
 
     #[cfg(test)]
@@ -845,7 +906,7 @@ impl MermaidRenderer {
         std::env::var("MDMDVIEW_KROKI_URL").unwrap_or_else(|_| "https://kroki.io".to_string())
     }
 
-    #[cfg(not(test))]
+    #[cfg(all(feature = "mermaid-kroki", not(test)))]
     fn perform_kroki_with_agent(
         agent: &ureq::Agent,
         url: &str,
@@ -872,7 +933,7 @@ impl MermaidRenderer {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(feature = "mermaid-kroki", test))]
     fn perform_kroki_with_agent(
         _agent: &ureq::Agent,
         _url: &str,
@@ -1157,6 +1218,49 @@ impl MermaidWorker {
     const MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
     const STACK_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
+    fn format_js_error(ctx: &rquickjs::Ctx<'_>, err: rquickjs::Error) -> String {
+        if let rquickjs::Error::Exception = err {
+            let value = ctx.catch();
+            if let Some(exception) = value.as_exception() {
+                let message = exception.message();
+                let stack = exception.stack();
+                if let Some(stack) = stack {
+                    if let Some(message) = message {
+                        if stack.contains(&message) {
+                            return stack;
+                        }
+                        if !stack.trim().is_empty() {
+                            return format!("{}\n{}", message, stack);
+                        }
+                        if !message.trim().is_empty() {
+                            return message;
+                        }
+                    } else if !stack.trim().is_empty() {
+                        return stack;
+                    }
+                } else if let Some(message) = message {
+                    if !message.trim().is_empty() {
+                        return message;
+                    }
+                }
+            }
+            if let Some(js_string) = value.as_string().and_then(|s| s.to_string().ok()) {
+                return js_string;
+            }
+            if let Some(number) = value.as_int() {
+                return number.to_string();
+            }
+            if let Some(number) = value.as_float() {
+                return number.to_string();
+            }
+            if let Some(flag) = value.as_bool() {
+                return flag.to_string();
+            }
+            return format!("{:?}", value);
+        }
+        err.to_string()
+    }
+
     fn new(worker_idx: usize, fontdb: Arc<usvg::fontdb::Database>) -> Result<Self, String> {
         use rquickjs::{Context, Runtime};
         if mermaid_embed::MERMAID_JS.is_empty() {
@@ -1178,15 +1282,20 @@ impl MermaidWorker {
         let engine = MermaidEngine { rt, ctx };
         let js = std::str::from_utf8(mermaid_embed::MERMAID_JS)
             .map_err(|_| "Mermaid JS is not valid UTF-8".to_string())?;
-        engine
-            .ctx
-            .with(|ctx| {
-                ctx.eval::<(), _>(MERMAID_DOM_SHIM)?;
-                ctx.eval::<(), _>(js)?;
-                ctx.eval::<(), _>(MERMAID_INIT_SNIPPET)?;
-                Ok::<(), rquickjs::Error>(())
-            })
-            .map_err(|e| format!("Mermaid init error: {}", e))?;
+        let init_result: Result<(), String> = engine.ctx.with(|ctx| {
+            let eval = |label: &str, source: &str| -> Result<(), String> {
+                ctx.eval::<(), _>(source).map_err(|err| {
+                    format!("{}: {}", label, MermaidWorker::format_js_error(&ctx, err))
+                })
+            };
+            eval("Mermaid DOM shim", MERMAID_DOM_SHIM)?;
+            eval("Mermaid JS", js)?;
+            eval("Mermaid init", MERMAID_INIT_SNIPPET)?;
+            Ok(())
+        });
+        if let Err(err) = init_result {
+            return Err(format!("Mermaid init error: {}", err));
+        }
         if worker_idx == 0 {
             eprintln!(
                 "Mermaid embedded bytes: {}",
@@ -1207,11 +1316,17 @@ impl MermaidWorker {
         self.deadline_ms.store(deadline, Ordering::Relaxed);
         let result = self.engine.ctx.with(|ctx| {
             let wrapper = MERMAID_RENDER_WRAPPER;
-            let func: Function = ctx.eval(wrapper)?;
+            let func: Function =
+                ctx.eval(wrapper)
+                    .map_err(|err| MermaidWorker::format_js_error(&ctx, err))?;
             let id = format!("m{:016x}", key);
             let site_config = MermaidRenderer::mermaid_site_config_json(key);
-            let maybe: MaybePromise = func.call((id.as_str(), code, site_config.as_str()))?;
-            maybe.finish::<String>()
+            let maybe: MaybePromise = func
+                .call((id.as_str(), code, site_config.as_str()))
+                .map_err(|err| MermaidWorker::format_js_error(&ctx, err))?;
+            maybe
+                .finish::<String>()
+                .map_err(|err| MermaidWorker::format_js_error(&ctx, err))
         });
         self.deadline_ms.store(0, Ordering::Relaxed);
         match result {
@@ -1280,10 +1395,12 @@ impl MermaidWorker {
         scale_bucket: u32,
         bg: Option<[u8; 4]>,
     ) -> Result<(Vec<u8>, u32, u32), String> {
-        let mut opt = usvg::Options::default();
-        opt.resources_dir = None;
-        opt.fontdb = Arc::clone(&self.fontdb);
-        opt.image_href_resolver = Self::image_href_resolver();
+        let opt = usvg::Options {
+            resources_dir: None,
+            fontdb: Arc::clone(&self.fontdb),
+            image_href_resolver: Self::image_href_resolver(),
+            ..Default::default()
+        };
 
         let tree = usvg::Tree::from_data(svg.as_bytes(), &opt).map_err(|e| format!("{}", e))?;
         let sz = tree.size().to_int_size();
@@ -1386,9 +1503,14 @@ function __mdmdview_bbox(el) {
   var m = __mdmdview_measure_text(text, size);
   return { x: 0, y: 0, width: m.width, height: m.height };
 }
-function __mdmdview_make_element(tag) {
-  return {
+function __mdmdview_make_element(tag, ownerDoc, ns) {
+  var doc = ownerDoc;
+  if (!doc && typeof document !== 'undefined' && document) { doc = document; }
+  var node = {
     tagName: tag,
+    namespaceURI: ns || null,
+    parentNode: null,
+    firstChild: null,
     style: {},
     children: [],
     attributes: {},
@@ -1400,26 +1522,142 @@ function __mdmdview_make_element(tag) {
         ? this.attributes[key]
         : null;
     },
-    appendChild: function(child) { this.children.push(child); return child; },
+    appendChild: function(child) {
+      this.children.push(child);
+      this.firstChild = this.children[0] || null;
+      if (child && typeof child === 'object') {
+        child.parentNode = this;
+        if (!child.ownerDocument && this.ownerDocument) { child.ownerDocument = this.ownerDocument; }
+      }
+      return child;
+    },
+    insertBefore: function(child, before) {
+      var idx = this.children.indexOf(before);
+      if (idx < 0) { this.children.push(child); }
+      else { this.children.splice(idx, 0, child); }
+      this.firstChild = this.children[0] || null;
+      if (child && typeof child === 'object') {
+        child.parentNode = this;
+        if (!child.ownerDocument && this.ownerDocument) { child.ownerDocument = this.ownerDocument; }
+      }
+      return child;
+    },
+    remove: function() { return null; },
     querySelector: function() { return null; },
     getBBox: function() { return __mdmdview_bbox(this); },
     getBoundingClientRect: function() { return __mdmdview_bbox(this); },
     getComputedTextLength: function() { return __mdmdview_bbox(this).width; }
   };
+  Object.defineProperty(node, 'ownerDocument', {
+    get: function() {
+      if (doc) { return doc; }
+      if (typeof document !== 'undefined') { return document || null; }
+      return null;
+    },
+    set: function(value) { doc = value; },
+    configurable: true
+  });
+  return node;
+}
+function __mdmdview_find_by_id(node, id) {
+  if (!node || !id) { return null; }
+  if (node.attributes && node.attributes.id === id) { return node; }
+  if (!node.children) { return null; }
+  for (var i = 0; i < node.children.length; i++) {
+    var hit = __mdmdview_find_by_id(node.children[i], id);
+    if (hit) { return hit; }
+  }
+  return null;
 }
 var document = {
   body: __mdmdview_make_element('body'),
-  createElement: function(tag) { return __mdmdview_make_element(tag); },
-  createElementNS: function(ns, tag) { return __mdmdview_make_element(tag); },
-  getElementById: function() { return null; },
-  querySelector: function() { return null; }
+  createElement: function(tag) { return __mdmdview_make_element(tag, document); },
+  createElementNS: function(ns, tag) { return __mdmdview_make_element(tag, document, ns); },
+  createTextNode: function(text) {
+    var node = __mdmdview_make_element('#text', document);
+    node.textContent = text || '';
+    return node;
+  },
+  getElementById: function(id) { return __mdmdview_find_by_id(document.body, id); },
+  querySelector: function(sel) {
+    if (sel === 'body') { return document.body; }
+    if (sel && sel[0] === '#') { return document.getElementById(sel.slice(1)); }
+    return null;
+  },
+  querySelectorAll: function(sel) {
+    var hit = document.querySelector(sel);
+    return hit ? [hit] : [];
+  },
+  addEventListener: function() {}
 };
 window.document = document;
+document.body.ownerDocument = document;
+document.body.parentNode = document;
+document.defaultView = window;
+document.ownerDocument = document;
+document.documentElement = document.body;
+document.body.namespaceURI = 'http://www.w3.org/1999/xhtml';
+document.documentElement.namespaceURI = 'http://www.w3.org/1999/xhtml';
+document.namespaceURI = document.body.namespaceURI;
+window.ownerDocument = document;
+window.namespaceURI = document.body.namespaceURI;
+if (!Object.prototype.hasOwnProperty('ownerDocument')) {
+  Object.defineProperty(Object.prototype, 'ownerDocument', {
+    get: function() { return document || null; },
+    set: function(value) {
+      Object.defineProperty(this, 'ownerDocument', { value: value, writable: true, configurable: true });
+    },
+    configurable: true
+  });
+}
+if (!Object.prototype.hasOwnProperty('querySelector')) {
+  Object.defineProperty(Object.prototype, 'querySelector', {
+    value: function() { return null; },
+    writable: true,
+    configurable: true
+  });
+}
+if (!Object.prototype.hasOwnProperty('querySelectorAll')) {
+  Object.defineProperty(Object.prototype, 'querySelectorAll', {
+    value: function() { return []; },
+    writable: true,
+    configurable: true
+  });
+}
+if (!Object.prototype.hasOwnProperty('matches')) {
+  Object.defineProperty(Object.prototype, 'matches', {
+    value: function() { return false; },
+    writable: true,
+    configurable: true
+  });
+}
 window.getComputedStyle = function(el) { return (el && el.style) ? el.style : {}; };
 window.setTimeout = function(fn, ms) { fn(); return 1; };
 window.clearTimeout = function(id) {};
 window.requestAnimationFrame = function(fn) { fn(0); return 1; };
+window.addEventListener = function() {};
+window.removeEventListener = function() {};
+window.structuredClone = function(value) {
+  if (value === null || value === undefined) { return value; }
+  if (typeof value !== 'object') { return value; }
+  try { return JSON.parse(JSON.stringify(value)); } catch (e) {}
+  if (Array.isArray(value)) { return value.slice(); }
+  var out = {};
+  for (var key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) { continue; }
+    out[key] = value[key];
+  }
+  return out;
+};
 window.performance = { now: function(){ return 0; } };
+window.console = {
+  log: function(){},
+  warn: function(){},
+  error: function(){},
+  info: function(){},
+  debug: function(){},
+  trace: function(){}
+};
 window.fetch = function(){ throw new Error('fetch disabled'); };
 window.XMLHttpRequest = function(){ throw new Error('XMLHttpRequest disabled'); };
 window.DOMPurify = { sanitize: function(html){ return html; } };
@@ -1429,18 +1667,18 @@ window.DOMPurify = { sanitize: function(html){ return html; } };
 const MERMAID_INIT_SNIPPET: &str = r##"
 if (window.mermaid && mermaid.mermaidAPI) {
   mermaid.mermaidAPI.initialize({startOnLoad: false});
-  function __mdmdview_is_plain_object(value) {
+  window.__mdmdview_is_plain_object = function(value) {
     return value && typeof value === 'object' && !Array.isArray(value);
-  }
-  function __mdmdview_merge_config(baseConfig, overrideConfig) {
+  };
+  window.__mdmdview_merge_config = function(baseConfig, overrideConfig) {
     var out = {};
     function assign(target, source) {
-      if (!__mdmdview_is_plain_object(source)) { return; }
+      if (!window.__mdmdview_is_plain_object(source)) { return; }
       for (var key in source) {
         if (!Object.prototype.hasOwnProperty.call(source, key)) { continue; }
         var value = source[key];
-        if (__mdmdview_is_plain_object(value)) {
-          if (!__mdmdview_is_plain_object(target[key])) { target[key] = {}; }
+        if (window.__mdmdview_is_plain_object(value)) {
+          if (!window.__mdmdview_is_plain_object(target[key])) { target[key] = {}; }
           assign(target[key], value);
         } else if (Array.isArray(value)) {
           target[key] = value.slice();
@@ -1452,9 +1690,9 @@ if (window.mermaid && mermaid.mermaidAPI) {
     assign(out, baseConfig);
     assign(out, overrideConfig);
     return out;
-  }
-  function __mdmdview_sanitize_config(cfg) {
-    if (!__mdmdview_is_plain_object(cfg)) { return null; }
+  };
+  window.__mdmdview_sanitize_config = function(cfg) {
+    if (!window.__mdmdview_is_plain_object(cfg)) { return null; }
     var disallowed = {
       securityLevel: true,
       startOnLoad: true,
@@ -1474,8 +1712,8 @@ if (window.mermaid && mermaid.mermaidAPI) {
       }
       if (disallowed[key]) { continue; }
       var value = cfg[key];
-      if (__mdmdview_is_plain_object(value)) {
-        var nested = __mdmdview_sanitize_config(value);
+      if (window.__mdmdview_is_plain_object(value)) {
+        var nested = window.__mdmdview_sanitize_config(value);
         if (nested && Object.keys(nested).length) { out[key] = nested; }
       } else if (Array.isArray(value)) {
         out[key] = value.slice();
@@ -1483,7 +1721,7 @@ if (window.mermaid && mermaid.mermaidAPI) {
         out[key] = value;
       }
     }
-    if (out.themeVariables && __mdmdview_is_plain_object(out.themeVariables)) {
+    if (out.themeVariables && window.__mdmdview_is_plain_object(out.themeVariables)) {
       for (var tvKey in out.themeVariables) {
         if (!Object.prototype.hasOwnProperty.call(out.themeVariables, tvKey)) { continue; }
         var tvVal = out.themeVariables[tvKey];
@@ -1495,8 +1733,8 @@ if (window.mermaid && mermaid.mermaidAPI) {
       }
     }
     return out;
-  }
-  function __mdmdview_extract_init(code) {
+  };
+  window.__mdmdview_extract_init = function(code) {
     if (typeof code !== 'string') { return { code: code, config: null }; }
     var initRe = /%%\{\s*init\s*:\s*([\s\S]*?)\s*\}%%/g;
     var found = null;
@@ -1507,7 +1745,7 @@ if (window.mermaid && mermaid.mermaidAPI) {
       return '';
     });
     return { code: cleaned, config: found };
-  }
+  };
 } else {
   throw new Error('Mermaid not available');
 }
@@ -1520,9 +1758,9 @@ const MERMAID_RENDER_WRAPPER: &str = r#"
   if (typeof siteConfigJson === 'string' && siteConfigJson.length > 0) {
     try { siteConfig = JSON.parse(siteConfigJson); } catch (e) { siteConfig = {}; }
   }
-  var extracted = __mdmdview_extract_init(code);
-  var directiveConfig = __mdmdview_sanitize_config(extracted.config) || {};
-  var merged = __mdmdview_merge_config(directiveConfig, siteConfig);
+  var extracted = window.__mdmdview_extract_init(code);
+  var directiveConfig = window.__mdmdview_sanitize_config(extracted.config) || {};
+  var merged = window.__mdmdview_merge_config(directiveConfig, siteConfig);
   if (merged && merged.securityLevel === 'strict') {
     merged.htmlLabels = false;
     if (!merged.flowchart) { merged.flowchart = {}; }
@@ -1548,8 +1786,11 @@ const MERMAID_RENDER_WRAPPER: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "mermaid-kroki")]
     use image::codecs::png::PngEncoder;
+    #[cfg(feature = "mermaid-kroki")]
     use image::ColorType;
+    #[cfg(feature = "mermaid-kroki")]
     use image::ImageEncoder;
     use std::sync::{Mutex, OnceLock};
 
@@ -1561,6 +1802,7 @@ mod tests {
             .expect("env lock")
     }
 
+    #[cfg(feature = "mermaid-kroki")]
     fn with_test_ui<F>(f: F)
     where
         F: FnOnce(&egui::Context, &mut egui::Ui),
@@ -1580,6 +1822,7 @@ mod tests {
         let _ = ctx.end_frame();
     }
 
+    #[cfg(feature = "mermaid-kroki")]
     fn tiny_png_bytes() -> Vec<u8> {
         let width = 2u32;
         let height = 2u32;
@@ -1635,33 +1878,33 @@ mod tests {
     fn test_mermaid_renderer_preference_env() {
         let _lock = env_lock();
         std::env::remove_var("MDMDVIEW_MERMAID_RENDERER");
-        let default_pref = MermaidRenderer::mermaid_renderer_preference();
+        let (default_pref, explicit) = MermaidRenderer::mermaid_renderer_preference();
+        assert!(!explicit);
         if cfg!(feature = "mermaid-quickjs") {
             assert_eq!(default_pref, MermaidRenderPreference::Embedded);
-        } else {
+        } else if cfg!(feature = "mermaid-kroki") {
             assert_eq!(default_pref, MermaidRenderPreference::Kroki);
+        } else {
+            assert_eq!(default_pref, MermaidRenderPreference::Off);
         }
 
         {
             let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "kroki");
-            assert_eq!(
-                MermaidRenderer::mermaid_renderer_preference(),
-                MermaidRenderPreference::Kroki
-            );
+            let (pref, explicit) = MermaidRenderer::mermaid_renderer_preference();
+            assert!(explicit);
+            assert_eq!(pref, MermaidRenderPreference::Kroki);
         }
         {
             let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "embedded");
-            assert_eq!(
-                MermaidRenderer::mermaid_renderer_preference(),
-                MermaidRenderPreference::Embedded
-            );
+            let (pref, explicit) = MermaidRenderer::mermaid_renderer_preference();
+            assert!(explicit);
+            assert_eq!(pref, MermaidRenderPreference::Embedded);
         }
         {
             let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "off");
-            assert_eq!(
-                MermaidRenderer::mermaid_renderer_preference(),
-                MermaidRenderPreference::Off
-            );
+            let (pref, explicit) = MermaidRenderer::mermaid_renderer_preference();
+            assert!(explicit);
+            assert_eq!(pref, MermaidRenderPreference::Off);
         }
     }
 
@@ -1685,6 +1928,51 @@ mod tests {
 
         assert!(resolve_string("http://example.com/img.png", &options).is_none());
         assert!(resolve_string("file:///tmp/foo.png", &options).is_none());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_embed_bytes_present() {
+        assert!(!super::mermaid_embed::MERMAID_JS.is_empty());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_quickjs_render_smoke() {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        let fontdb = std::sync::Arc::new(fontdb);
+        let mut worker = MermaidWorker::new(0, fontdb).expect("worker init");
+
+        let flow = "graph TD; A-->B;";
+        let seq = "sequenceDiagram\nAlice->>Bob: Hello\nBob-->>Alice: Hi";
+        let class = "classDiagram\nClass01 <|-- Class02\nClass01 : +int id\nClass02 : +String name";
+
+        let flow_svg = worker
+            .render_svg(MermaidRenderer::hash_str(flow), flow)
+            .expect("flowchart render");
+        let seq_svg = worker
+            .render_svg(MermaidRenderer::hash_str(seq), seq)
+            .expect("sequence render");
+        let class_svg = worker
+            .render_svg(MermaidRenderer::hash_str(class), class)
+            .expect("class render");
+
+        assert!(flow_svg.contains("<svg"));
+        assert!(seq_svg.contains("<svg"));
+        assert!(class_svg.contains("<svg"));
+
+        let width_bucket = MermaidRenderer::width_bucket(600.0);
+        let scale_bucket = MermaidRenderer::scale_bucket(1.0);
+        let (rgba, w, h) = worker
+            .rasterize_svg(&flow_svg, width_bucket, scale_bucket, None)
+            .expect("rasterize svg");
+        assert!(!rgba.is_empty());
+        assert_eq!(rgba.len(), (w as usize) * (h as usize) * 4);
+        assert!(w > 0);
+        assert!(h > 0);
+        assert!(w <= MermaidRenderer::MERMAID_MAX_RENDER_SIDE);
+        assert!(h <= MermaidRenderer::MERMAID_MAX_RENDER_SIDE);
     }
 
     struct EnvGuard {
@@ -1716,7 +2004,11 @@ mod tests {
         std::env::remove_var("MDMDVIEW_ENABLE_KROKI");
         assert!(!MermaidRenderer::kroki_enabled_for_tests());
         let _guard = EnvGuard::set("MDMDVIEW_ENABLE_KROKI", "1");
-        assert!(MermaidRenderer::kroki_enabled_for_tests());
+        if cfg!(feature = "mermaid-kroki") {
+            assert!(MermaidRenderer::kroki_enabled_for_tests());
+        } else {
+            assert!(!MermaidRenderer::kroki_enabled_for_tests());
+        }
         let _guard = EnvGuard::set("MDMDVIEW_ENABLE_KROKI", "false");
         assert!(!MermaidRenderer::kroki_enabled_for_tests());
     }
@@ -1791,9 +2083,11 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "mermaid-kroki")]
     #[test]
     fn test_render_mermaid_block_cache_and_queue_paths() {
         let _lock = env_lock();
+        let _pref = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "kroki");
         let _guard = EnvGuard::set("MDMDVIEW_ENABLE_KROKI", "1");
         let renderer = MermaidRenderer::new();
         let code = "graph TD; A-->B;";
@@ -1814,10 +2108,12 @@ mod tests {
         });
     }
 
+    #[cfg(feature = "mermaid-kroki")]
     #[test]
     fn test_render_mermaid_block_disabled() {
         let _lock = env_lock();
         let renderer = MermaidRenderer::new();
+        let _pref = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "kroki");
         let _guard = EnvGuard::set("MDMDVIEW_ENABLE_KROKI", "0");
         with_test_ui(|_, ui| {
             assert!(!renderer.render_block(ui, "graph TD; A-->B;", 1.0, 12.0));

@@ -1,0 +1,19 @@
+{
+  "version": "1.0.1",
+  "build_timestamp": "2025-12-27T14:01:25.1716045+00:00",
+  "output": "C:\\language\\mdmdview\\tests\\regression\\actual\\021-table-single-column\\top\\actual.png",
+  "theme": "light",
+  "zoom": 1.000,
+  "content_only": false,
+  "scroll_ratio": 0.000,
+  "scroll_offset": 0.000,
+  "viewport_px": {"width": 1280, "height": 720},
+  "content_px": {"width": 1280, "height": 720},
+  "pixels_per_point": 1.000,
+  "wait_ms": 2000,
+  "settle_frames": 3,
+  "stable_frames": 4,
+  "timed_out": false,
+  "font_source": null,
+  "elapsed_ms": 358
+}

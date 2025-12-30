@@ -914,9 +914,7 @@ impl MarkdownRenderer {
                     delimiter_len = run_len;
                     pending_pipes.clear();
                 }
-                for _ in 0..run_len {
-                    out.push('`');
-                }
+                out.extend(std::iter::repeat_n('`', run_len));
                 continue;
             }
 
@@ -1277,10 +1275,8 @@ impl MarkdownRenderer {
                 continue;
             }
 
-            if ch == '|' {
-                if !in_code && !escaped {
-                    return true;
-                }
+            if ch == '|' && !in_code && !escaped {
+                return true;
             }
         }
 
@@ -2909,6 +2905,7 @@ impl MarkdownRenderer {
         handle
     }
 
+    #[cfg(test)]
     // Rough width measurement for inline spans without wrapping
     fn measure_inline_spans(&self, ui: &egui::Ui, spans: &[InlineSpan]) -> f32 {
         let mut max_line_width = 0.0f32;
@@ -2994,6 +2991,7 @@ impl MarkdownRenderer {
         max_line_width.max(current_line_width)
     }
 
+    #[cfg(test)]
     fn is_known_emoji(c: char) -> bool {
         matches!(
             c,
@@ -3207,7 +3205,7 @@ impl MarkdownRenderer {
     ) {
         // Split into lines on embedded '\n'
         let mut lines: Vec<Vec<InlineSpan>> = vec![Vec::new()];
-        for s in spans.to_vec() {
+        for s in spans.iter().cloned() {
             match s {
                 InlineSpan::Text(t) if t.contains('\n') => {
                     let parts: Vec<&str> = t.split('\n').collect();
@@ -3699,6 +3697,14 @@ impl MarkdownRenderer {
         let available_width = ui.available_width().max(1.0);
         let min_floor = self.table_min_column_width();
         let resolved_widths = self.resolve_table_column_widths(table_id, &column_specs, min_floor);
+        let min_widths: Vec<f32> = column_specs
+            .iter()
+            .map(|spec| match spec.policy {
+                ColumnPolicy::Fixed { width, .. } => width,
+                ColumnPolicy::Resizable { min, .. } => min,
+                ColumnPolicy::Remainder { .. } | ColumnPolicy::Auto => min_floor,
+            })
+            .collect();
         let spacing_total = column_spacing * column_specs.len().saturating_sub(1) as f32;
         let available_for_columns = available_width - spacing_total;
         let mut fixed_total = 0.0;
@@ -3715,21 +3721,38 @@ impl MarkdownRenderer {
                 ColumnPolicy::Auto => flexible_indices.push(idx),
             }
         }
+        let min_flex_total: f32 = flexible_indices
+            .iter()
+            .map(|idx| min_widths[*idx])
+            .sum();
         let desired_total_width = resolved_widths.iter().sum::<f32>() + spacing_total;
         let content_width = desired_total_width.max(available_width);
-        let use_hscroll = available_for_columns <= 0.0 || fixed_total > available_for_columns + 0.5;
+        let remaining_for_flex = available_for_columns - fixed_total;
+        let use_hscroll = available_for_columns <= 0.0
+            || fixed_total > available_for_columns + 0.5
+            || remaining_for_flex < min_flex_total - 0.5;
         let mut adjusted_widths = resolved_widths.clone();
         let mut scaled_down = false;
         if !use_hscroll {
-            let remaining = (available_for_columns - fixed_total).max(0.0);
+            let remaining = remaining_for_flex.max(0.0);
             let flex_total: f32 = flexible_indices
                 .iter()
                 .map(|idx| resolved_widths[*idx])
                 .sum();
             if flex_total > remaining + 0.5 && flex_total > 0.0 {
-                let scale = (remaining / flex_total).max(0.0);
-                for idx in &flexible_indices {
-                    adjusted_widths[*idx] = (resolved_widths[*idx] * scale).max(1.0);
+                if remaining <= min_flex_total + 0.5 {
+                    for idx in &flexible_indices {
+                        adjusted_widths[*idx] = min_widths[*idx].max(1.0);
+                    }
+                } else if flex_total > min_flex_total {
+                    let extra_total = flex_total - min_flex_total;
+                    let extra_scale = ((remaining - min_flex_total) / extra_total).clamp(0.0, 1.0);
+                    for idx in &flexible_indices {
+                        let min_width = min_widths[*idx];
+                        let desired = resolved_widths[*idx];
+                        let extra = (desired - min_width).max(0.0);
+                        adjusted_widths[*idx] = (min_width + extra * extra_scale).max(1.0);
+                    }
                 }
                 scaled_down = true;
             }
@@ -3796,7 +3819,7 @@ impl MarkdownRenderer {
                         let metrics = self.table_metrics.borrow();
                         metrics
                             .entry(table_id)
-                            .map_or(true, |entry| entry.rows.is_empty())
+                            .is_none_or(|entry| entry.rows.is_empty())
                     };
                     self.begin_table_pass(table_id, rows.len());
 
@@ -4173,6 +4196,7 @@ impl MarkdownRenderer {
         widths
     }
 
+    #[cfg(test)]
     fn estimate_table_total_width(
         &self,
         table_id: u64,
@@ -4395,6 +4419,7 @@ impl MarkdownRenderer {
     ///   which would cause dividers to be misaligned.
     /// * `header_height` - The height of the header row. A horizontal separator is
     ///   drawn at this y-offset to visually separate header from body rows.
+    #[allow(clippy::too_many_arguments)]
     fn paint_table_dividers(
         &self,
         painter: &Painter,
@@ -4613,6 +4638,7 @@ impl MarkdownRenderer {
         );
     }
 
+    #[cfg(test)]
     fn resolve_table_widths(available: f32, mins: &[f32], desired: &[f32]) -> Vec<f32> {
         debug_assert_eq!(mins.len(), desired.len());
         if mins.is_empty() {
