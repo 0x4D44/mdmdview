@@ -6,7 +6,6 @@ viewport_height = 720
 dpr = 1.0
 theme = "light"
 zoom = 1.0
-table_wrap = true
 compare_mode = "mdmdview"
 reference = "markdown-it"
 wait_ms = 2000
@@ -106,7 +105,6 @@ title = "Table inline elements"
 id = "016-table-wide"
 path = "cases/016-table-wide.md"
 title = "Wide tables"
-table_wrap = false
 
 [[case]]
 id = "017-table-line-breaks"
@@ -116,20 +114,17 @@ title = "Table line breaks"
 [[case]]
 id = "018-table-missing-nowrap"
 path = "cases/018-table-missing-nowrap.md"
-title = "Table missing cells (no wrap)"
-table_wrap = false
+title = "Table missing cells"
 
 [[case]]
 id = "019-table-multi-nowrap"
 path = "cases/019-table-multi-nowrap.md"
-title = "Multiple tables (no wrap)"
-table_wrap = false
+title = "Multiple tables"
 
 [[case]]
 id = "020-table-line-breaks-nowrap"
 path = "cases/020-table-line-breaks-nowrap.md"
-title = "Table line breaks (no wrap)"
-table_wrap = false
+title = "Table line breaks (variant)"
 
 [[case]]
 id = "021-table-single-column"
@@ -139,15 +134,13 @@ title = "Table single column"
 [[case]]
 id = "022-table-unicode-nowrap"
 path = "cases/022-table-unicode-nowrap.md"
-title = "Table unicode normalization (no wrap)"
-table_wrap = false
+title = "Table unicode normalization"
 
 [[case]]
 id = "023-table-dark-legacy"
 path = "cases/023-table-dark-legacy.md"
-title = "Table dark theme legacy border"
+title = "Table dark theme borders"
 theme = "dark"
-table_wrap = false
 
 [[case]]
 id = "024-table-in-list"

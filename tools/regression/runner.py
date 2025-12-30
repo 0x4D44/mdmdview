@@ -31,7 +31,6 @@ class CaseConfig:
     dpr: float
     theme: str
     zoom: float
-    table_wrap: bool
     content_only: bool
     wait_ms: int
     settle_frames: int
@@ -105,7 +104,6 @@ def resolve_case(defaults: Dict[str, Any], case: Dict[str, Any], manifest_dir: P
         dpr=float(viewport.get("dpr", defaults.get("dpr", 1.0))),
         theme=case.get("theme", defaults.get("theme", "light")),
         zoom=float(case.get("zoom", defaults.get("zoom", 1.0))),
-        table_wrap=bool(case.get("table_wrap", defaults.get("table_wrap", True))),
         content_only=bool(case.get("content_only", defaults.get("content_only", True))),
         wait_ms=int(case.get("wait_ms", defaults.get("wait_ms", 2000))),
         settle_frames=int(case.get("settle_frames", defaults.get("settle_frames", 3))),
@@ -197,10 +195,6 @@ def run_mdmdview_capture(
         "--settle-frames",
         str(case.settle_frames),
     ]
-    if case.table_wrap:
-        cmd.append("--table-wrap")
-    else:
-        cmd.append("--no-table-wrap")
     if case.content_only:
         cmd.append("--content-only")
     if snapshot.scroll is not None:

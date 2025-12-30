@@ -56,7 +56,6 @@ pub struct ScreenshotConfig {
     pub settle_frames: u32,
     pub zoom: f32,
     pub theme: ScreenshotTheme,
-    pub table_wrap: bool,
     pub font_source: Option<String>,
 }
 
@@ -214,8 +213,6 @@ pub struct MarkdownViewerApp {
     view_mode: ViewMode,
     /// Wrap long lines in raw view
     wrap_raw: bool,
-    /// Whether the table wrap overhaul renderer is active
-    table_wrap_overhaul_enabled: bool,
     /// Write mode: allow editing in Raw view
     write_enabled: bool,
     /// Remember caret position in raw editor (byte index)
@@ -456,7 +453,6 @@ impl MarkdownViewerApp {
             toggle_fullscreen: false,
             view_mode: ViewMode::Rendered,
             wrap_raw: false,
-            table_wrap_overhaul_enabled: true,
             write_enabled: false,
             raw_cursor: None,
             raw_focus_requested: false,
@@ -482,20 +478,12 @@ impl MarkdownViewerApp {
             pending_files: VecDeque::new(),
             screenshot: None,
         };
-        app.renderer
-            .set_table_wrap_overhaul_enabled(app.table_wrap_overhaul_enabled);
-
         // Load welcome content by default
         if let Some(welcome) = SAMPLE_FILES.iter().find(|f| f.name == "welcome.md") {
             app.load_content(welcome.content, Some("Welcome".to_string()));
         }
 
         app
-    }
-
-    pub fn set_table_wrap_overhaul_enabled(&mut self, enabled: bool) {
-        self.table_wrap_overhaul_enabled = enabled;
-        self.renderer.set_table_wrap_overhaul_enabled(enabled);
     }
 
     pub fn set_zoom_scale(&mut self, scale: f32) {
@@ -509,11 +497,6 @@ impl MarkdownViewerApp {
         self.show_search = false;
         self.search_focus_requested = false;
         self.nav_request = None;
-    }
-
-    fn toggle_table_wrap_overhaul(&mut self) {
-        let enabled = !self.table_wrap_overhaul_enabled;
-        self.set_table_wrap_overhaul_enabled(enabled);
     }
 
     /// Check if file has valid markdown extension
@@ -1480,21 +1463,6 @@ impl MarkdownViewerApp {
                         });
 
                         ui.horizontal(|ui| {
-                            let label = if self.table_wrap_overhaul_enabled {
-                                "Table Wrap Overhaul (new)"
-                            } else {
-                                "Table Wrap Overhaul (legacy)"
-                            };
-                            if ui
-                                .selectable_label(self.table_wrap_overhaul_enabled, label)
-                                .clicked()
-                            {
-                                self.toggle_table_wrap_overhaul();
-                                ui.close_menu();
-                            }
-                        });
-
-                        ui.horizontal(|ui| {
                             if ui.button("Zoom In").clicked() {
                                 self.renderer.zoom_in();
                                 ui.close_menu();
@@ -1620,27 +1588,22 @@ impl MarkdownViewerApp {
                         ui.label(format!("Built: {}", BUILD_TIMESTAMP));
                     });
 
-                    let wrap_label = if self.table_wrap_overhaul_enabled {
-                        RichText::new("Wrap: Overhaul").color(Color32::from_rgb(120, 200, 255))
-                    } else {
-                        RichText::new("Wrap: Legacy").color(Color32::from_rgb(140, 140, 140))
-                    };
-                    let cache_tip = if self.table_wrap_overhaul_enabled {
-                        let (hits, misses) = self.renderer.table_layout_cache_stats();
-                        let (rendered_rows, total_rows) = self.renderer.table_render_stats();
-                        let row_info = if total_rows > 0 {
-                            format!("
-Rows rendered this frame: {} / {}", rendered_rows, total_rows)
-                        } else {
-                            String::new()
-                        };
+                    let (hits, misses) = self.renderer.table_layout_cache_stats();
+                    let (rendered_rows, total_rows) = self.renderer.table_render_stats();
+                    let row_info = if total_rows > 0 {
                         format!(
-                            "Table layout cache: {} hits / {} misses{}",
-                            hits, misses, row_info
+                            "\nRows rendered this frame: {} / {}",
+                            rendered_rows, total_rows
                         )
                     } else {
-                        "Legacy table renderer active. Toggle via View > Table Wrap Overhaul or CLI flag.".to_string()
+                        String::new()
                     };
+                    let cache_tip = format!(
+                        "Table layout cache: {} hits / {} misses{}",
+                        hits, misses, row_info
+                    );
+                    let wrap_label =
+                        RichText::new("Tables: Wrap").color(Color32::from_rgb(120, 200, 255));
                     ui.label(wrap_label).on_hover_text(cache_tip);
                 });
             });
@@ -2406,13 +2369,12 @@ impl MarkdownViewerApp {
         let elapsed_ms = state.started.elapsed().as_millis();
 
         format!(
-            "{{\n  \"version\": \"{}\",\n  \"build_timestamp\": \"{}\",\n  \"output\": \"{}\",\n  \"theme\": \"{}\",\n  \"zoom\": {:.3},\n  \"table_wrap\": {},\n  \"content_only\": {},\n  \"scroll_ratio\": {},\n  \"scroll_offset\": {},\n  \"viewport_px\": {{\"width\": {}, \"height\": {}}},\n  \"content_px\": {{\"width\": {}, \"height\": {}}},\n  \"pixels_per_point\": {:.3},\n  \"wait_ms\": {},\n  \"settle_frames\": {},\n  \"stable_frames\": {},\n  \"timed_out\": {},\n  \"font_source\": {},\n  \"elapsed_ms\": {}\n}}\n",
+            "{{\n  \"version\": \"{}\",\n  \"build_timestamp\": \"{}\",\n  \"output\": \"{}\",\n  \"theme\": \"{}\",\n  \"zoom\": {:.3},\n  \"content_only\": {},\n  \"scroll_ratio\": {},\n  \"scroll_offset\": {},\n  \"viewport_px\": {{\"width\": {}, \"height\": {}}},\n  \"content_px\": {{\"width\": {}, \"height\": {}}},\n  \"pixels_per_point\": {:.3},\n  \"wait_ms\": {},\n  \"settle_frames\": {},\n  \"stable_frames\": {},\n  \"timed_out\": {},\n  \"font_source\": {},\n  \"elapsed_ms\": {}\n}}\n",
             BUILD_VERSION,
             BUILD_TIMESTAMP,
             output_path,
             state.config.theme.as_str(),
             state.config.zoom,
-            state.config.table_wrap,
             state.config.content_only,
             scroll_ratio,
             scroll_offset,

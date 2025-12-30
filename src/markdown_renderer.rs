@@ -10,7 +10,7 @@ use egui::{
     text::{Galley, LayoutJob, TextWrapping},
     Align, Color32, Context, FontSelection, Painter, RichText, Stroke, Vec2, Visuals,
 };
-use egui_extras::TableBuilder;
+use egui_extras::{Column, TableBuilder};
 use pulldown_cmark::{Alignment, Event, LinkType, Options, Parser, Tag};
 use std::cell::{Cell, RefCell};
 use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
@@ -278,7 +278,6 @@ pub struct MarkdownRenderer {
     // Base directory used to resolve relative image paths
     base_dir: RefCell<Option<PathBuf>>,
     mermaid: MermaidRenderer,
-    table_wrap_overhaul_enabled: bool,
     table_layout_cache: RefCell<CellLayoutCache>,
     table_metrics: RefCell<TableMetrics>,
     column_stats_cache: RefCell<HashMap<u64, ColumnStatsCacheEntry>>,
@@ -674,7 +673,6 @@ impl MarkdownRenderer {
             highlight_phrase: RefCell::new(None),
             base_dir: RefCell::new(None),
             mermaid,
-            table_wrap_overhaul_enabled: true,
             table_layout_cache: RefCell::new(CellLayoutCache::new(TABLE_LAYOUT_CACHE_CAPACITY)),
             table_metrics: RefCell::new(TableMetrics::default()),
             column_stats_cache: RefCell::new(HashMap::new()),
@@ -3651,137 +3649,8 @@ impl MarkdownRenderer {
 
         let table_index = self.next_table_index();
         let table_id = self.compute_table_id(headers, rows, alignments, table_index);
-        if self.table_wrap_overhaul_enabled {
-            self.render_table_tablebuilder(ui, headers, rows, alignments, table_id);
-            ui.add_space(8.0);
-            return;
-        }
-
+        self.render_table_tablebuilder(ui, headers, rows, alignments, table_id);
         ui.add_space(8.0);
-
-        const MIN_COL_MULTIPLIER: f32 = 6.0;
-        const HARD_MIN_COL_WIDTH: f32 = 48.0;
-        const MAX_WRAP_MULTIPLIER: f32 = 30.0;
-
-        let min_floor = (self.font_sizes.body * MIN_COL_MULTIPLIER).max(HARD_MIN_COL_WIDTH);
-        let wrap_cap = (self.font_sizes.body * MAX_WRAP_MULTIPLIER).min(640.0);
-
-        let row_max = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-        let column_count = headers.len().max(row_max).max(1);
-
-        // 1) Establish baseline widths from headers so small columns don't collapse
-        let mut min_widths = Vec::with_capacity(column_count);
-        for ci in 0..column_count {
-            if let Some(header) = headers.get(ci) {
-                min_widths.push(self.measure_inline_spans(ui, header).max(min_floor));
-            } else {
-                min_widths.push(min_floor);
-            }
-        }
-        if min_widths.is_empty() {
-            return;
-        }
-
-        // 2) Allow body cells to request more width (capped so single verbose cells don't dominate)
-        let mut desired_widths = min_widths.clone();
-        for row in rows {
-            for (ci, cell) in row.iter().enumerate() {
-                if ci >= column_count {
-                    break;
-                }
-                let measured = self.measure_inline_spans(ui, cell).max(min_floor);
-                desired_widths[ci] = desired_widths[ci].max(measured.min(wrap_cap));
-            }
-        }
-
-        let column_spacing = ui.spacing().item_spacing.x;
-        let spacing_total = column_spacing * column_count.saturating_sub(1) as f32;
-        let available = ui.available_width().max(100.0);
-        let available_for_cells = (available - spacing_total).max(1.0);
-        let desired_total: f32 = desired_widths.iter().sum();
-        let widths = if desired_total <= available_for_cells {
-            Self::resolve_table_widths(available_for_cells, &min_widths, &desired_widths)
-        } else {
-            desired_widths.clone()
-        };
-        let use_hscroll = desired_total + spacing_total > available + 0.5;
-
-        self.render_table_legacy(
-            ui,
-            headers,
-            rows,
-            alignments,
-            &widths,
-            use_hscroll,
-            table_id,
-        );
-        ui.add_space(8.0);
-    }
-
-    fn render_table_legacy(
-        &self,
-        ui: &mut egui::Ui,
-        headers: &[Vec<InlineSpan>],
-        rows: &[Vec<Vec<InlineSpan>>],
-        alignments: &[Alignment],
-        widths: &[f32],
-        use_hscroll: bool,
-        table_id: u64,
-    ) {
-        let column_spacing = ui.spacing().item_spacing.x;
-        let total_width: f32 =
-            widths.iter().sum::<f32>() + column_spacing * widths.len().saturating_sub(1) as f32;
-        let column_count = widths.len().max(headers.len());
-        let render_grid = |ui: &mut egui::Ui| {
-            let border = ui.visuals().window_stroke();
-            egui::Frame::none().stroke(border).show(ui, |ui| {
-                egui::Grid::new(("md_table", table_id))
-                    .striped(true)
-                    .show(ui, |ui| {
-                        for ci in 0..column_count {
-                            let w = widths.get(ci).copied().unwrap_or(120.0);
-                            let header = headers.get(ci).map(|h| h.as_slice()).unwrap_or(&[]);
-                            let halign = Self::alignment_for_column(alignments, ci);
-                            ui.push_id(("header", ci), |ui| {
-                                self.render_overhauled_cell(ui, header, w, true, None, ci, halign);
-                            });
-                        }
-                        ui.end_row();
-
-                        for (ri, row) in rows.iter().enumerate() {
-                            for ci in 0..column_count {
-                                let w = widths.get(ci).copied().unwrap_or(120.0);
-                                let cell = row.get(ci).map(|c| c.as_slice()).unwrap_or(&[]);
-                                let halign = Self::alignment_for_column(alignments, ci);
-                                ui.push_id(("cell", ri, ci), |ui| {
-                                    self.render_overhauled_cell(
-                                        ui,
-                                        cell,
-                                        w,
-                                        false,
-                                        Some(ri),
-                                        ci,
-                                        halign,
-                                    );
-                                });
-                            }
-                            ui.end_row();
-                        }
-                    });
-            });
-        };
-
-        if use_hscroll {
-            egui::ScrollArea::horizontal()
-                .id_source(("md_table_hscroll", table_id))
-                .show(ui, |ui| {
-                    ui.set_width(total_width);
-                    ui.set_min_width(total_width);
-                    render_grid(ui);
-                });
-        } else {
-            render_grid(ui);
-        }
     }
 
     fn extend_table_rect(target: &mut Option<egui::Rect>, rect: egui::Rect) {
@@ -3828,10 +3697,94 @@ impl MarkdownRenderer {
 
         let column_spacing = ui.spacing().item_spacing.x.max(6.0);
         let available_width = ui.available_width().max(1.0);
-        let desired_total_width =
-            self.estimate_table_total_width(table_id, &column_specs, column_spacing);
+        let min_floor = self.table_min_column_width();
+        let resolved_widths = self.resolve_table_column_widths(table_id, &column_specs, min_floor);
+        let spacing_total = column_spacing * column_specs.len().saturating_sub(1) as f32;
+        let available_for_columns = available_width - spacing_total;
+        let mut fixed_total = 0.0;
+        let mut flexible_indices: Vec<usize> = Vec::new();
+        let mut remainder_indices: Vec<usize> = Vec::new();
+        for (idx, spec) in column_specs.iter().enumerate() {
+            match spec.policy {
+                ColumnPolicy::Fixed { width, .. } => fixed_total += width,
+                ColumnPolicy::Resizable { .. } => flexible_indices.push(idx),
+                ColumnPolicy::Remainder { .. } => {
+                    flexible_indices.push(idx);
+                    remainder_indices.push(idx);
+                }
+                ColumnPolicy::Auto => flexible_indices.push(idx),
+            }
+        }
+        let desired_total_width = resolved_widths.iter().sum::<f32>() + spacing_total;
         let content_width = desired_total_width.max(available_width);
-        let use_hscroll = desired_total_width > available_width + 0.5;
+        let use_hscroll = available_for_columns <= 0.0 || fixed_total > available_for_columns + 0.5;
+        let mut adjusted_widths = resolved_widths.clone();
+        let mut scaled_down = false;
+        if !use_hscroll {
+            let remaining = (available_for_columns - fixed_total).max(0.0);
+            let flex_total: f32 = flexible_indices
+                .iter()
+                .map(|idx| resolved_widths[*idx])
+                .sum();
+            if flex_total > remaining + 0.5 && flex_total > 0.0 {
+                let scale = (remaining / flex_total).max(0.0);
+                for idx in &flexible_indices {
+                    adjusted_widths[*idx] = (resolved_widths[*idx] * scale).max(1.0);
+                }
+                scaled_down = true;
+            }
+        }
+        let column_layout: Vec<Column> = if use_hscroll {
+            column_specs.iter().map(|spec| spec.as_column()).collect()
+        } else {
+            column_specs
+                .iter()
+                .enumerate()
+                .map(|(idx, spec)| {
+                    let width = adjusted_widths
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(min_floor)
+                        .max(1.0);
+                    match spec.policy {
+                        ColumnPolicy::Fixed { width, clip } => {
+                            let mut col = Column::exact(width);
+                            if clip {
+                                col = col.clip(true);
+                            }
+                            col
+                        }
+                        ColumnPolicy::Resizable { min, clip, .. } => {
+                            let mut col = Column::initial(width)
+                                .at_least(min.min(width))
+                                .resizable(true);
+                            if clip {
+                                col = col.clip(true);
+                            }
+                            col
+                        }
+                        ColumnPolicy::Remainder { clip } => {
+                            let mut col = if scaled_down {
+                                Column::initial(width).at_least(min_floor.min(width))
+                            } else {
+                                Column::remainder().at_least(min_floor)
+                            };
+                            if clip {
+                                col = col.clip(true);
+                            }
+                            col
+                        }
+                        ColumnPolicy::Auto => {
+                            if scaled_down {
+                                Column::initial(width).at_least(min_floor.min(width))
+                            } else {
+                                Column::auto_with_initial_suggestion(width).at_least(min_floor)
+                            }
+                        }
+                    }
+                })
+                .collect()
+        };
 
         let render_table = |ui: &mut egui::Ui, max_width: f32| {
             let width_bucket = max_width.round() as i32;
@@ -3917,8 +3870,8 @@ impl MarkdownRenderer {
                     }
 
                     let mut table = TableBuilder::new(ui).striped(true).vscroll(false);
-                    for spec in &column_specs {
-                        table = table.column(spec.as_column());
+                    for column in &column_layout {
+                        table = table.column(*column);
                     }
 
                     // Use RefCell to allow capturing widths from body closure.
@@ -4143,6 +4096,49 @@ impl MarkdownRenderer {
         })
     }
 
+    fn table_min_column_width(&self) -> f32 {
+        (self.font_sizes.body * 6.0).max(48.0)
+    }
+
+    fn resolve_table_column_widths(
+        &self,
+        table_id: u64,
+        column_specs: &[ColumnSpec],
+        min_floor: f32,
+    ) -> Vec<f32> {
+        if column_specs.is_empty() {
+            return Vec::new();
+        }
+
+        let stored_widths = {
+            let metrics = self.table_metrics.borrow();
+            metrics
+                .entry(table_id)
+                .map(|entry| entry.current_widths().to_vec())
+                .unwrap_or_default()
+        };
+
+        column_specs
+            .iter()
+            .enumerate()
+            .map(|(idx, spec)| {
+                let stored = stored_widths
+                    .get(idx)
+                    .copied()
+                    .filter(|width| width.is_finite() && *width > 0.0);
+                let width = match spec.policy {
+                    ColumnPolicy::Fixed { width, .. } => width,
+                    ColumnPolicy::Resizable { min, preferred, .. } => {
+                        stored.unwrap_or(preferred.max(min)).max(min)
+                    }
+                    ColumnPolicy::Remainder { .. } => min_floor,
+                    ColumnPolicy::Auto => stored.unwrap_or(min_floor).max(min_floor),
+                };
+                width.max(1.0)
+            })
+            .collect()
+    }
+
     fn estimate_table_column_widths(
         &self,
         column_specs: &[ColumnSpec],
@@ -4152,7 +4148,7 @@ impl MarkdownRenderer {
         let column_count = column_specs.len().max(1);
         let spacing_total = column_spacing * column_count.saturating_sub(1) as f32;
         let available = (max_width - spacing_total).max(1.0);
-        let min_floor = (self.font_sizes.body * 6.0).max(48.0);
+        let min_floor = self.table_min_column_width();
         let mut widths: Vec<f32> = column_specs
             .iter()
             .map(|spec| match spec.policy {
@@ -4186,35 +4182,8 @@ impl MarkdownRenderer {
         if column_specs.is_empty() {
             return 0.0;
         }
-
-        let stored_widths = {
-            let metrics = self.table_metrics.borrow();
-            metrics
-                .entry(table_id)
-                .map(|entry| entry.current_widths().to_vec())
-                .unwrap_or_default()
-        };
-        let min_floor = (self.font_sizes.body * 6.0).max(48.0);
-        let widths: Vec<f32> = column_specs
-            .iter()
-            .enumerate()
-            .map(|(idx, spec)| {
-                let stored = stored_widths
-                    .get(idx)
-                    .copied()
-                    .filter(|width| width.is_finite() && *width > 0.0);
-                let width = match spec.policy {
-                    ColumnPolicy::Fixed { width, .. } => width,
-                    ColumnPolicy::Resizable { min, preferred, .. } => stored
-                        .unwrap_or(preferred.max(min))
-                        .max(min),
-                    ColumnPolicy::Remainder { .. } => min_floor,
-                    ColumnPolicy::Auto => stored.unwrap_or(min_floor).max(min_floor),
-                };
-                width.max(1.0)
-            })
-            .collect();
-
+        let min_floor = self.table_min_column_width();
+        let widths = self.resolve_table_column_widths(table_id, column_specs, min_floor);
         let spacing_total = column_spacing * widths.len().saturating_sub(1) as f32;
         widths.iter().sum::<f32>() + spacing_total
     }
@@ -4573,9 +4542,6 @@ impl MarkdownRenderer {
         is_header: bool,
         halign: Align,
     ) -> LayoutJobBuild {
-        if !self.table_wrap_overhaul_enabled {
-            return self.build_layout_job(style, spans, width, is_header, halign);
-        }
         let highlight_hash = self
             .highlight_phrase
             .borrow()
@@ -4775,15 +4741,6 @@ impl MarkdownRenderer {
             *current = normalized;
         }
         self.table_layout_cache.borrow_mut().clear();
-    }
-
-    pub fn set_table_wrap_overhaul_enabled(&mut self, enabled: bool) {
-        self.table_wrap_overhaul_enabled = enabled;
-        self.clear_table_layout_cache();
-    }
-
-    pub fn table_wrap_overhaul_enabled(&self) -> bool {
-        self.table_wrap_overhaul_enabled
     }
 
     pub fn clear_table_layout_cache(&self) {
@@ -6496,8 +6453,12 @@ fn main() {}
         let available = Cell::new(0.0f32);
         let spacing = Cell::new(0.0f32);
         let estimated_before = {
-            let column_stats =
-                renderer.column_stats_for_table(table_id, first_headers, first_rows, first_alignments);
+            let column_stats = renderer.column_stats_for_table(
+                table_id,
+                first_headers,
+                first_rows,
+                first_alignments,
+            );
             let ctx = TableColumnContext::new(
                 first_headers,
                 first_rows,
@@ -6532,8 +6493,8 @@ fn main() {}
             "widths too small: {:?}",
             widths
         );
-        let total_width = widths.iter().sum::<f32>()
-            + spacing.get() * widths.len().saturating_sub(1) as f32;
+        let total_width =
+            widths.iter().sum::<f32>() + spacing.get() * widths.len().saturating_sub(1) as f32;
         assert!(
             !(total_width > available.get() + 1.0 && estimated_before <= available.get() + 0.5),
             "actual width {} exceeds available {} (estimated {})",
@@ -6615,16 +6576,6 @@ fn main() {}
             renderer.render_cell_context_menu(ui, "cell");
             renderer.copy_text_and_close(ui, "direct-copy");
         });
-    }
-
-    #[test]
-    fn test_table_wrap_overhaul_toggle() {
-        let mut renderer = MarkdownRenderer::new();
-        assert!(renderer.table_wrap_overhaul_enabled());
-        renderer.set_table_wrap_overhaul_enabled(false);
-        assert!(!renderer.table_wrap_overhaul_enabled());
-        renderer.set_table_wrap_overhaul_enabled(true);
-        assert!(renderer.table_wrap_overhaul_enabled());
     }
 
     #[test]
@@ -6812,8 +6763,8 @@ fn main() {}
     }
 
     #[test]
-    fn test_table_rendering_legacy_and_overhaul() {
-        let mut renderer = MarkdownRenderer::new();
+    fn test_table_rendering_overhaul() {
+        let renderer = MarkdownRenderer::new();
         let headers = vec![
             vec![InlineSpan::Text("H1".to_string())],
             vec![InlineSpan::Text("H2".to_string())],
@@ -6831,11 +6782,6 @@ fn main() {}
             alignments: Vec::new(),
         }];
 
-        with_test_ui(|_, ui| {
-            renderer.render_to_ui(ui, &elements);
-        });
-
-        renderer.set_table_wrap_overhaul_enabled(false);
         with_test_ui(|_, ui| {
             renderer.render_to_ui(ui, &elements);
         });

@@ -22,7 +22,6 @@ enum ThemeChoice {
 #[derive(Default)]
 struct CliOptions {
     initial_file: Option<PathBuf>,
-    table_wrap_cli: Option<bool>,
     screenshot: bool,
     screenshot_output: Option<PathBuf>,
     width: Option<f32>,
@@ -50,8 +49,6 @@ where
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
-            "--table-wrap" => opts.table_wrap_cli = Some(true),
-            "--no-table-wrap" => opts.table_wrap_cli = Some(false),
             "--screenshot" => {
                 opts.screenshot = true;
                 let value = next_value(&mut iter, "--screenshot")?;
@@ -228,10 +225,6 @@ fn main() -> Result<(), eframe::Error> {
         }
     };
 
-    let table_wrap_env = std::env::var("MDMDVIEW_TABLE_WRAP_OVERHAUL")
-        .ok()
-        .and_then(|value| parse_bool_flag(&value));
-    let table_wrap_enabled = cli.table_wrap_cli.or(table_wrap_env).unwrap_or(true);
     let screenshot_enabled = cli.screenshot;
     let resolved_theme = if screenshot_enabled {
         Some(cli.theme.unwrap_or(ThemeChoice::Light))
@@ -298,7 +291,6 @@ fn main() -> Result<(), eframe::Error> {
             settle_frames: cli.settle_frames.unwrap_or(3),
             zoom: screenshot_zoom,
             theme,
-            table_wrap: table_wrap_enabled,
             font_source: test_fonts
                 .as_ref()
                 .map(|path| path.to_string_lossy().to_string()),
@@ -329,7 +321,6 @@ fn main() -> Result<(), eframe::Error> {
             }
 
             let mut app = MarkdownViewerApp::new();
-            app.set_table_wrap_overhaul_enabled(table_wrap_enabled);
             if screenshot_zoom != 1.0 {
                 app.set_zoom_scale(screenshot_zoom);
             }
@@ -461,14 +452,6 @@ fn configure_egui_style(ctx: &egui::Context) {
     // Custom fonts could be added here if needed
 }
 
-fn parse_bool_flag(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -487,15 +470,6 @@ mod tests {
         // This is a basic smoke test
         let icon = create_app_icon();
         assert!(!icon.rgba.is_empty());
-    }
-
-    #[test]
-    fn test_parse_bool_flag() {
-        assert_eq!(parse_bool_flag("true"), Some(true));
-        assert_eq!(parse_bool_flag("FALSE"), Some(false));
-        assert_eq!(parse_bool_flag("1"), Some(true));
-        assert_eq!(parse_bool_flag("0"), Some(false));
-        assert_eq!(parse_bool_flag("unknown"), None);
     }
 
     #[test]
