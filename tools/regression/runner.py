@@ -1,5 +1,6 @@
 ﻿import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -202,7 +203,10 @@ def run_mdmdview_capture(
     if test_fonts:
         cmd.extend(["--test-fonts", test_fonts])
 
-    subprocess.run(cmd, check=True)
+    env = dict(os.environ)
+    env["MDMDVIEW_MERMAID_RENDERER"] = "embedded"
+    env["MDMDVIEW_ENABLE_KROKI"] = "0"
+    subprocess.run(cmd, check=True, env=env)
 
 
 def load_mask_ignores(mask_paths: List[Path], size: tuple[int, int]) -> List[bool]:

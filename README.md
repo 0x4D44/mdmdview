@@ -104,11 +104,12 @@ cargo build --release
 
 #### Optional Features
 
-**Embedded Mermaid Rendering** (via QuickJS):
+**Embedded Mermaid Rendering** (default via QuickJS):
 ```bash
 # Requires assets/vendor/mermaid.min.js
-cargo build --release --features mermaid-quickjs
+cargo build --release --features mermaid-embedded
 ```
+Use `--no-default-features` to disable embedded Mermaid rendering.
 
 ---
 
@@ -242,7 +243,7 @@ mdmdview supports all CommonMark elements with professional formatting:
   - Shortcode expansion: `:rocket:`, `:tada:`, `:heart:`
   - Native Unicode emoji rendering
 - **Mermaid Diagrams** - Flowcharts, sequence diagrams, gantt charts, etc.
-  - Built-in renderer with `--features mermaid-quickjs`
+  - Built-in renderer enabled by default (`--no-default-features` to disable)
   - Select renderer via `MDMDVIEW_MERMAID_RENDERER` (`embedded`, `kroki`, `off`)
   - Kroki fallback requires `MDMDVIEW_ENABLE_KROKI=1`
 
@@ -358,7 +359,7 @@ mdmdview/
    - Windows resource file generation
    - Version info from Cargo.toml
    - Icon embedding
-   - Mermaid.js embedding for QuickJS renderer (optional feature)
+   - Mermaid.js embedding for QuickJS renderer
 
 ### Key Design Decisions
 
@@ -382,8 +383,8 @@ cargo build
 # Release build (optimized, ~4.8MB)
 cargo build --release
 
-# With embedded Mermaid renderer
-cargo build --release --features mermaid-quickjs
+# With embedded Mermaid renderer (default)
+cargo build --release --features mermaid-embedded
 
 # Run in development mode
 cargo run
@@ -551,7 +552,7 @@ mdmdview uses `String::from_utf8_lossy` for legacy encodings:
 - Look for queue status panel (max 4 concurrent renders)
 
 **Embedded mode:**
-- Build with `--features mermaid-quickjs`
+- Build with default features (or `--features mermaid-embedded` if defaults are disabled)
 - Optionally set `MDMDVIEW_MERMAID_RENDERER=embedded`
 - Ensure `assets/vendor/mermaid.min.js` exists before building
 - Check that diagram syntax is valid
@@ -610,6 +611,12 @@ This project is provided as-is for demonstration purposes.
 Licensed under CC-BY 4.0 (Twemoji)
 See https://github.com/twitter/twemoji for details
 Images embedded in executable for offline use
+
+**Mermaid:**
+Copyright (c) 2014-2024 Mermaid Team
+Licensed under MIT
+See https://github.com/mermaid-js/mermaid for details
+JavaScript bundled in `assets/vendor/mermaid.min.js`
 
 ### Dependencies
 
