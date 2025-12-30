@@ -49,7 +49,6 @@
 - **ðŸ“ Raw Mode with Edit** - View and edit source markdown (`Ctrl+R` to toggle, `Ctrl+E` to edit)
 - **ðŸ”— Internal Anchors** - In-document navigation via `[link](#anchor)` syntax
 - **ðŸ“Š Table Support** - Professional grid layout with headers and striped rows
-- **ðŸ§® Table Wrap Overhaul** - Virtualized columns with per-column resizing; toggle via View > Table Wrap or fall back with the CLI/env options below. Columns now apply semantic stats (Examples keep the remainder, Description stays moderate) with persisted user adjustments, and the renderer paints deterministic dividers/borders. Open `examples/regressions/table-threat-model.md` to verify the layout before/after resizing or changing DPI.
 - **ðŸŽ¨ Mermaid Diagrams** - Render flowcharts, sequence diagrams, and more (embedded QuickJS or Kroki fallback)
 - **ðŸ˜€ Emoji Support** - Embedded Twemoji assets with shortcode expansion (`:rocket:` â†’ ðŸš€)
 - **ðŸŒ Encoding Fallback** - Opens non-UTF-8 legacy files via lossy decoding
@@ -153,19 +152,6 @@ Now all `.md` files will open in mdmdview by double-clicking!
 - **Rendered Mode** (default) - Formatted markdown with styling and images
 - **Raw Mode** (`Ctrl+R`) - Source text in monospace editor
   - **Write Mode** (`Ctrl+E` in Raw mode) - Edit and auto-save changes
-
-### Table Wrap Controls
-
-- `--table-wrap` â€” explicitly enable the wrap overhaul (it is the default).
-- `--no-table-wrap` â€” temporarily fall back to the legacy renderer if a file misbehaves.
-- `MDMDVIEW_TABLE_WRAP_OVERHAUL=1` (or `0`) â€” set the default renderer without passing CLI flags.
-
-  The setting can also be toggled at runtime from **View > Table Wrap**.
-
-  Recent behavior (2025-11-20):
-  - Header rows auto-size from wrapped text; row heights grow on repaint to avoid clipping.
-  - Column sizing uses Unicode display width (better for CJK/fullwidth) and can designate up to two remainder columns when content is long.
-  - Table state (widths/heights) is scoped per table instance, so identical tables no longer share cached widths.
 
 ### Search Functionality
 
@@ -282,7 +268,6 @@ mdmdview supports all CommonMark elements with professional formatting:
 | `MDMDVIEW_MERMAID_BG` | Mermaid background (`theme`, `light`, `dark`, `transparent`) | `theme` |
 | `MDMDVIEW_MERMAID_BG_COLOR` | Override Mermaid background color (hex) | empty |
 | `MDMDVIEW_MERMAID_THEME` | Mermaid theme name | `base` |
-| `MDMDVIEW_TABLE_WRAP_OVERHAUL` | Default table wrap renderer (`1` = overhaul, `0` = legacy) | `1` |
 | `RUST_LOG` | Logging level (`error`, `warn`, `info`, `debug`, `trace`) | `warn` |
 
 **Example:**

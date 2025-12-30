@@ -263,9 +263,10 @@ pub fn derive_column_specs(ctx: &TableColumnContext) -> Vec<ColumnSpec> {
                 candidate = None;
             }
         }
-        let has_non_fixed_other = specs.iter().enumerate().any(|(idx, spec)| {
-            idx != 0 && !matches!(spec.policy, ColumnPolicy::Fixed { .. })
-        });
+        let has_non_fixed_other = specs
+            .iter()
+            .enumerate()
+            .any(|(idx, spec)| idx != 0 && !matches!(spec.policy, ColumnPolicy::Fixed { .. }));
         if has_non_fixed_other && (candidate.is_none() || candidate == Some(0)) {
             candidate = scored_indices
                 .iter()
