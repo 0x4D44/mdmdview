@@ -874,4 +874,104 @@ mod tests {
 
         assert!(matches!(specs[0].policy, ColumnPolicy::Remainder { .. }));
     }
+
+    #[test]
+    fn test_normalize_body_font_px_defaults_for_invalid_values() {
+        assert_eq!(normalize_body_font_px(f32::NAN), 14.0);
+        assert_eq!(normalize_body_font_px(-10.0), 14.0);
+        assert_eq!(normalize_body_font_px(0.0), 14.0);
+        assert_eq!(normalize_body_font_px(12.0), 12.0);
+        assert_eq!(px(10.0, 2.0), 20.0);
+    }
+
+    #[test]
+    fn test_column_policy_tooltip_variants_for_clip_flags() {
+        let fixed = ColumnPolicy::Fixed {
+            width: 120.0,
+            clip: false,
+        };
+        let remainder = ColumnPolicy::Remainder { clip: true };
+
+        let fixed_tooltip = column_tooltip("Fixed", &fixed).expect("tooltip");
+        assert!(!fixed_tooltip.contains("clipped"));
+
+        let remainder_tooltip = column_tooltip("Remainder", &remainder).expect("tooltip");
+        assert!(remainder_tooltip.contains("clipped"));
+    }
+
+    #[test]
+    fn test_set_policy_updates_hash() {
+        let mut spec = ColumnSpec::new(0, "col", ColumnPolicy::Auto, None);
+        let original = spec.policy_hash;
+        spec.set_policy(ColumnPolicy::Fixed {
+            width: 100.0,
+            clip: true,
+        });
+        assert_ne!(spec.policy_hash, original);
+    }
+
+    #[test]
+    fn test_apply_preferred_width_updates_preferred_value() {
+        let mut spec = ColumnSpec::new(
+            0,
+            "body",
+            ColumnPolicy::Resizable {
+                min: 50.0,
+                preferred: 120.0,
+                clip: false,
+            },
+            None,
+        );
+        spec.apply_preferred_width(180.0);
+        match spec.policy {
+            ColumnPolicy::Resizable { preferred, .. } => {
+                assert_eq!(preferred, 180.0);
+            }
+            other => panic!("unexpected policy: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_remainder_cap_forces_resizable() {
+        let mut remainder = MAX_REMAINDER_COLUMNS;
+        let stat = ColumnStat {
+            max_graphemes: 80,
+            longest_word: 40,
+            rich_content: RichContentFlags {
+                has_link: true,
+                has_image: false,
+                has_emoji_like: false,
+            },
+        };
+        let policy = classify_column("Notes", 2, &mut remainder, Some(&stat), 14.0);
+        assert!(matches!(policy, ColumnPolicy::Resizable { .. }));
+    }
+
+    #[test]
+    fn test_compute_column_stats_respects_max_samples() {
+        let headers = vec![vec![span("Header")]];
+        let rows = vec![
+            vec![vec![span("short")]],
+            vec![vec![span("this_is_a_much_longer_token")]],
+        ];
+        let stats = compute_column_stats(&headers, &rows, 1);
+        assert_eq!(stats.len(), 1);
+        assert!(stats[0].longest_word < 20, "should ignore second row");
+    }
+
+    #[test]
+    fn test_accumulate_stats_preserves_existing_flags() {
+        let mut stat = ColumnStat {
+            max_graphemes: 0,
+            longest_word: 0,
+            rich_content: RichContentFlags {
+                has_link: false,
+                has_image: true,
+                has_emoji_like: false,
+            },
+        };
+        accumulate_stats_for_cell(&[InlineSpan::Text("plain".to_string())], &mut stat);
+        assert!(stat.rich_content.has_image);
+        assert!(!stat.rich_content.has_link);
+    }
 }

@@ -1,12 +1,14 @@
-use crate::image_decode;
+#[cfg(feature = "mermaid-quickjs")]
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use egui::{Color32, RichText, Stroke};
+#[cfg(feature = "mermaid-quickjs")]
 use std::cell::RefCell;
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
+#[cfg(any(test, feature = "mermaid-quickjs"))]
+use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
+#[cfg(feature = "mermaid-quickjs")]
+use std::collections::HashSet;
+#[cfg(any(test, feature = "mermaid-quickjs"))]
 use std::hash::{Hash, Hasher};
-use std::sync::mpsc::Receiver as StdReceiver;
-#[cfg(feature = "mermaid-kroki")]
-use std::time::Duration;
 
 #[cfg(feature = "mermaid-quickjs")]
 use std::sync::{
@@ -28,9 +30,6 @@ struct MermaidEngine {
     ctx: rquickjs::Context,
 }
 
-type KrokiJobSender = Sender<KrokiRequest>;
-type KrokiJobReceiver = Receiver<KrokiRequest>;
-
 #[cfg(feature = "mermaid-quickjs")]
 type MermaidJobSender = Sender<MermaidRequest>;
 #[cfg(feature = "mermaid-quickjs")]
@@ -40,18 +39,21 @@ type MermaidResultSender = Sender<MermaidResult>;
 #[cfg(feature = "mermaid-quickjs")]
 type MermaidResultReceiver = Receiver<MermaidResult>;
 
+#[cfg(feature = "mermaid-quickjs")]
 #[derive(Clone)]
 struct MermaidTextureEntry {
     texture: egui::TextureHandle,
     size: [u32; 2],
 }
 
+#[cfg(any(test, feature = "mermaid-quickjs"))]
 struct LruCache<K, V> {
     entries: HashMap<K, V>,
     order: VecDeque<K>,
     capacity: usize,
 }
 
+#[cfg(any(test, feature = "mermaid-quickjs"))]
 impl<K, V> LruCache<K, V>
 where
     K: Eq + std::hash::Hash + Clone,
@@ -107,19 +109,6 @@ where
     }
 }
 
-#[cfg_attr(not(feature = "mermaid-kroki"), allow(dead_code))]
-struct KrokiRequest {
-    key: u64,
-    url: String,
-    payload: String,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum KrokiEnqueueError {
-    QueueFull,
-    Disconnected,
-}
-
 #[cfg(feature = "mermaid-quickjs")]
 struct MermaidRequest {
     svg_key: u64,
@@ -151,10 +140,10 @@ enum MermaidEnqueueError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MermaidRenderPreference {
     Embedded,
-    Kroki,
     Off,
 }
 
+#[cfg(feature = "mermaid-quickjs")]
 struct MermaidThemeValues {
     theme_name: String,
     main_bkg: String,
@@ -174,11 +163,7 @@ struct MermaidThemeValues {
 }
 
 pub(crate) struct MermaidRenderer {
-    kroki_pending: RefCell<HashSet<u64>>,
-    kroki_svg_cache: RefCell<HashMap<u64, Vec<u8>>>,
-    kroki_errors: RefCell<HashMap<u64, String>>,
-    kroki_job_tx: KrokiJobSender,
-    kroki_rx: StdReceiver<(u64, Result<Vec<u8>, String>)>,
+    #[cfg(feature = "mermaid-quickjs")]
     mermaid_textures: RefCell<LruCache<String, MermaidTextureEntry>>,
     #[cfg(feature = "mermaid-quickjs")]
     mermaid_pending: RefCell<HashSet<String>>,
@@ -195,9 +180,11 @@ pub(crate) struct MermaidRenderer {
 }
 
 impl MermaidRenderer {
-    pub(crate) const MAX_KROKI_JOBS: usize = 4;
+    #[cfg(feature = "mermaid-quickjs")]
     const MERMAID_TEXTURE_CACHE_CAPACITY: usize = 128;
+    #[cfg(any(test, feature = "mermaid-quickjs"))]
     const MERMAID_WIDTH_BUCKET_STEP: u32 = 32;
+    #[cfg(any(test, feature = "mermaid-quickjs"))]
     const MERMAID_SCALE_BUCKET_FACTOR: f32 = 100.0;
     #[cfg(feature = "mermaid-quickjs")]
     const MAX_MERMAID_JOBS: usize = 4;
@@ -213,36 +200,6 @@ impl MermaidRenderer {
     const MERMAID_MAX_RENDER_SIDE: u32 = 4096;
 
     pub(crate) fn new() -> Self {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let (job_tx, job_rx): (KrokiJobSender, KrokiJobReceiver) =
-            bounded(Self::MAX_KROKI_JOBS * 4);
-        #[cfg(feature = "mermaid-kroki")]
-        {
-            for worker_idx in 0..Self::MAX_KROKI_JOBS {
-                let worker_rx = job_rx.clone();
-                let result_tx = tx.clone();
-                if let Err(err) = std::thread::Builder::new()
-                    .name(format!("mdmdview-kroki-{worker_idx}"))
-                    .spawn(move || {
-                        let agent = ureq::AgentBuilder::new()
-                            .timeout_connect(Duration::from_secs(5))
-                            .timeout_read(Duration::from_secs(10))
-                            .timeout_write(Duration::from_secs(10))
-                            .build();
-                        for job in worker_rx.iter() {
-                            let result =
-                                Self::perform_kroki_with_agent(&agent, &job.url, &job.payload);
-                            let _ = result_tx.send((job.key, result));
-                        }
-                    })
-                {
-                    eprintln!("Failed to start Kroki worker thread: {}", err);
-                }
-            }
-        }
-        #[cfg(not(feature = "mermaid-kroki"))]
-        let _ = &tx;
-        drop(job_rx);
         #[cfg(feature = "mermaid-quickjs")]
         let (mermaid_job_tx, mermaid_job_rx): (MermaidJobSender, MermaidJobReceiver) =
             bounded(Self::MAX_MERMAID_JOBS * 4);
@@ -254,11 +211,7 @@ impl MermaidRenderer {
         #[cfg(feature = "mermaid-quickjs")]
         Self::spawn_mermaid_workers(mermaid_job_rx, mermaid_result_tx);
         Self {
-            kroki_pending: RefCell::new(HashSet::new()),
-            kroki_svg_cache: RefCell::new(HashMap::new()),
-            kroki_errors: RefCell::new(HashMap::new()),
-            kroki_job_tx: job_tx,
-            kroki_rx: rx,
+            #[cfg(feature = "mermaid-quickjs")]
             mermaid_textures: RefCell::new(LruCache::new(Self::MERMAID_TEXTURE_CACHE_CAPACITY)),
             #[cfg(feature = "mermaid-quickjs")]
             mermaid_pending: RefCell::new(HashSet::new()),
@@ -279,18 +232,14 @@ impl MermaidRenderer {
 
     fn mermaid_renderer_preference() -> (MermaidRenderPreference, bool) {
         let has_embedded = cfg!(feature = "mermaid-quickjs");
-        let has_kroki = cfg!(feature = "mermaid-kroki");
         if let Ok(raw) = std::env::var("MDMDVIEW_MERMAID_RENDERER") {
             let normalized = raw.trim().to_ascii_lowercase();
             return match normalized.as_str() {
                 "off" => (MermaidRenderPreference::Off, true),
-                "kroki" => (MermaidRenderPreference::Kroki, true),
                 "embedded" => (MermaidRenderPreference::Embedded, true),
                 _ => {
                     if has_embedded {
                         (MermaidRenderPreference::Embedded, false)
-                    } else if has_kroki {
-                        (MermaidRenderPreference::Kroki, false)
                     } else {
                         (MermaidRenderPreference::Off, false)
                     }
@@ -299,17 +248,12 @@ impl MermaidRenderer {
         }
         if has_embedded {
             (MermaidRenderPreference::Embedded, false)
-        } else if has_kroki {
-            (MermaidRenderPreference::Kroki, false)
         } else {
             (MermaidRenderPreference::Off, false)
         }
     }
 
     pub(crate) fn has_pending(&self) -> bool {
-        if !self.kroki_pending.borrow().is_empty() {
-            return true;
-        }
         #[cfg(feature = "mermaid-quickjs")]
         {
             if !self.mermaid_pending.borrow().is_empty() {
@@ -326,8 +270,13 @@ impl MermaidRenderer {
         ui_scale: f32,
         code_font_size: f32,
     ) -> bool {
-        self.poll_kroki_results();
         let (preference, explicit) = Self::mermaid_renderer_preference();
+
+        #[cfg(not(feature = "mermaid-quickjs"))]
+        {
+            let _ = code;
+            let _ = ui_scale;
+        }
 
         if preference == MermaidRenderPreference::Off {
             egui::Frame::none()
@@ -337,14 +286,21 @@ impl MermaidRenderer {
                 .show(ui, |ui| {
                     ui.label(
                         RichText::new(
-                            "Mermaid rendering is disabled (MDMDVIEW_MERMAID_RENDERER=off).",
+                            "Mermaid rendering is disabled. Set MDMDVIEW_MERMAID_RENDERER=embedded to enable.",
                         )
                         .color(Color32::from_rgb(200, 160, 80))
                         .family(egui::FontFamily::Monospace)
                         .size(code_font_size),
                     );
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(code)
+                            .family(egui::FontFamily::Monospace)
+                            .size(code_font_size)
+                            .color(Color32::from_rgb(180, 180, 180)),
+                    );
                 });
-            return false;
+            return true;
         }
 
         if explicit
@@ -364,34 +320,42 @@ impl MermaidRenderer {
                         .family(egui::FontFamily::Monospace)
                         .size(code_font_size),
                     );
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(code)
+                            .family(egui::FontFamily::Monospace)
+                            .size(code_font_size)
+                            .color(Color32::from_rgb(180, 180, 180)),
+                    );
                 });
-            return false;
+            return true;
         }
 
         #[cfg(feature = "mermaid-quickjs")]
         {
-            let allow_kroki_fallback = matches!(preference, MermaidRenderPreference::Kroki)
-                || (!explicit && matches!(preference, MermaidRenderPreference::Embedded));
             if preference == MermaidRenderPreference::Embedded
                 && mermaid_embed::MERMAID_JS.is_empty()
             {
-                if !allow_kroki_fallback || !Self::kroki_enabled() {
-                    egui::Frame::none()
-                        .fill(Color32::from_rgb(25, 25, 25))
-                        .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
-                        .inner_margin(8.0)
-                        .show(ui, |ui| {
-                            ui.label(
-                                RichText::new(
-                                    "Mermaid rendering is unavailable (embedded JS missing).",
-                                )
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(25, 25, 25))
+                    .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("Mermaid rendering is unavailable (embedded JS missing).")
                                 .color(Color32::from_rgb(200, 160, 80))
                                 .family(egui::FontFamily::Monospace)
                                 .size(code_font_size),
-                            );
-                        });
-                    return false;
-                }
+                        );
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(code)
+                                .family(egui::FontFamily::Monospace)
+                                .size(code_font_size)
+                                .color(Color32::from_rgb(180, 180, 180)),
+                        );
+                    });
+                return true;
             } else if preference == MermaidRenderPreference::Embedded {
                 let svg_key = Self::hash_str(code);
                 let width_bucket = Self::width_bucket(ui.available_width());
@@ -419,46 +383,50 @@ impl MermaidRenderer {
                 let svg_error = self.mermaid_errors.borrow_mut().get(&svg_key);
                 let texture_error = self.mermaid_texture_errors.borrow_mut().get(&texture_key);
                 if let Some(err) = svg_error.or(texture_error) {
-                    if !allow_kroki_fallback || !Self::kroki_enabled() {
-                        egui::Frame::none()
-                            .fill(Color32::from_rgb(25, 25, 25))
-                            .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
-                            .inner_margin(8.0)
-                            .show(ui, |ui| {
-                                ui.label(
-                                    RichText::new("Mermaid render failed; showing source.")
-                                        .color(Color32::from_rgb(200, 160, 80)),
-                                );
-                                ui.label(
-                                    RichText::new(format!(
-                                        "Embedded bytes:{}\nHash:{:016x}\nError:{}",
-                                        mermaid_embed::MERMAID_JS.len(),
-                                        svg_key,
-                                        err
-                                    ))
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(25, 25, 25))
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                        .inner_margin(8.0)
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new("Mermaid render failed; showing source.")
+                                    .color(Color32::from_rgb(200, 160, 80)),
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "Embedded bytes:{}\nHash:{:016x}\nError:{}",
+                                    mermaid_embed::MERMAID_JS.len(),
+                                    svg_key,
+                                    err
+                                ))
+                                .family(egui::FontFamily::Monospace)
+                                .size(code_font_size)
+                                .color(Color32::from_rgb(180, 180, 180)),
+                            );
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new(code)
                                     .family(egui::FontFamily::Monospace)
                                     .size(code_font_size)
                                     .color(Color32::from_rgb(180, 180, 180)),
-                                );
-                            });
-                        return false;
-                    }
+                            );
+                        });
+                    return true;
                 } else {
                     let svg = self.mermaid_svg_cache.borrow_mut().get(&svg_key);
                     let pending = self.mermaid_pending.borrow().contains(&texture_key);
                     let mut waiting_for_slot = false;
-                    let mut local_active = true;
 
                     if !pending {
-                        let (code, svg) = match svg {
+                        let (request_code, request_svg) = match svg {
                             Some(svg) => (None, Some(svg)),
                             None => (Some(code.to_string()), None),
                         };
                         let request = MermaidRequest {
                             svg_key,
                             texture_key: texture_key.clone(),
-                            code,
-                            svg,
+                            code: request_code,
+                            svg: request_svg,
                             width_bucket,
                             scale_bucket,
                             bg,
@@ -478,223 +446,69 @@ impl MermaidRenderer {
                                 self.mermaid_errors
                                     .borrow_mut()
                                     .insert(svg_key, "Mermaid worker pool unavailable".to_string());
-                                if !allow_kroki_fallback || !Self::kroki_enabled() {
-                                    egui::Frame::none()
-                                        .fill(Color32::from_rgb(25, 25, 25))
-                                        .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
-                                        .inner_margin(8.0)
-                                        .show(ui, |ui| {
-                                            ui.label(
-                                                RichText::new("Mermaid worker pool unavailable.")
-                                                    .color(Color32::from_rgb(200, 160, 80))
-                                                    .family(egui::FontFamily::Monospace)
-                                                    .size(code_font_size),
-                                            );
-                                        });
-                                    return false;
-                                }
-                                local_active = false;
+                                egui::Frame::none()
+                                    .fill(Color32::from_rgb(25, 25, 25))
+                                    .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                                    .inner_margin(8.0)
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new("Mermaid worker pool unavailable.")
+                                                .color(Color32::from_rgb(200, 160, 80))
+                                                .family(egui::FontFamily::Monospace)
+                                                .size(code_font_size),
+                                        );
+                                        ui.add_space(6.0);
+                                        ui.label(
+                                            RichText::new(code)
+                                                .family(egui::FontFamily::Monospace)
+                                                .size(code_font_size)
+                                                .color(Color32::from_rgb(180, 180, 180)),
+                                        );
+                                    });
+                                return true;
                             }
                         }
                     }
 
-                    if local_active {
-                        let inflight = self.mermaid_pending.borrow().len();
-                        egui::Frame::none()
-                            .fill(Color32::from_rgb(25, 25, 25))
-                            .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
-                            .inner_margin(8.0)
-                            .show(ui, |ui| {
-                                if waiting_for_slot {
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "Mermaid workers busy ({}/{}) - request queued.",
-                                            inflight,
-                                            Self::MAX_MERMAID_JOBS
-                                        ))
-                                        .color(Color32::from_rgb(200, 160, 80))
-                                        .family(egui::FontFamily::Monospace)
-                                        .size(code_font_size),
-                                    );
-                                } else {
-                                    ui.label(
-                                        RichText::new("Rendering diagram locally...")
-                                            .color(Color32::from_rgb(160, 200, 240)),
-                                    );
-                                }
-                            });
-                        return true;
-                    }
+                    let inflight = self.mermaid_pending.borrow().len();
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(25, 25, 25))
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                        .inner_margin(8.0)
+                        .show(ui, |ui| {
+                            if waiting_for_slot {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Mermaid workers busy ({}/{}) - request queued.",
+                                        inflight,
+                                        Self::MAX_MERMAID_JOBS
+                                    ))
+                                    .color(Color32::from_rgb(200, 160, 80))
+                                    .family(egui::FontFamily::Monospace)
+                                    .size(code_font_size),
+                                );
+                            } else {
+                                ui.label(
+                                    RichText::new("Rendering diagram locally...")
+                                        .color(Color32::from_rgb(160, 200, 240)),
+                                );
+                            }
+                        });
+                    return true;
                 }
             }
         }
-
-        let key = Self::hash_str(code);
-
-        if !cfg!(feature = "mermaid-kroki") {
-            egui::Frame::none()
-                .fill(Color32::from_rgb(25, 25, 25))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
-                .inner_margin(8.0)
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(
-                            "Mermaid rendering via Kroki is unavailable (feature not enabled).",
-                        )
-                        .color(Color32::from_rgb(200, 160, 80))
-                        .family(egui::FontFamily::Monospace)
-                        .size(code_font_size),
-                    );
-                });
-            return false;
-        }
-
-        if !Self::kroki_enabled() {
-            egui::Frame::none()
-                .fill(Color32::from_rgb(25, 25, 25))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
-                .inner_margin(8.0)
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new("Mermaid rendering via Kroki is disabled. Set MDMDVIEW_ENABLE_KROKI=1 to enable network rendering.")
-                            .color(Color32::from_rgb(200, 160, 80))
-                            .family(egui::FontFamily::Monospace)
-                            .size(code_font_size),
-                    );
-                });
-            return false;
-        }
-
-        if let Some(img_bytes) = self.kroki_svg_cache.borrow().get(&key) {
-            let width_bucket = Self::width_bucket(ui.available_width());
-            let scale_bucket = Self::scale_bucket(ui_scale);
-            let bg = Self::mermaid_bg_fill();
-            let cache_key = Self::texture_key(key, width_bucket, scale_bucket, bg);
-            if let Some(entry) = self.mermaid_textures.borrow_mut().get(&cache_key) {
-                let tex = entry.texture.clone();
-                let (tw, th) = (entry.size[0] as f32, entry.size[1] as f32);
-                let available_w = ui.available_width().max(1.0);
-                let scaled_w = tw * ui_scale;
-                let scale = if scaled_w > available_w {
-                    (available_w / tw).clamp(0.01, 4.0)
-                } else {
-                    ui_scale
-                };
-                let size = egui::vec2((tw * scale).round(), (th * scale).round());
-                ui.add(egui::Image::new(&tex).fit_to_exact_size(size));
-                return true;
-            }
-
-            if let Some((img, w, h)) = image_decode::bytes_to_color_image_guess(img_bytes, bg) {
-                let tex =
-                    ui.ctx()
-                        .load_texture(cache_key.clone(), img, egui::TextureOptions::LINEAR);
-                self.store_mermaid_texture(&cache_key, tex.clone(), [w, h]);
-                let (tw, th) = (w as f32, h as f32);
-                let available_w = ui.available_width().max(1.0);
-                let scaled_w = tw * ui_scale;
-                let scale = if scaled_w > available_w {
-                    (available_w / tw).clamp(0.01, 4.0)
-                } else {
-                    ui_scale
-                };
-                let size = egui::vec2((tw * scale).round(), (th * scale).round());
-                ui.add(egui::Image::new(&tex).fit_to_exact_size(size));
-                return true;
-            } else {
-                self.kroki_errors
-                    .borrow_mut()
-                    .insert(key, "Failed to decode diagram bytes".to_string());
-            }
-        }
-
-        if let Some(err) = self.kroki_errors.borrow().get(&key) {
-            egui::Frame::none()
-                .fill(Color32::from_rgb(25, 25, 25))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
-                .inner_margin(8.0)
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(format!(
-                            "Mermaid render failed via Kroki; showing source.\n{}",
-                            err
-                        ))
-                        .color(Color32::from_rgb(200, 160, 80)),
-                    );
-                });
-            return false;
-        }
-
-        let should_schedule = {
-            let pending = self.kroki_pending.borrow();
-            !pending.contains(&key)
-        };
-        let waiting_for_slot = if should_schedule {
-            let inflight_before = {
-                let pending = self.kroki_pending.borrow();
-                pending.len()
-            };
-            match self.spawn_kroki_job(key, code) {
-                Ok(()) => {
-                    self.kroki_pending.borrow_mut().insert(key);
-                    ui.ctx().request_repaint();
-                    inflight_before >= Self::MAX_KROKI_JOBS
-                }
-                Err(KrokiEnqueueError::QueueFull) => {
-                    ui.ctx().request_repaint();
-                    true
-                }
-                Err(KrokiEnqueueError::Disconnected) => {
-                    self.kroki_errors
-                        .borrow_mut()
-                        .insert(key, "Mermaid worker pool unavailable".to_string());
-                    return false;
-                }
-            }
-        } else {
-            let pending = self.kroki_pending.borrow();
-            pending.len() >= Self::MAX_KROKI_JOBS
-        };
-
-        let inflight_count = self.kroki_pending.borrow().len();
-
-        egui::Frame::none()
-            .fill(Color32::from_rgb(25, 25, 25))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
-            .inner_margin(8.0)
-            .show(ui, |ui| {
-                let url = self.kroki_base_url();
-                if waiting_for_slot {
-                    ui.label(
-                        RichText::new(format!(
-                            "Mermaid workers busy ({}/{}) - request queued.",
-                            inflight_count,
-                            Self::MAX_KROKI_JOBS
-                        ))
-                        .color(Color32::from_rgb(200, 160, 80))
-                        .family(egui::FontFamily::Monospace)
-                        .size(code_font_size),
-                    );
-                    ui.label(
-                        RichText::new(format!("Queue target: {}", url))
-                            .color(Color32::from_rgb(160, 200, 240)),
-                    );
-                } else {
-                    ui.label(
-                        RichText::new(format!("Rendering diagram via Kroki...\n{}", url))
-                            .color(Color32::from_rgb(160, 200, 240)),
-                    );
-                }
-            });
-        true
+        false
     }
 
+    #[cfg(any(test, feature = "mermaid-quickjs"))]
     fn width_bucket(available_width: f32) -> u32 {
         let step = Self::MERMAID_WIDTH_BUCKET_STEP;
         let width = available_width.max(1.0).ceil() as u32;
         width.div_ceil(step) * step
     }
 
+    #[cfg(any(test, feature = "mermaid-quickjs"))]
     fn scale_bucket(ui_scale: f32) -> u32 {
         let clamped = ui_scale.clamp(0.5, 4.0);
         (clamped * Self::MERMAID_SCALE_BUCKET_FACTOR).round() as u32
@@ -706,6 +520,7 @@ impl MermaidRenderer {
         scale.clamp(0.5, 4.0)
     }
 
+    #[cfg(any(test, feature = "mermaid-quickjs"))]
     fn mermaid_bg_key(bg: Option<[u8; 4]>) -> String {
         match bg {
             Some([r, g, b, a]) => format!("{:02x}{:02x}{:02x}{:02x}", r, g, b, a),
@@ -713,6 +528,7 @@ impl MermaidRenderer {
         }
     }
 
+    #[cfg(any(test, feature = "mermaid-quickjs"))]
     fn texture_key(
         svg_key: u64,
         width_bucket: u32,
@@ -858,103 +674,14 @@ impl MermaidRenderer {
         drop(job_rx);
     }
 
+    #[cfg(feature = "mermaid-quickjs")]
     fn store_mermaid_texture(&self, key: &str, texture: egui::TextureHandle, size: [u32; 2]) {
         self.mermaid_textures
             .borrow_mut()
             .insert(key.to_string(), MermaidTextureEntry { texture, size });
     }
 
-    fn poll_kroki_results(&self) {
-        loop {
-            match self.kroki_rx.try_recv() {
-                Ok((key, Ok(svg))) => {
-                    self.kroki_svg_cache.borrow_mut().insert(key, svg);
-                    self.kroki_pending.borrow_mut().remove(&key);
-                }
-                Ok((key, Err(err))) => {
-                    self.kroki_errors.borrow_mut().insert(key, err);
-                    self.kroki_pending.borrow_mut().remove(&key);
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-            }
-        }
-    }
-
-    #[cfg(feature = "mermaid-kroki")]
-    fn kroki_enabled() -> bool {
-        match std::env::var("MDMDVIEW_ENABLE_KROKI") {
-            Ok(value) => {
-                let normalized = value.trim().to_ascii_lowercase();
-                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-            }
-            Err(_) => false,
-        }
-    }
-
-    #[cfg(not(feature = "mermaid-kroki"))]
-    fn kroki_enabled() -> bool {
-        false
-    }
-
-    #[cfg(test)]
-    fn kroki_enabled_for_tests() -> bool {
-        Self::kroki_enabled()
-    }
-
-    fn kroki_base_url(&self) -> String {
-        std::env::var("MDMDVIEW_KROKI_URL").unwrap_or_else(|_| "https://kroki.io".to_string())
-    }
-
-    #[cfg(all(feature = "mermaid-kroki", not(test)))]
-    fn perform_kroki_with_agent(
-        agent: &ureq::Agent,
-        url: &str,
-        payload: &str,
-    ) -> Result<Vec<u8>, String> {
-        let resp = agent
-            .post(url)
-            .set("Content-Type", "text/plain")
-            .send_string(payload)
-            .map_err(|e| format!("ureq error: {}", e))?;
-        if resp.status() >= 200 && resp.status() < 300 {
-            let mut bytes: Vec<u8> = Vec::new();
-            let mut reader = resp.into_reader();
-            use std::io::Read as _;
-            reader
-                .read_to_end(&mut bytes)
-                .map_err(|e| format!("read body: {}", e))?;
-            if bytes.is_empty() {
-                return Err("Empty SVG from Kroki".to_string());
-            }
-            Ok(bytes)
-        } else {
-            Err(format!("HTTP {} from Kroki", resp.status()))
-        }
-    }
-
-    #[cfg(all(feature = "mermaid-kroki", test))]
-    fn perform_kroki_with_agent(
-        _agent: &ureq::Agent,
-        _url: &str,
-        _payload: &str,
-    ) -> Result<Vec<u8>, String> {
-        Err("Kroki disabled in tests".to_string())
-    }
-
-    fn spawn_kroki_job(&self, key: u64, code: &str) -> Result<(), KrokiEnqueueError> {
-        let url = format!("{}/mermaid/png", self.kroki_base_url());
-        let payload = self.wrap_mermaid_theme(code);
-        match self
-            .kroki_job_tx
-            .try_send(KrokiRequest { key, url, payload })
-        {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(KrokiEnqueueError::QueueFull),
-            Err(TrySendError::Disconnected(_)) => Err(KrokiEnqueueError::Disconnected),
-        }
-    }
-
+    #[cfg(feature = "mermaid-quickjs")]
     fn mermaid_theme_values() -> MermaidThemeValues {
         let def_main_bkg = "#FFF8DB";
         let def_primary = "#D7EEFF";
@@ -1114,51 +841,7 @@ impl MermaidRenderer {
         out
     }
 
-    fn wrap_mermaid_theme(&self, code: &str) -> String {
-        if code.contains("%%{") && code.contains("}%%") && code.contains("init") {
-            return code.to_string();
-        }
-        let theme = Self::mermaid_theme_values();
-        let theme = format!(
-            concat!(
-                "%%{{init: {{\"theme\": \"{}\", \"themeVariables\": {{",
-                "\"background\": \"{}\", ",
-                "\"mainBkg\": \"{}\", ",
-                "\"textColor\": \"{}\", ",
-                "\"titleColor\": \"{}\", ",
-                "\"primaryColor\": \"{}\", ",
-                "\"primaryBorderColor\": \"{}\", ",
-                "\"primaryTextColor\": \"{}\", ",
-                "\"secondaryColor\": \"{}\", ",
-                "\"tertiaryColor\": \"{}\", ",
-                "\"lineColor\": \"{}\", ",
-                "\"defaultLinkColor\": \"{}\", ",
-                "\"clusterBkg\": \"{}\", ",
-                "\"clusterBorder\": \"{}\", ",
-                "\"labelBackground\": \"{}\", ",
-                "\"edgeLabelBackground\": \"{}\"",
-                "}} }}%%\n"
-            ),
-            theme.theme_name,
-            theme.main_bkg,
-            theme.main_bkg,
-            theme.text,
-            theme.title,
-            theme.primary,
-            theme.primary_border,
-            theme.primary_text,
-            theme.secondary,
-            theme.tertiary,
-            theme.line,
-            theme.default_link,
-            theme.cluster_bkg,
-            theme.cluster_border,
-            theme.label_bg,
-            theme.edge_label_bg
-        );
-        format!("{}{}", theme, code)
-    }
-
+    #[cfg(any(test, feature = "mermaid-quickjs"))]
     fn mermaid_bg_fill() -> Option<[u8; 4]> {
         if let Ok(hex) = std::env::var("MDMDVIEW_MERMAID_BG_COLOR") {
             if let Some(rgba) = Self::parse_hex_color(&hex) {
@@ -1178,6 +861,7 @@ impl MermaidRenderer {
         }
     }
 
+    #[cfg(any(test, feature = "mermaid-quickjs"))]
     fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
         let t = s.trim();
         let hex = t.strip_prefix('#').unwrap_or(t);
@@ -1199,6 +883,7 @@ impl MermaidRenderer {
         Some([r, g, b, a])
     }
 
+    #[cfg(any(test, feature = "mermaid-quickjs"))]
     fn hash_str(s: &str) -> u64 {
         let mut h = DefaultHasher::new();
         s.hash(&mut h);
@@ -1217,6 +902,18 @@ struct MermaidWorker {
 impl MermaidWorker {
     const MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
     const STACK_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+
+    // DOMPurify expects a real browser DOM; stub sanitize for the QuickJS shim.
+    fn patch_mermaid_js(js: &str) -> String {
+        const TARGET: &str = "var hD=wRe();";
+        const PATCH: &str =
+            "var hD=wRe();if(!hD||typeof hD.sanitize!==\"function\"){hD={sanitize:function(html){return String(html);},addHook:function(){},removeHook:function(){},removeHooks:function(){},removeAllHooks:function(){},isSupported:true};}";
+        if js.contains(TARGET) {
+            js.replacen(TARGET, PATCH, 1)
+        } else {
+            js.to_string()
+        }
+    }
 
     fn format_js_error(ctx: &rquickjs::Ctx<'_>, err: rquickjs::Error) -> String {
         if let rquickjs::Error::Exception = err {
@@ -1282,6 +979,7 @@ impl MermaidWorker {
         let engine = MermaidEngine { rt, ctx };
         let js = std::str::from_utf8(mermaid_embed::MERMAID_JS)
             .map_err(|_| "Mermaid JS is not valid UTF-8".to_string())?;
+        let js = Self::patch_mermaid_js(js);
         let init_result: Result<(), String> = engine.ctx.with(|ctx| {
             let eval = |label: &str, source: &str| -> Result<(), String> {
                 ctx.eval::<(), _>(source).map_err(|err| {
@@ -1289,7 +987,7 @@ impl MermaidWorker {
                 })
             };
             eval("Mermaid DOM shim", MERMAID_DOM_SHIM)?;
-            eval("Mermaid JS", js)?;
+            eval("Mermaid JS", &js)?;
             eval("Mermaid init", MERMAID_INIT_SNIPPET)?;
             Ok(())
         });
@@ -1503,27 +1201,96 @@ function __mdmdview_bbox(el) {
   var m = __mdmdview_measure_text(text, size);
   return { x: 0, y: 0, width: m.width, height: m.height };
 }
+function __mdmdview_escape_text(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+function __mdmdview_escape_attr(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;');
+}
+function __mdmdview_serialize_attrs(node) {
+  var out = '';
+  if (!node || !node.attributes) { return out; }
+  for (var key in node.attributes) {
+    if (!Object.prototype.hasOwnProperty.call(node.attributes, key)) { continue; }
+    var val = node.attributes[key];
+    if (val === null || val === undefined) { continue; }
+    out += ' ' + key + '="' + __mdmdview_escape_attr(val) + '"';
+  }
+  return out;
+}
+function __mdmdview_serialize(node) {
+  if (!node) { return ''; }
+  if (node.tagName === '#text') {
+    return __mdmdview_escape_text(node.textContent || '');
+  }
+  var tag = node.tagName || '';
+  var attrs = __mdmdview_serialize_attrs(node);
+  var content = '';
+  if (node.children && node.children.length) {
+    for (var i = 0; i < node.children.length; i++) {
+      content += __mdmdview_serialize(node.children[i]);
+    }
+  } else if (node.textContent) {
+    content = __mdmdview_escape_text(node.textContent);
+  }
+  return '<' + tag + attrs + '>' + content + '</' + tag + '>';
+}
+function __mdmdview_serialize_children(node) {
+  if (!node || !node.children) { return ''; }
+  var content = '';
+  for (var i = 0; i < node.children.length; i++) {
+    content += __mdmdview_serialize(node.children[i]);
+  }
+  return content;
+}
+function __mdmdview_make_style() {
+  var style = {};
+  style.setProperty = function(key, value) { style[key] = String(value); };
+  style.removeProperty = function(key) { delete style[key]; };
+  style.getPropertyValue = function(key) {
+    return Object.prototype.hasOwnProperty.call(style, key) ? style[key] : '';
+  };
+  return style;
+}
 function __mdmdview_make_element(tag, ownerDoc, ns) {
   var doc = ownerDoc;
   if (!doc && typeof document !== 'undefined' && document) { doc = document; }
+  var parent = null;
   var node = {
     tagName: tag,
     namespaceURI: ns || null,
-    parentNode: null,
     firstChild: null,
-    style: {},
+    style: __mdmdview_make_style(),
     children: [],
+    childNodes: [],
     attributes: {},
     textContent: '',
-    innerHTML: '',
-    setAttribute: function(key, value) { this.attributes[key] = String(value); },
+    setAttribute: function(key, value) {
+      var v = String(value);
+      this.attributes[key] = v;
+      if (key === 'id') { this.id = v; }
+    },
+    setAttributeNS: function(ns, key, value) {
+      var v = String(value);
+      this.attributes[key] = v;
+      if (key === 'id') { this.id = v; }
+    },
     getAttribute: function(key) {
       return Object.prototype.hasOwnProperty.call(this.attributes, key)
         ? this.attributes[key]
         : null;
     },
+    getAttributeNS: function(ns, key) { return this.getAttribute(key); },
+    removeAttribute: function(key) { delete this.attributes[key]; },
+    removeAttributeNS: function(ns, key) { delete this.attributes[key]; },
     appendChild: function(child) {
       this.children.push(child);
+      this.childNodes = this.children;
       this.firstChild = this.children[0] || null;
       if (child && typeof child === 'object') {
         child.parentNode = this;
@@ -1531,10 +1298,21 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
       }
       return child;
     },
+    removeChild: function(child) {
+      var idx = this.children.indexOf(child);
+      if (idx >= 0) {
+        this.children.splice(idx, 1);
+        this.childNodes = this.children;
+      }
+      this.firstChild = this.children[0] || null;
+      return child;
+    },
+    hasChildNodes: function() { return this.children.length > 0; },
     insertBefore: function(child, before) {
       var idx = this.children.indexOf(before);
       if (idx < 0) { this.children.push(child); }
       else { this.children.splice(idx, 0, child); }
+      this.childNodes = this.children;
       this.firstChild = this.children[0] || null;
       if (child && typeof child === 'object') {
         child.parentNode = this;
@@ -1543,11 +1321,41 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
       return child;
     },
     remove: function() { return null; },
-    querySelector: function() { return null; },
+    querySelector: function(sel) { return __mdmdview_query_selector(this, sel); },
+    querySelectorAll: function(sel) { return __mdmdview_query_selector_all(this, sel); },
+    cloneNode: function(deep) {
+      var copy = __mdmdview_make_element(this.tagName, this.ownerDocument, this.namespaceURI);
+      copy.textContent = this.textContent;
+      copy.innerHTML = this.innerHTML;
+      for (var key in this.attributes) {
+        if (!Object.prototype.hasOwnProperty.call(this.attributes, key)) { continue; }
+        copy.attributes[key] = this.attributes[key];
+      }
+      if (deep && this.children && this.children.length) {
+        for (var i = 0; i < this.children.length; i++) {
+          copy.appendChild(this.children[i].cloneNode(true));
+        }
+      }
+      return copy;
+    },
     getBBox: function() { return __mdmdview_bbox(this); },
     getBoundingClientRect: function() { return __mdmdview_bbox(this); },
     getComputedTextLength: function() { return __mdmdview_bbox(this).width; }
   };
+  Object.defineProperty(node, 'innerHTML', {
+    get: function() { return __mdmdview_serialize_children(this); },
+    set: function(value) {
+      this.children = [];
+      this.childNodes = this.children;
+      this.firstChild = null;
+      this.textContent = value ? String(value) : '';
+    },
+    configurable: true
+  });
+  Object.defineProperty(node, 'outerHTML', {
+    get: function() { return __mdmdview_serialize(this); },
+    configurable: true
+  });
   Object.defineProperty(node, 'ownerDocument', {
     get: function() {
       if (doc) { return doc; }
@@ -1557,10 +1365,44 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
     set: function(value) { doc = value; },
     configurable: true
   });
+  Object.defineProperty(node, 'parentNode', {
+    get: function() {
+      if (parent) { return parent; }
+      if (typeof document !== 'undefined' && document && document.body) { return document.body; }
+      return null;
+    },
+    set: function(value) { parent = value; },
+    configurable: true
+  });
+  Object.defineProperty(node, 'nextSibling', {
+    get: function() {
+      var p = this.parentNode;
+      if (!p || !p.children) { return null; }
+      var idx = p.children.indexOf(this);
+      return idx >= 0 && idx + 1 < p.children.length ? p.children[idx + 1] : null;
+    },
+    configurable: true
+  });
+  Object.defineProperty(node, 'previousSibling', {
+    get: function() {
+      var p = this.parentNode;
+      if (!p || !p.children) { return null; }
+      var idx = p.children.indexOf(this);
+      return idx > 0 ? p.children[idx - 1] : null;
+    },
+    configurable: true
+  });
+  Object.defineProperty(node, 'firstElementChild', {
+    get: function() {
+      return this.children && this.children.length ? this.children[0] : null;
+    },
+    configurable: true
+  });
   return node;
 }
 function __mdmdview_find_by_id(node, id) {
   if (!node || !id) { return null; }
+  if (node.id === id) { return node; }
   if (node.attributes && node.attributes.id === id) { return node; }
   if (!node.children) { return null; }
   for (var i = 0; i < node.children.length; i++) {
@@ -1569,8 +1411,234 @@ function __mdmdview_find_by_id(node, id) {
   }
   return null;
 }
+function __mdmdview_find_by_tag(node, tag, matches) {
+  if (!node || !tag) { return; }
+  var name = (node.tagName || '').toLowerCase();
+  if (name === tag) { matches.push(node); }
+  if (!node.children) { return; }
+  for (var i = 0; i < node.children.length; i++) {
+    __mdmdview_find_by_tag(node.children[i], tag, matches);
+  }
+}
+function __mdmdview_has_class(node, className) {
+  if (!node || !className) { return false; }
+  var cls = node.attributes && node.attributes['class'];
+  if (!cls) { return false; }
+  var parts = String(cls).split(/\s+/);
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i] === className) { return true; }
+  }
+  return false;
+}
+function __mdmdview_find_by_class(node, className, matches) {
+  if (!node || !className) { return; }
+  if (__mdmdview_has_class(node, className)) { matches.push(node); }
+  if (!node.children) { return; }
+  for (var i = 0; i < node.children.length; i++) {
+    __mdmdview_find_by_class(node.children[i], className, matches);
+  }
+}
+function __mdmdview_get_attr(node, name) {
+  if (!node || !name) { return null; }
+  if (node.getAttribute) {
+    var val = node.getAttribute(name);
+    if (val !== null && val !== undefined) { return String(val); }
+  }
+  if (node.attributes && Object.prototype.hasOwnProperty.call(node.attributes, name)) {
+    return String(node.attributes[name]);
+  }
+  return null;
+}
+function __mdmdview_parse_attr_selector(raw) {
+  var match = raw.match(/^\[\s*([^\]=\s]+)\s*=\s*["']?([^\"'\]]+)["']?\s*\]$/);
+  if (!match) { return null; }
+  return { name: match[1], value: match[2] };
+}
+function __mdmdview_find_by_attr(node, name, value, matches) {
+  if (!node || !name) { return null; }
+  var attr = __mdmdview_get_attr(node, name);
+  if (attr !== null && String(attr) === String(value)) {
+    if (matches) { matches.push(node); }
+    else { return node; }
+  }
+  if (!node.children) { return matches ? null : null; }
+  for (var i = 0; i < node.children.length; i++) {
+    var hit = __mdmdview_find_by_attr(node.children[i], name, value, matches);
+    if (!matches && hit) { return hit; }
+  }
+  return matches ? null : null;
+}
+function __mdmdview_matches_simple(node, raw) {
+  if (!node || !raw) { return false; }
+  var attr = __mdmdview_parse_attr_selector(raw);
+  if (attr) {
+    var attrVal = __mdmdview_get_attr(node, attr.name);
+    return attrVal !== null && String(attrVal) === String(attr.value);
+  }
+  if (raw[0] === '#') {
+    var id = raw.slice(1);
+    return node.id === id || __mdmdview_get_attr(node, 'id') === id;
+  }
+  if (raw[0] === '.') {
+    return __mdmdview_has_class(node, raw.slice(1));
+  }
+  var hashIdx = raw.indexOf('#');
+  if (hashIdx > 0) {
+    var tagName = raw.slice(0, hashIdx).toLowerCase();
+    var tagId = raw.slice(hashIdx + 1);
+    return (node.tagName || '').toLowerCase() === tagName
+      && (node.id === tagId || __mdmdview_get_attr(node, 'id') === tagId);
+  }
+  var dotIdx = raw.indexOf('.');
+  if (dotIdx > 0) {
+    var tag = raw.slice(0, dotIdx).toLowerCase();
+    var cls = raw.slice(dotIdx + 1);
+    return (node.tagName || '').toLowerCase() === tag && __mdmdview_has_class(node, cls);
+  }
+  return (node.tagName || '').toLowerCase() === raw.toLowerCase();
+}
+function __mdmdview_matches_selector(node, sel) {
+  if (!node || !sel) { return false; }
+  var raw = String(sel).trim();
+  if (!raw) { return false; }
+  var parts = raw.split(/\s+/).filter(function(part) { return part.length > 0; });
+  if (parts.length <= 1) { return __mdmdview_matches_simple(node, raw); }
+  var idx = parts.length - 1;
+  var current = node;
+  while (current && idx >= 0) {
+    if (__mdmdview_matches_simple(current, parts[idx])) {
+      idx -= 1;
+    }
+    current = current.parentNode;
+  }
+  return idx < 0;
+}
+function __mdmdview_query_selector(node, sel) {
+  if (!sel) { return null; }
+  var raw = String(sel).trim();
+  if (!raw) { return null; }
+  if (node && !node.tagName && node._parent) { node = node._parent; }
+  if ((!node || !node.children) && document && document.body) { node = document.body; }
+  var chain = raw.split(/\s+/).filter(function(part) { return part.length > 0; });
+  if (chain.length > 1) {
+    var current = node;
+    for (var c = 0; c < chain.length; c++) {
+      current = __mdmdview_query_selector(current, chain[c]);
+      if (!current) { return null; }
+    }
+    return current;
+  }
+  var result = null;
+  var attrSel = __mdmdview_parse_attr_selector(raw);
+  if (attrSel) {
+    result = __mdmdview_find_by_attr(node, attrSel.name, attrSel.value);
+  } else if (raw[0] === '#') {
+    result = __mdmdview_find_by_id(node, raw.slice(1));
+  } else if (raw[0] === '.') {
+    var className = raw.slice(1);
+    var classMatches = [];
+    __mdmdview_find_by_class(node, className, classMatches);
+    result = classMatches.length ? classMatches[0] : null;
+  } else if (raw.indexOf('#') > 0) {
+    var hashParts = raw.split('#');
+    var hashTag = hashParts[0].toLowerCase();
+    var hashId = hashParts[1];
+    var hashMatches = [];
+    __mdmdview_find_by_tag(node, hashTag, hashMatches);
+    for (var h = 0; h < hashMatches.length; h++) {
+      if (hashMatches[h].id === hashId || __mdmdview_get_attr(hashMatches[h], 'id') === hashId) {
+        result = hashMatches[h];
+        break;
+      }
+    }
+  } else if (raw.indexOf('.') > 0) {
+    var pieces = raw.split('.');
+    var tagName = pieces[0].toLowerCase();
+    var clsName = pieces[1];
+    var tagMatches = [];
+    __mdmdview_find_by_tag(node, tagName, tagMatches);
+    for (var t = 0; t < tagMatches.length; t++) {
+      if (__mdmdview_has_class(tagMatches[t], clsName)) {
+        result = tagMatches[t];
+        break;
+      }
+    }
+  } else {
+    var tag = raw.toLowerCase();
+    var matches = [];
+    __mdmdview_find_by_tag(node, tag, matches);
+    result = matches.length ? matches[0] : null;
+  }
+  return result;
+}
+function __mdmdview_query_selector_all(node, sel) {
+  if (!sel) { return []; }
+  var raw = String(sel).trim();
+  if (!raw) { return []; }
+  if (node && !node.tagName && node._parent) { node = node._parent; }
+  if ((!node || !node.children) && document && document.body) { node = document.body; }
+  var chain = raw.split(/\s+/).filter(function(part) { return part.length > 0; });
+  if (chain.length > 1) {
+    var current = node;
+    for (var c = 0; c < chain.length; c++) {
+      current = __mdmdview_query_selector(current, chain[c]);
+      if (!current) { return []; }
+    }
+    return [current];
+  }
+  var attrSel = __mdmdview_parse_attr_selector(raw);
+  if (attrSel) {
+    var attrMatches = [];
+    __mdmdview_find_by_attr(node, attrSel.name, attrSel.value, attrMatches);
+    return attrMatches;
+  }
+  if (raw[0] === '#') {
+    var hit = __mdmdview_find_by_id(node, raw.slice(1));
+    return hit ? [hit] : [];
+  }
+  if (raw[0] === '.') {
+    var className = raw.slice(1);
+    var classMatches = [];
+    __mdmdview_find_by_class(node, className, classMatches);
+    return classMatches;
+  }
+  if (raw.indexOf('#') > 0) {
+    var hashParts = raw.split('#');
+    var hashTag = hashParts[0].toLowerCase();
+    var hashId = hashParts[1];
+    var hashMatches = [];
+    __mdmdview_find_by_tag(node, hashTag, hashMatches);
+    var hashHits = [];
+    for (var h = 0; h < hashMatches.length; h++) {
+      if (hashMatches[h].id === hashId || __mdmdview_get_attr(hashMatches[h], 'id') === hashId) {
+        hashHits.push(hashMatches[h]);
+      }
+    }
+    return hashHits;
+  }
+  if (raw.indexOf('.') > 0) {
+    var pieces = raw.split('.');
+    var tagName = pieces[0].toLowerCase();
+    var clsName = pieces[1];
+    var tagMatches = [];
+    __mdmdview_find_by_tag(node, tagName, tagMatches);
+    var hits = [];
+    for (var t = 0; t < tagMatches.length; t++) {
+      if (__mdmdview_has_class(tagMatches[t], clsName)) {
+        hits.push(tagMatches[t]);
+      }
+    }
+    return hits;
+  }
+  var tag = raw.toLowerCase();
+  var matches = [];
+  __mdmdview_find_by_tag(node, tag, matches);
+  return matches;
+}
 var document = {
   body: __mdmdview_make_element('body'),
+  children: [],
+  childNodes: [],
   createElement: function(tag) { return __mdmdview_make_element(tag, document); },
   createElementNS: function(ns, tag) { return __mdmdview_make_element(tag, document, ns); },
   createTextNode: function(text) {
@@ -1578,21 +1646,28 @@ var document = {
     node.textContent = text || '';
     return node;
   },
-  getElementById: function(id) { return __mdmdview_find_by_id(document.body, id); },
+  getElementById: function(id) { return __mdmdview_find_by_id(document, id); },
   querySelector: function(sel) {
-    if (sel === 'body') { return document.body; }
-    if (sel && sel[0] === '#') { return document.getElementById(sel.slice(1)); }
-    return null;
+    var raw = String(sel || '').trim().toLowerCase();
+    var result = raw === 'body' ? document.body : __mdmdview_query_selector(document, sel);
+    return result;
   },
   querySelectorAll: function(sel) {
-    var hit = document.querySelector(sel);
-    return hit ? [hit] : [];
+    var raw = String(sel || '').trim().toLowerCase();
+    var result = raw === 'body' ? [document.body] : __mdmdview_query_selector_all(document, sel);
+    return result;
   },
+  appendChild: function(child) { return document.body.appendChild(child); },
+  insertBefore: function(child, before) { return document.body.insertBefore(child, before); },
+  removeChild: function(child) { return document.body.removeChild(child); },
+  hasChildNodes: function() { return document.body.hasChildNodes(); },
   addEventListener: function() {}
 };
 window.document = document;
 document.body.ownerDocument = document;
 document.body.parentNode = document;
+document.children = [document.body];
+document.childNodes = document.children;
 document.defaultView = window;
 document.ownerDocument = document;
 document.documentElement = document.body;
@@ -1601,6 +1676,11 @@ document.documentElement.namespaceURI = 'http://www.w3.org/1999/xhtml';
 document.namespaceURI = document.body.namespaceURI;
 window.ownerDocument = document;
 window.namespaceURI = document.body.namespaceURI;
+if (!Object.hasOwn) {
+  Object.hasOwn = function(obj, prop) {
+    return Object.prototype.hasOwnProperty.call(obj, prop);
+  };
+}
 if (!Object.prototype.hasOwnProperty('ownerDocument')) {
   Object.defineProperty(Object.prototype, 'ownerDocument', {
     get: function() { return document || null; },
@@ -1610,28 +1690,109 @@ if (!Object.prototype.hasOwnProperty('ownerDocument')) {
     configurable: true
   });
 }
+if (!Object.prototype.hasOwnProperty('parentNode')) {
+  Object.defineProperty(Object.prototype, 'parentNode', {
+    get: function() {
+      if (this && this.__mdmdview_parent) { return this.__mdmdview_parent; }
+      if (typeof document !== 'undefined' && document && document.body) { return document.body; }
+      return null;
+    },
+    set: function(value) {
+      this.__mdmdview_parent = value;
+    },
+    configurable: true
+  });
+}
 if (!Object.prototype.hasOwnProperty('querySelector')) {
   Object.defineProperty(Object.prototype, 'querySelector', {
-    value: function() { return null; },
+    value: function(sel) { return __mdmdview_query_selector(this, sel); },
     writable: true,
     configurable: true
   });
 }
 if (!Object.prototype.hasOwnProperty('querySelectorAll')) {
   Object.defineProperty(Object.prototype, 'querySelectorAll', {
-    value: function() { return []; },
+    value: function(sel) { return __mdmdview_query_selector_all(this, sel); },
+    writable: true,
+    configurable: true
+  });
+}
+if (!Object.prototype.hasOwnProperty('appendChild')) {
+  Object.defineProperty(Object.prototype, 'appendChild', {
+    value: function(child) {
+      if (this && !this.tagName && document && document.body && this !== document.body) {
+        return document.body.appendChild(child);
+      }
+      if (!this.children) { this.children = []; }
+      this.children.push(child);
+      this.childNodes = this.children;
+      this.firstChild = this.children[0] || null;
+      if (child && typeof child === 'object') {
+        child.parentNode = this;
+      }
+      return child;
+    },
+    writable: true,
+    configurable: true
+  });
+}
+if (!Object.prototype.hasOwnProperty('insertBefore')) {
+  Object.defineProperty(Object.prototype, 'insertBefore', {
+    value: function(child, before) {
+      if (this && !this.tagName && document && document.body && this !== document.body) {
+        return document.body.insertBefore(child, before);
+      }
+      if (!this.children) { this.children = []; }
+      var idx = this.children.indexOf(before);
+      if (idx < 0) { this.children.push(child); }
+      else { this.children.splice(idx, 0, child); }
+      this.childNodes = this.children;
+      this.firstChild = this.children[0] || null;
+      if (child && typeof child === 'object') {
+        child.parentNode = this;
+      }
+      return child;
+    },
+    writable: true,
+    configurable: true
+  });
+}
+if (!Object.prototype.hasOwnProperty('removeChild')) {
+  Object.defineProperty(Object.prototype, 'removeChild', {
+    value: function(child) {
+      if (!this.children) { return child; }
+      var idx = this.children.indexOf(child);
+      if (idx >= 0) { this.children.splice(idx, 1); }
+      this.childNodes = this.children;
+      this.firstChild = this.children[0] || null;
+      return child;
+    },
     writable: true,
     configurable: true
   });
 }
 if (!Object.prototype.hasOwnProperty('matches')) {
   Object.defineProperty(Object.prototype, 'matches', {
-    value: function() { return false; },
+    value: function(sel) { return __mdmdview_matches_selector(this, sel); },
     writable: true,
     configurable: true
   });
 }
-window.getComputedStyle = function(el) { return (el && el.style) ? el.style : {}; };
+if (!Object.prototype.hasOwnProperty('nextSibling')) {
+  Object.defineProperty(Object.prototype, 'nextSibling', {
+    get: function() { return null; },
+    configurable: true
+  });
+}
+if (!Object.prototype.hasOwnProperty('previousSibling')) {
+  Object.defineProperty(Object.prototype, 'previousSibling', {
+    get: function() { return null; },
+    configurable: true
+  });
+}
+window.getComputedStyle = function(el) {
+  return (el && el.style) ? el.style : __mdmdview_make_style();
+};
 window.setTimeout = function(fn, ms) { fn(); return 1; };
 window.clearTimeout = function(id) {};
 window.requestAnimationFrame = function(fn) { fn(0); return 1; };
@@ -1769,15 +1930,25 @@ const MERMAID_RENDER_WRAPPER: &str = r#"
   mermaid.mermaidAPI.initialize(merged);
   var renderCode = extracted && extracted.code !== undefined ? extracted.code : code;
   var svgOut = null;
-  var renderResult = mermaid.mermaidAPI.render(id, renderCode, function(svg){ svgOut = svg; });
+  var renderResult = null;
+  try {
+    renderResult = mermaid.mermaidAPI.render(id, renderCode);
+    if (!renderResult) {
+      renderResult = mermaid.mermaidAPI.render(id, renderCode, function(svg){ svgOut = svg; });
+    }
+  } catch (err) {
+    throw err;
+  }
   if (renderResult && typeof renderResult.then === 'function') {
     return renderResult.then(function(out){
       if (typeof out === 'string') { return out; }
       if (out && out.svg) { return out.svg; }
+      if (typeof svgOut === 'string' && svgOut.length > 0) { return svgOut; }
       throw new Error('Mermaid render returned empty');
     });
   }
   if (typeof renderResult === 'string') { return renderResult; }
+  if (renderResult && renderResult.svg) { return renderResult.svg; }
   if (typeof svgOut === 'string' && svgOut.length > 0) { return svgOut; }
   throw new Error('Mermaid render returned empty');
 })
@@ -1786,12 +1957,6 @@ const MERMAID_RENDER_WRAPPER: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "mermaid-kroki")]
-    use image::codecs::png::PngEncoder;
-    #[cfg(feature = "mermaid-kroki")]
-    use image::ColorType;
-    #[cfg(feature = "mermaid-kroki")]
-    use image::ImageEncoder;
     use std::sync::{Mutex, OnceLock};
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -1800,39 +1965,6 @@ mod tests {
             .get_or_init(|| Mutex::new(()))
             .lock()
             .expect("env lock")
-    }
-
-    #[cfg(feature = "mermaid-kroki")]
-    fn with_test_ui<F>(f: F)
-    where
-        F: FnOnce(&egui::Context, &mut egui::Ui),
-    {
-        let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(1024.0, 768.0),
-            )),
-            ..Default::default()
-        };
-        ctx.begin_frame(input);
-        egui::CentralPanel::default().show(&ctx, |ui| {
-            f(&ctx, ui);
-        });
-        let _ = ctx.end_frame();
-    }
-
-    #[cfg(feature = "mermaid-kroki")]
-    fn tiny_png_bytes() -> Vec<u8> {
-        let width = 2u32;
-        let height = 2u32;
-        let pixels = vec![255u8; (width * height * 4) as usize];
-        let mut out = Vec::new();
-        let encoder = PngEncoder::new(&mut out);
-        encoder
-            .write_image(&pixels, width, height, ColorType::Rgba8)
-            .expect("encode png");
-        out
     }
 
     #[test]
@@ -1882,18 +2014,10 @@ mod tests {
         assert!(!explicit);
         if cfg!(feature = "mermaid-quickjs") {
             assert_eq!(default_pref, MermaidRenderPreference::Embedded);
-        } else if cfg!(feature = "mermaid-kroki") {
-            assert_eq!(default_pref, MermaidRenderPreference::Kroki);
         } else {
             assert_eq!(default_pref, MermaidRenderPreference::Off);
         }
 
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "kroki");
-            let (pref, explicit) = MermaidRenderer::mermaid_renderer_preference();
-            assert!(explicit);
-            assert_eq!(pref, MermaidRenderPreference::Kroki);
-        }
         {
             let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "embedded");
             let (pref, explicit) = MermaidRenderer::mermaid_renderer_preference();
@@ -1999,62 +2123,6 @@ mod tests {
     }
 
     #[test]
-    fn test_kroki_enabled_env_flag() {
-        let _lock = env_lock();
-        std::env::remove_var("MDMDVIEW_ENABLE_KROKI");
-        assert!(!MermaidRenderer::kroki_enabled_for_tests());
-        let _guard = EnvGuard::set("MDMDVIEW_ENABLE_KROKI", "1");
-        if cfg!(feature = "mermaid-kroki") {
-            assert!(MermaidRenderer::kroki_enabled_for_tests());
-        } else {
-            assert!(!MermaidRenderer::kroki_enabled_for_tests());
-        }
-        let _guard = EnvGuard::set("MDMDVIEW_ENABLE_KROKI", "false");
-        assert!(!MermaidRenderer::kroki_enabled_for_tests());
-    }
-
-    #[test]
-    fn test_spawn_kroki_job_reports_queue_disconnect() {
-        let mut renderer = MermaidRenderer::new();
-        let (temp_tx, temp_rx) = crossbeam_channel::bounded::<KrokiRequest>(1);
-        drop(temp_rx);
-        renderer.kroki_job_tx = temp_tx;
-        let result = renderer.spawn_kroki_job(1, "graph TD; A-->B;");
-        assert!(matches!(result, Err(KrokiEnqueueError::Disconnected)));
-    }
-
-    #[test]
-    fn test_spawn_kroki_job_reports_queue_full() {
-        let mut renderer = MermaidRenderer::new();
-        let (temp_tx, _temp_rx) = crossbeam_channel::bounded::<KrokiRequest>(1);
-        let _ = temp_tx.try_send(KrokiRequest {
-            key: 1,
-            url: "u".to_string(),
-            payload: "p".to_string(),
-        });
-        renderer.kroki_job_tx = temp_tx.clone();
-        let result = renderer.spawn_kroki_job(42, "graph TD; B-->C;");
-        assert!(matches!(result, Err(KrokiEnqueueError::QueueFull)));
-    }
-
-    #[test]
-    fn test_poll_kroki_results_caches() {
-        let mut renderer = MermaidRenderer::new();
-        let (tx, rx) = std::sync::mpsc::channel();
-        renderer.kroki_rx = rx;
-        renderer.kroki_pending.borrow_mut().insert(1);
-        renderer.kroki_pending.borrow_mut().insert(2);
-        tx.send((1, Ok(vec![1, 2, 3]))).expect("send ok");
-        tx.send((2, Err("boom".to_string()))).expect("send err");
-
-        renderer.poll_kroki_results();
-
-        assert!(renderer.kroki_svg_cache.borrow().contains_key(&1));
-        assert!(renderer.kroki_errors.borrow().contains_key(&2));
-        assert!(!renderer.kroki_pending.borrow().contains(&1));
-    }
-
-    #[test]
     fn test_parse_hex_color_and_mermaid_bg_fill() {
         let _lock = env_lock();
         assert_eq!(
@@ -2083,40 +2151,66 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "mermaid-kroki")]
     #[test]
-    fn test_render_mermaid_block_cache_and_queue_paths() {
-        let _lock = env_lock();
-        let _pref = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "kroki");
-        let _guard = EnvGuard::set("MDMDVIEW_ENABLE_KROKI", "1");
-        let renderer = MermaidRenderer::new();
-        let code = "graph TD; A-->B;";
-        let key = MermaidRenderer::hash_str(code);
-        renderer
-            .kroki_svg_cache
-            .borrow_mut()
-            .insert(key, tiny_png_bytes());
+    fn test_mermaid_bg_key_and_scale_bucket() {
+        assert_eq!(MermaidRenderer::mermaid_bg_key(None), "none");
+        assert_eq!(
+            MermaidRenderer::mermaid_bg_key(Some([1, 2, 3, 4])),
+            "01020304"
+        );
 
-        with_test_ui(|_, ui| {
-            ui.set_width(12.0);
-            assert!(renderer.render_block(ui, code, 1.0, 12.0));
-        });
-
-        renderer.kroki_pending.borrow_mut().insert(key);
-        with_test_ui(|_, ui| {
-            assert!(renderer.render_block(ui, code, 1.0, 12.0));
-        });
+        let factor = MermaidRenderer::MERMAID_SCALE_BUCKET_FACTOR;
+        assert_eq!(MermaidRenderer::scale_bucket(0.1), (0.5 * factor).round() as u32);
+        assert_eq!(MermaidRenderer::scale_bucket(10.0), (4.0 * factor).round() as u32);
     }
 
-    #[cfg(feature = "mermaid-kroki")]
     #[test]
-    fn test_render_mermaid_block_disabled() {
-        let _lock = env_lock();
-        let renderer = MermaidRenderer::new();
-        let _pref = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "kroki");
-        let _guard = EnvGuard::set("MDMDVIEW_ENABLE_KROKI", "0");
-        with_test_ui(|_, ui| {
-            assert!(!renderer.render_block(ui, "graph TD; A-->B;", 1.0, 12.0));
-        });
+    fn test_mermaid_hash_str_stable_and_distinct() {
+        let a = MermaidRenderer::hash_str("alpha");
+        let b = MermaidRenderer::hash_str("alpha");
+        let c = MermaidRenderer::hash_str("beta");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
+
+    #[test]
+    fn test_mermaid_bg_fill_light_mode() {
+        let _lock = env_lock();
+        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG", "light");
+        assert_eq!(MermaidRenderer::mermaid_bg_fill(), Some([255, 255, 255, 255]));
+    }
+
+    #[test]
+    fn test_render_block_off_and_embedded_without_feature() {
+        let _lock = env_lock();
+        std::env::remove_var("MDMDVIEW_MERMAID_RENDERER");
+        let renderer = MermaidRenderer::new();
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+
+        let mut rendered = true;
+        let _ = ctx.run(input.clone(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rendered = renderer.render_block(ui, "graph TD; A-->B;", 1.0, 14.0);
+            });
+        });
+        assert!(rendered);
+
+        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "embedded");
+        let renderer = MermaidRenderer::new();
+        let mut rendered_embedded = true;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rendered_embedded = renderer.render_block(ui, "graph TD; A-->B;", 1.0, 14.0);
+            });
+        });
+        assert!(rendered_embedded);
+    }
+
 }

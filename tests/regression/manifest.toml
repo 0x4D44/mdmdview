@@ -56,7 +56,6 @@ id = "008-mermaid"
 path = "cases/008-mermaid.md"
 title = "Mermaid diagrams"
 compare_mode = "mdmdview"
-mermaid_renderer = "embedded"
 
 [[case]]
 id = "009-unicode"

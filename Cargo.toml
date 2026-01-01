@@ -29,7 +29,6 @@ usvg = { version = "0.43", default-features = false, features = ["text"] }
 resvg = "0.43"
 tiny-skia = "0.11"
 htmlescape = "0.3"
-ureq = { version = "2", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
@@ -48,13 +47,12 @@ codegen-units = 1
 panic = "abort"
 
 [features]
-default = ["mermaid-embedded"]
+# Default to no Mermaid renderer to avoid requiring external tools at build time.
+default = []
 # Enable JavaScript-based Mermaid rendering via QuickJS (embedded)
 mermaid-quickjs = ["dep:rquickjs"]
-# Default embedded Mermaid support (alias for mermaid-quickjs)
+# Embedded Mermaid support (alias for mermaid-quickjs)
 mermaid-embedded = ["mermaid-quickjs"]
-# Enable Kroki network rendering
-mermaid-kroki = ["dep:ureq"]
 
 [dependencies.rquickjs]
 version = "0.6"

@@ -533,4 +533,11 @@ mod tests {
         assert!(SEARCH_GUIDE_CONTENT.contains("Niño"));
         assert!(SEARCH_GUIDE_CONTENT.contains("Ctrl+F"));
     }
+
+    #[test]
+    fn test_images_content_mentions_samples() {
+        assert!(IMAGES_CONTENT.contains("Inline Images"));
+        assert!(IMAGES_CONTENT.contains("WEBP Sample"));
+        assert!(IMAGES_CONTENT.contains("```mermaid"));
+    }
 }

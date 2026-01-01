@@ -49,7 +49,7 @@
 - **ðŸ“ Raw Mode with Edit** - View and edit source markdown (`Ctrl+R` to toggle, `Ctrl+E` to edit)
 - **ðŸ”— Internal Anchors** - In-document navigation via `[link](#anchor)` syntax
 - **ðŸ“Š Table Support** - Professional grid layout with headers and striped rows
-- **ðŸŽ¨ Mermaid Diagrams** - Render flowcharts, sequence diagrams, and more (embedded QuickJS or Kroki fallback)
+- **ðŸŽ¨ Mermaid Diagrams** - Render flowcharts, sequence diagrams, and more (enable embedded QuickJS)
 - **ðŸ˜€ Emoji Support** - Embedded Twemoji assets with shortcode expansion (`:rocket:` â†’ ðŸš€)
 - **ðŸŒ Encoding Fallback** - Opens non-UTF-8 legacy files via lossy decoding
 - **ðŸ’¾ Window State Persistence** - Remembers position, size, and zoom level across sessions
@@ -104,12 +104,12 @@ cargo build --release
 
 #### Optional Features
 
-**Embedded Mermaid Rendering** (default via QuickJS):
+**Embedded Mermaid Rendering** (QuickJS, offline):
 ```bash
 # Requires assets/vendor/mermaid.min.js
 cargo build --release --features mermaid-embedded
 ```
-Use `--no-default-features` to disable embedded Mermaid rendering.
+On Windows, QuickJS builds require a `patch` tool in `PATH` (e.g., Git for Windows or MSYS2).
 
 ---
 
@@ -243,9 +243,8 @@ mdmdview supports all CommonMark elements with professional formatting:
   - Shortcode expansion: `:rocket:`, `:tada:`, `:heart:`
   - Native Unicode emoji rendering
 - **Mermaid Diagrams** - Flowcharts, sequence diagrams, gantt charts, etc.
-  - Built-in renderer enabled by default (`--no-default-features` to disable)
-  - Select renderer via `MDMDVIEW_MERMAID_RENDERER` (`embedded`, `kroki`, `off`)
-  - Kroki fallback requires `MDMDVIEW_ENABLE_KROKI=1`
+  - Renderer enabled when built with `mermaid-embedded`
+  - Select renderer via `MDMDVIEW_MERMAID_RENDERER` (`embedded`, `off`)
 
 ### Special Features
 - **Line break preservation** - Single newlines respected (perfect for poetry/lyrics)
@@ -260,9 +259,7 @@ mdmdview supports all CommonMark elements with professional formatting:
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `MDMDVIEW_ENABLE_KROKI` | Enable Kroki service for Mermaid rendering | `0` (disabled) |
-| `MDMDVIEW_KROKI_URL` | Custom Kroki server URL | Public Kroki instance |
-| `MDMDVIEW_MERMAID_RENDERER` | Mermaid renderer (`embedded`, `kroki`, `off`) | `embedded` (if available) |
+| `MDMDVIEW_MERMAID_RENDERER` | Mermaid renderer (`embedded`, `off`) | `embedded` if built, otherwise `off` |
 | `MDMDVIEW_MERMAID_SECURITY` | Embedded Mermaid security level (`strict`, `loose`) | `strict` |
 | `MDMDVIEW_MERMAID_WORKERS` | QuickJS worker count (1-16) | auto |
 | `MDMDVIEW_MERMAID_TIMEOUT_MS` | QuickJS render timeout (ms) | `2000` |
@@ -273,14 +270,8 @@ mdmdview supports all CommonMark elements with professional formatting:
 
 **Example:**
 ```bash
-# Enable Kroki for Mermaid diagrams
-MDMDVIEW_ENABLE_KROKI=1 mdmdview document.md
-
-# Force Kroki rendering explicitly
-MDMDVIEW_MERMAID_RENDERER=kroki MDMDVIEW_ENABLE_KROKI=1 mdmdview document.md
-
-# Use custom Kroki instance
-MDMDVIEW_KROKI_URL=https://kroki.example.com mdmdview document.md
+# Use embedded Mermaid renderer (requires build with mermaid-embedded)
+MDMDVIEW_MERMAID_RENDERER=embedded mdmdview document.md
 
 # Enable debug logging
 RUST_LOG=debug mdmdview document.md
@@ -344,7 +335,7 @@ mdmdview/
    - Conversion to egui widgets
    - Syntax highlighting with syntect
    - Image loading and texture caching
-   - Mermaid diagram rendering (embedded QuickJS or Kroki fallback)
+   - Mermaid diagram rendering (enable embedded QuickJS)
    - Table layout with proper sizing
    - Search result highlighting
    - Emoji rendering with Twemoji assets
@@ -383,7 +374,7 @@ cargo build
 # Release build (optimized, ~4.8MB)
 cargo build --release
 
-# With embedded Mermaid renderer (default)
+# With embedded Mermaid renderer (opt-in)
 cargo build --release --features mermaid-embedded
 
 # Run in development mode
@@ -392,8 +383,6 @@ cargo run
 # Run with specific file
 cargo run -- document.md
 
-# Run with Kroki enabled
-MDMDVIEW_ENABLE_KROKI=1 cargo run
 ```
 
 ### Testing
@@ -545,14 +534,8 @@ mdmdview uses `String::from_utf8_lossy` for legacy encodings:
 
 ### Mermaid Diagrams Not Rendering
 
-**Kroki mode:**
-- Set `MDMDVIEW_ENABLE_KROKI=1` environment variable
-- Optionally set `MDMDVIEW_MERMAID_RENDERER=kroki`
-- Check internet connection
-- Look for queue status panel (max 4 concurrent renders)
-
 **Embedded mode:**
-- Build with default features (or `--features mermaid-embedded` if defaults are disabled)
+- Build with `--features mermaid-embedded`
 - Optionally set `MDMDVIEW_MERMAID_RENDERER=embedded`
 - Ensure `assets/vendor/mermaid.min.js` exists before building
 - Check that diagram syntax is valid
@@ -583,14 +566,9 @@ Try breaking large documents into smaller files.
 - **No script execution** - JavaScript in markdown is not executed
 - **Safe link handling** - External links open in browser, not in-app
 - **Image loading** - Only from local filesystem or explicit URLs
-- **No remote code** - All rendering done locally (except optional Kroki)
+- **No remote code** - All rendering done locally
 
 ### Mermaid Rendering
-
-**Kroki mode** (network):
-- Diagrams sent to external service for rendering
-- Use `MDMDVIEW_KROKI_URL` to point to trusted self-hosted instance
-- Review diagram content before rendering sensitive data
 
 **QuickJS mode** (offline):
 - JavaScript sandboxed in QuickJS runtime
