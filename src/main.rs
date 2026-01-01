@@ -274,8 +274,9 @@ fn main() -> Result<(), eframe::Error> {
 
     let native_options = eframe::NativeOptions {
         viewport,
-        // Keep native persist as well; our explicit file handles cross-platform dirs
-        persist_window: !screenshot_enabled,
+        // Disable eframe's built-in window persistence - we handle it ourselves via
+        // load_window_state/save_window_state to avoid conflicts
+        persist_window: false,
         ..Default::default()
     };
 
