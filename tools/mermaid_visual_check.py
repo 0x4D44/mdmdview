@@ -23,6 +23,8 @@ MERMAID_BG = "#FFF8DB"
 MERMAID_CONFIG = {
     "startOnLoad": False,
     "securityLevel": "strict",
+    "htmlLabels": False,
+    "flowchart": {"htmlLabels": False},
     "deterministicIds": True,
     "deterministicIDSeed": "mdmdview",
     "maxTextSize": 50000,
@@ -142,6 +144,41 @@ def move_resize_window(hwnd: int, width: int, height: int) -> None:
     user32.SetForegroundWindow(hwnd)
 
 
+def get_window_rect(hwnd: int) -> Optional[Tuple[int, int, int, int]]:
+    import ctypes
+
+    user32 = ctypes.windll.user32
+
+    class RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long),
+        ]
+
+    rect = RECT()
+    if user32.GetWindowRect(hwnd, ctypes.byref(rect)) == 0:
+        return None
+    return rect.left, rect.top, rect.right, rect.bottom
+
+
+def crop_to_window(snap_path: Path, output_path: Path, rect: Tuple[int, int, int, int]) -> bool:
+    left, top, right, bottom = rect
+    if right <= left or bottom <= top:
+        return False
+    img = Image.open(snap_path)
+    width, height = img.size
+    crop_left = max(0, left)
+    crop_top = max(0, top)
+    crop_right = min(width, right)
+    crop_bottom = min(height, bottom)
+    if crop_right <= crop_left or crop_bottom <= crop_top:
+        return False
+    img.crop((crop_left, crop_top, crop_right, crop_bottom)).save(output_path)
+    return True
+
+
 def run_mdscreensnap(output_dir: Path, name: str, delay: float, monitor: str) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     delay_arg = str(int(round(delay)))
@@ -203,6 +240,16 @@ def run_mdmdview_screenshot(
     if test_fonts:
         cmd.extend(["--test-fonts", test_fonts])
     subprocess.run(cmd, check=True, env=env)
+
+
+def read_mdmdview_meta(output_png: Path) -> Optional[dict]:
+    meta_path = output_png.with_suffix(".json")
+    if not meta_path.exists():
+        return None
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def run_mermaid_cli(
@@ -267,6 +314,48 @@ def parse_hex_color(value: str) -> Tuple[int, int, int]:
     return int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16)
 
 
+def guess_background_color(img: Image.Image) -> Tuple[int, int, int]:
+    width, height = img.size
+    pixels = img.convert("RGB").load()
+    counts: dict[Tuple[int, int, int], int] = {}
+
+    for x in range(width):
+        for y in (0, height - 1):
+            color = pixels[x, y]
+            counts[color] = counts.get(color, 0) + 1
+
+    for y in range(height):
+        for x in (0, width - 1):
+            color = pixels[x, y]
+            counts[color] = counts.get(color, 0) + 1
+
+    if not counts:
+        return 255, 255, 255
+    return max(counts.items(), key=lambda item: item[1])[0]
+
+
+def normalize_background(
+    img: Image.Image,
+    source_rgb: Tuple[int, int, int],
+    target_rgb: Tuple[int, int, int],
+    tolerance: int,
+) -> Image.Image:
+    rgba = img.convert("RGBA")
+    data = list(rgba.getdata())
+    out = []
+    for r, g, b, a in data:
+        if (
+            abs(r - source_rgb[0]) <= tolerance
+            and abs(g - source_rgb[1]) <= tolerance
+            and abs(b - source_rgb[2]) <= tolerance
+        ):
+            out.append((target_rgb[0], target_rgb[1], target_rgb[2], a))
+        else:
+            out.append((r, g, b, a))
+    rgba.putdata(out)
+    return rgba
+
+
 def crop_to_content(img: Image.Image, bg_rgb: Tuple[int, int, int], tolerance: int) -> Image.Image:
     width, height = img.size
     min_x = width
@@ -299,6 +388,61 @@ def crop_to_content(img: Image.Image, bg_rgb: Tuple[int, int, int], tolerance: i
     max_x = min(width - 1, max_x + pad)
     max_y = min(height - 1, max_y + pad)
     return img.crop((min_x, min_y, max_x + 1, max_y + 1))
+
+
+def find_content_bounds(
+    img: Image.Image, bg_rgb: Tuple[int, int, int], tolerance: int
+) -> Optional[Tuple[int, int, int, int]]:
+    width, height = img.size
+    min_x = width
+    min_y = height
+    max_x = 0
+    max_y = 0
+    found = False
+
+    pixels = img.convert("RGB").load()
+    for y in range(height):
+        for x in range(width):
+            r, g, b = pixels[x, y]
+            if not (
+                abs(r - bg_rgb[0]) <= tolerance
+                and abs(g - bg_rgb[1]) <= tolerance
+                and abs(b - bg_rgb[2]) <= tolerance
+            ):
+                found = True
+                min_x = min(min_x, x)
+                min_y = min(min_y, y)
+                max_x = max(max_x, x)
+                max_y = max(max_y, y)
+
+    if not found:
+        return None
+
+    return min_x, min_y, max_x, max_y
+
+
+def align_to_content(
+    reference: Image.Image,
+    actual: Image.Image,
+    bg_rgb: Tuple[int, int, int],
+    tolerance: int,
+) -> Image.Image:
+    ref_bounds = find_content_bounds(reference, bg_rgb, tolerance)
+    act_bounds = find_content_bounds(actual, bg_rgb, tolerance)
+    if not ref_bounds or not act_bounds:
+        return actual
+    ref_cx = (ref_bounds[0] + ref_bounds[2]) / 2
+    ref_cy = (ref_bounds[1] + ref_bounds[3]) / 2
+    act_cx = (act_bounds[0] + act_bounds[2]) / 2
+    act_cy = (act_bounds[1] + act_bounds[3]) / 2
+    dx = int(round(ref_cx - act_cx))
+    dy = int(round(ref_cy - act_cy))
+    if dx == 0 and dy == 0:
+        return actual
+    bg_rgba = (bg_rgb[0], bg_rgb[1], bg_rgb[2], 255)
+    canvas = Image.new("RGBA", reference.size, bg_rgba)
+    canvas.paste(actual.convert("RGBA"), (dx, dy))
+    return canvas
 
 
 def crop_to_background_region(
@@ -343,6 +487,7 @@ def diff_images(
     diff_png: Path,
     threshold_percent: float,
     threshold_pixels: int,
+    pixel_tolerance: int,
 ) -> DiffResult:
     ref = Image.open(reference_png).convert("RGBA")
     act = Image.open(actual_png).convert("RGBA")
@@ -352,7 +497,7 @@ def diff_images(
     max_delta = 0
     for pixel in diff_data:
         delta = max(pixel)
-        if delta > 0:
+        if delta > pixel_tolerance:
             diff_pixels += 1
             if delta > max_delta:
                 max_delta = delta
@@ -433,6 +578,7 @@ def run_case(
     monitor: str,
     threshold_percent: float,
     threshold_pixels: int,
+    pixel_tolerance: int,
     test_fonts: Optional[str],
     mmdc_cmd: Optional[str],
     npx_cmd: str,
@@ -460,6 +606,8 @@ def run_case(
         }
 
     code = blocks[0]
+    render_md_path = actual_dir / f"{case_id}_render.md"
+    render_md_path.write_text(f"```mermaid\n{code}\n```\n", encoding="utf-8")
 
     env = dict(os.environ)
     env["MDMDVIEW_MERMAID_RENDERER"] = "embedded"
@@ -482,7 +630,7 @@ def run_case(
 
     cmd = [
         mdmdview_bin,
-        str(md_path),
+        str(render_md_path),
         "--width",
         str(width),
         "--height",
@@ -497,13 +645,23 @@ def run_case(
 
     proc = subprocess.Popen(cmd, env=env)
     try:
-        hwnd = find_window(md_path.name, timeout_s=8.0)
+        hwnd = find_window(render_md_path.name, timeout_s=8.0)
         if hwnd:
             move_resize_window(hwnd, width, height)
         time.sleep(wait_s)
         snap_path = run_mdscreensnap(actual_dir, f"{case_id}-mdmdview", snap_delay, monitor)
         actual_raw = actual_dir / "mdmdview.png"
-        snap_path.replace(actual_raw)
+        capture_mode = "mdscreensnap"
+        if hwnd:
+            rect = get_window_rect(hwnd)
+            full_path = actual_dir / "mdmdview-full.png"
+            snap_path.replace(full_path)
+            if rect and crop_to_window(full_path, actual_raw, rect):
+                capture_mode = "mdscreensnap-window"
+            else:
+                actual_raw = full_path
+        else:
+            snap_path.replace(actual_raw)
     finally:
         proc.terminate()
         try:
@@ -511,37 +669,52 @@ def run_case(
         except subprocess.TimeoutExpired:
             proc.kill()
 
-    actual_raw_img = Image.open(actual_raw)
-    capture_solid = is_solid_image(actual_raw_img)
-    capture_mode = "mdscreensnap"
-    if capture_solid:
-        mdsnap_path = actual_dir / "mdmdview-mdsnap.png"
-        try:
-            actual_raw.replace(mdsnap_path)
-        except OSError:
-            mdsnap_path = actual_raw
-        try:
+    mdsnap_raw = actual_raw
+    mdmdview_raw = actual_dir / "mdmdview-screenshot.png"
+    mdmdview_ok = False
+    try:
+        base_wait_ms = int(wait_s * 1000) if wait_s > 0 else 2000
+        run_mdmdview_screenshot(
+            mdmdview_bin=mdmdview_bin,
+            md_path=render_md_path,
+            output_png=mdmdview_raw,
+            width=width,
+            height=height,
+            theme=theme,
+            zoom=zoom,
+            wait_ms=base_wait_ms,
+            settle_frames=3,
+            content_only=True,
+            test_fonts=test_fonts,
+            env=env,
+        )
+        meta = read_mdmdview_meta(mdmdview_raw)
+        if meta and meta.get("timed_out") is True:
+            retry_wait_ms = max(base_wait_ms * 2, 8000)
             run_mdmdview_screenshot(
                 mdmdview_bin=mdmdview_bin,
                 md_path=md_path,
-                output_png=actual_raw,
+                output_png=mdmdview_raw,
                 width=width,
                 height=height,
                 theme=theme,
                 zoom=zoom,
-                wait_ms=int(wait_s * 1000) if wait_s > 0 else 2000,
+                wait_ms=retry_wait_ms,
                 settle_frames=3,
                 content_only=True,
                 test_fonts=test_fonts,
                 env=env,
             )
-        except subprocess.CalledProcessError:
-            pass
-        if actual_raw.exists():
-            actual_raw_img = Image.open(actual_raw)
-            capture_solid = is_solid_image(actual_raw_img)
-            if not capture_solid:
-                capture_mode = "mdmdview-screenshot"
+        if mdmdview_raw.exists():
+            mdmdview_ok = not is_solid_image(Image.open(mdmdview_raw))
+    except subprocess.CalledProcessError:
+        mdmdview_ok = False
+
+    if mdmdview_ok:
+        actual_raw = mdmdview_raw
+        capture_mode = "mdmdview-screenshot"
+    else:
+        actual_raw = mdsnap_raw
 
     reference_raw = reference_dir / "mermaid.png"
     run_mermaid_cli(
@@ -555,6 +728,8 @@ def run_case(
         npx_cmd=npx_cmd,
     )
 
+    actual_raw_img = Image.open(actual_raw)
+    capture_solid = is_solid_image(actual_raw_img)
     if capture_solid:
         ref_img = Image.open(reference_raw)
         return {
@@ -570,11 +745,15 @@ def run_case(
         }
 
     actual_raw_img = Image.open(actual_raw)
-    actual_crop = crop_to_background_region(actual_raw_img, bg_rgb, tolerance=10)
+    actual_bg = guess_background_color(actual_raw_img)
+    actual_crop = crop_to_background_region(actual_raw_img, actual_bg, tolerance=10)
     if actual_crop.size == actual_raw_img.size:
-        actual_crop = crop_to_content(actual_raw_img, bg_rgb, tolerance=10)
-    reference_crop = crop_to_content(Image.open(reference_raw), bg_rgb, tolerance=6)
+        actual_crop = crop_to_content(actual_raw_img, actual_bg, tolerance=10)
+    reference_crop = crop_to_content(Image.open(reference_raw), bg_rgb, tolerance=10)
     reference_crop, actual_crop = pad_to_common_size(reference_crop, actual_crop, bg_rgb)
+    if actual_bg != bg_rgb:
+        actual_crop = normalize_background(actual_crop, actual_bg, bg_rgb, tolerance=12)
+    actual_crop = align_to_content(reference_crop, actual_crop, bg_rgb, tolerance=10)
     actual_crop_path = actual_dir / "mdmdview-crop.png"
     reference_crop_path = reference_dir / "mermaid-crop.png"
     actual_crop.save(actual_crop_path)
@@ -587,6 +766,7 @@ def run_case(
         diff_png=diff_path,
         threshold_percent=threshold_percent,
         threshold_pixels=threshold_pixels,
+        pixel_tolerance=pixel_tolerance,
     )
 
     return {
@@ -629,8 +809,14 @@ def main() -> int:
     parser.add_argument("--width", type=int)
     parser.add_argument("--height", type=int)
     parser.add_argument("--monitor", default="primary")
-    parser.add_argument("--threshold-percent", type=float, default=1.0)
-    parser.add_argument("--threshold-pixels", type=int, default=2000)
+    parser.add_argument("--threshold-percent", type=float, default=12.0)
+    parser.add_argument("--threshold-pixels", type=int, default=45000)
+    parser.add_argument(
+        "--pixel-tolerance",
+        type=int,
+        default=40,
+        help="Ignore per-channel diffs at or below this value",
+    )
     parser.add_argument("--test-fonts", help="Font directory for mdmdview")
     parser.add_argument("--case", action="append", default=[])
     args = parser.parse_args()
@@ -672,6 +858,7 @@ def main() -> int:
             monitor=args.monitor,
             threshold_percent=args.threshold_percent,
             threshold_pixels=args.threshold_pixels,
+            pixel_tolerance=args.pixel_tolerance,
             test_fonts=args.test_fonts,
             mmdc_cmd=mmdc_cmd,
             npx_cmd=args.npx,

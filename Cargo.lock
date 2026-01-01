@@ -2220,6 +2220,7 @@ dependencies = [
  "syntect",
  "tempfile",
  "tiny-skia",
+ "ttf-parser 0.25.1",
  "unicode-casefold",
  "unicode-normalization",
  "unicode-segmentation",

@@ -11,6 +11,8 @@ use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
 #[cfg(feature = "mermaid-quickjs")]
+use std::path::PathBuf;
+#[cfg(feature = "mermaid-quickjs")]
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc,
@@ -160,6 +162,7 @@ struct MermaidThemeValues {
     title: String,
     label_bg: String,
     edge_label_bg: String,
+    font_family: Option<String>,
 }
 
 pub(crate) struct MermaidRenderer {
@@ -728,6 +731,10 @@ impl MermaidRenderer {
             std::env::var("MDMDVIEW_MERMAID_LABEL_BG").unwrap_or_else(|_| def_label_bg.to_string());
         let edge_label_bg = std::env::var("MDMDVIEW_MERMAID_EDGE_LABEL_BG")
             .unwrap_or_else(|_| def_edge_label_bg.to_string());
+        let font_family = std::env::var("MDMDVIEW_MERMAID_FONT_FAMILY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
 
         MermaidThemeValues {
             theme_name,
@@ -745,6 +752,7 @@ impl MermaidRenderer {
             title,
             label_bg,
             edge_label_bg,
+            font_family,
         }
     }
 
@@ -786,7 +794,7 @@ impl MermaidRenderer {
             Self::json_escape(&theme.theme_name)
         ));
 
-        let theme_vars = format!(
+        let mut theme_vars = format!(
             concat!(
                 "\"background\":\"{}\",",
                 "\"mainBkg\":\"{}\",",
@@ -820,6 +828,12 @@ impl MermaidRenderer {
             Self::json_escape(&theme.label_bg),
             Self::json_escape(&theme.edge_label_bg)
         );
+        if let Some(font_family) = theme.font_family.as_ref() {
+            theme_vars.push_str(&format!(
+                ",\"fontFamily\":\"{}\"",
+                Self::json_escape(font_family)
+            ));
+        }
         entries.push(format!("\"themeVariables\":{{{}}}", theme_vars));
 
         format!("{{{}}}", entries.join(","))
@@ -892,10 +906,114 @@ impl MermaidRenderer {
 }
 
 #[cfg(feature = "mermaid-quickjs")]
+struct TextMeasurer {
+    fontdb: Arc<usvg::fontdb::Database>,
+    face_id: Option<usvg::fontdb::ID>,
+}
+
+#[cfg(feature = "mermaid-quickjs")]
+impl TextMeasurer {
+    fn new(fontdb: Arc<usvg::fontdb::Database>) -> Self {
+        let families = [
+            usvg::fontdb::Family::Name("Trebuchet MS"),
+            usvg::fontdb::Family::Name("Verdana"),
+            usvg::fontdb::Family::Name("Arial"),
+            usvg::fontdb::Family::SansSerif,
+        ];
+        let query = usvg::fontdb::Query {
+            families: &families,
+            ..Default::default()
+        };
+        let face_id = fontdb.query(&query);
+        Self { fontdb, face_id }
+    }
+
+    fn measure_text(&self, text: &str, font_size: f32) -> (f32, f32) {
+        let size = if font_size.is_finite() && font_size > 0.0 {
+            font_size
+        } else {
+            16.0
+        };
+        if let Some(result) = self.measure_with_face(text, size) {
+            return result;
+        }
+        Self::fallback_measure(text, size)
+    }
+
+    fn measure_with_face(&self, text: &str, font_size: f32) -> Option<(f32, f32)> {
+        let face_id = self.face_id?;
+        self.fontdb
+            .with_face_data(face_id, |data, index| {
+                let face = ttf_parser::Face::parse(data, index).ok()?;
+            let units_per_em = face.units_per_em() as f32;
+            if !units_per_em.is_finite() || units_per_em <= 0.0 {
+                return None;
+            }
+            let scale = font_size / units_per_em;
+            let fallback_advance = units_per_em * 0.5;
+            let mut max_width_units = 0.0_f32;
+            let mut line_count = 0u32;
+
+            for line in text.split('\n') {
+                line_count += 1;
+                let mut width_units = 0.0_f32;
+                for ch in line.chars() {
+                    if let Some(glyph) = face.glyph_index(ch) {
+                        if let Some(adv) = face.glyph_hor_advance(glyph) {
+                            width_units += adv as f32;
+                        } else {
+                            width_units += fallback_advance;
+                        }
+                    } else {
+                        width_units += fallback_advance;
+                    }
+                }
+                if width_units > max_width_units {
+                    max_width_units = width_units;
+                }
+            }
+
+            if line_count == 0 {
+                line_count = 1;
+            }
+
+            let width = max_width_units * scale;
+            let height = font_size * 0.72 * line_count as f32;
+            if width.is_finite() && height.is_finite() {
+                Some((width, height))
+            } else {
+                None
+            }
+            })
+            .flatten()
+    }
+
+    fn fallback_measure(text: &str, font_size: f32) -> (f32, f32) {
+        let mut max_len = 0usize;
+        let mut lines = 0usize;
+        for line in text.split('\n') {
+            lines += 1;
+            let len = line.chars().count();
+            if len > max_len {
+                max_len = len;
+            }
+        }
+        if lines == 0 {
+            lines = 1;
+        }
+        let width = max_len as f32 * font_size * 0.5;
+        let height = lines as f32 * font_size * 0.72;
+        (width, height)
+    }
+}
+
+#[cfg(feature = "mermaid-quickjs")]
 struct MermaidWorker {
     engine: MermaidEngine,
     deadline_ms: Arc<AtomicU64>,
     fontdb: Arc<usvg::fontdb::Database>,
+    #[allow(dead_code)]
+    text_measurer: Arc<TextMeasurer>,
 }
 
 #[cfg(feature = "mermaid-quickjs")]
@@ -959,7 +1077,7 @@ impl MermaidWorker {
     }
 
     fn new(worker_idx: usize, fontdb: Arc<usvg::fontdb::Database>) -> Result<Self, String> {
-        use rquickjs::{Context, Runtime};
+        use rquickjs::{Context, Function, Runtime};
         if mermaid_embed::MERMAID_JS.is_empty() {
             return Err("No embedded Mermaid JS".to_string());
         }
@@ -977,10 +1095,33 @@ impl MermaidWorker {
         })));
         let ctx = Context::full(&rt).map_err(|e| format!("Mermaid context init error: {}", e))?;
         let engine = MermaidEngine { rt, ctx };
+        let text_measurer = Arc::new(TextMeasurer::new(Arc::clone(&fontdb)));
         let js = std::str::from_utf8(mermaid_embed::MERMAID_JS)
             .map_err(|_| "Mermaid JS is not valid UTF-8".to_string())?;
         let js = Self::patch_mermaid_js(js);
         let init_result: Result<(), String> = engine.ctx.with(|ctx| {
+            let measurer = Arc::clone(&text_measurer);
+            let measure_fn = Function::new(
+                ctx.clone(),
+                move |text: String, font_size: f64| {
+                    let (width, height) = measurer.measure_text(&text, font_size as f32);
+                    vec![width as f64, height as f64]
+                },
+            )
+            .map_err(|err| {
+                format!(
+                    "Mermaid text measure init error: {}",
+                    MermaidWorker::format_js_error(&ctx, err)
+                )
+            })?;
+            ctx.globals()
+                .set("__mdmdview_measure_text_native", measure_fn)
+                .map_err(|err| {
+                    format!(
+                        "Mermaid text measure init error: {}",
+                        MermaidWorker::format_js_error(&ctx, err)
+                    )
+                })?;
             let eval = |label: &str, source: &str| -> Result<(), String> {
                 ctx.eval::<(), _>(source).map_err(|err| {
                     format!("{}: {}", label, MermaidWorker::format_js_error(&ctx, err))
@@ -1004,6 +1145,7 @@ impl MermaidWorker {
             engine,
             deadline_ms,
             fontdb,
+            text_measurer,
         })
     }
 
@@ -1038,6 +1180,168 @@ impl MermaidWorker {
         }
     }
 
+    fn maybe_dump_svg(svg_key: u64, code: Option<&str>, svg: &str) {
+        let dir = match std::env::var("MDMDVIEW_MERMAID_DUMP_DIR") {
+            Ok(value) if !value.trim().is_empty() => value,
+            _ => return,
+        };
+        let dir = PathBuf::from(dir);
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let label = code
+            .and_then(|snippet| snippet.lines().next())
+            .unwrap_or("mermaid");
+        let mut name = String::new();
+        for ch in label.chars() {
+            if name.len() >= 32 {
+                break;
+            }
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                name.push(ch);
+            } else {
+                name.push('_');
+            }
+        }
+        if name.is_empty() {
+            name.push_str("mermaid");
+        }
+        let filename = format!("{:016x}_{}.svg", svg_key, name);
+        let path = dir.join(filename);
+        let _ = std::fs::write(path, svg);
+    }
+
+    fn normalize_svg_size(svg: &str) -> String {
+        let start = match svg.find("<svg") {
+            Some(idx) => idx,
+            None => return svg.to_string(),
+        };
+        let end = match svg[start..].find('>') {
+            Some(idx) => start + idx,
+            None => return svg.to_string(),
+        };
+        let tag = &svg[start..=end];
+        let viewbox = match Self::find_svg_attr(tag, "viewBox") {
+            Some(v) => v,
+            None => return svg.to_string(),
+        };
+        let dims = Self::parse_viewbox_dims(&viewbox);
+        let (width, height) = match dims {
+            Some(pair) => pair,
+            None => return svg.to_string(),
+        };
+        let mut new_tag = tag.to_string();
+        let width_attr = Self::find_svg_attr(&new_tag, "width");
+        if width_attr
+            .as_deref()
+            .map(|val| val.trim().ends_with('%'))
+            .unwrap_or(true)
+        {
+            let value = Self::format_dim(width);
+            new_tag = if width_attr.is_some() {
+                Self::replace_svg_attr(&new_tag, "width", &value)
+            } else {
+                Self::insert_svg_attr(&new_tag, "width", &value)
+            };
+        }
+        let height_attr = Self::find_svg_attr(&new_tag, "height");
+        if height_attr
+            .as_deref()
+            .map(|val| val.trim().ends_with('%'))
+            .unwrap_or(true)
+        {
+            let value = Self::format_dim(height);
+            new_tag = if height_attr.is_some() {
+                Self::replace_svg_attr(&new_tag, "height", &value)
+            } else {
+                Self::insert_svg_attr(&new_tag, "height", &value)
+            };
+        }
+        if Self::find_svg_attr(&new_tag, "overflow").is_none() {
+            new_tag = Self::insert_svg_attr(&new_tag, "overflow", "hidden");
+        }
+        if new_tag == tag {
+            return svg.to_string();
+        }
+        let mut out = String::with_capacity(svg.len() + 32);
+        out.push_str(&svg[..start]);
+        out.push_str(&new_tag);
+        out.push_str(&svg[end + 1..]);
+        out
+    }
+
+    fn find_svg_attr(tag: &str, name: &str) -> Option<String> {
+        let needle = format!("{name}=\"");
+        let start = tag.find(&needle)? + needle.len();
+        let end = tag[start..].find('"')? + start;
+        Some(tag[start..end].to_string())
+    }
+
+    fn replace_svg_attr(tag: &str, name: &str, value: &str) -> String {
+        let needle = format!("{name}=\"");
+        let start = match tag.find(&needle) {
+            Some(idx) => idx + needle.len(),
+            None => return tag.to_string(),
+        };
+        let end = match tag[start..].find('"') {
+            Some(idx) => start + idx,
+            None => return tag.to_string(),
+        };
+        let mut out = String::with_capacity(tag.len() + value.len());
+        out.push_str(&tag[..start]);
+        out.push_str(value);
+        out.push_str(&tag[end..]);
+        out
+    }
+
+    fn insert_svg_attr(tag: &str, name: &str, value: &str) -> String {
+        let insert_pos = match tag.find("<svg") {
+            Some(idx) => idx + 4,
+            None => return tag.to_string(),
+        };
+        let mut out = String::with_capacity(tag.len() + name.len() + value.len() + 4);
+        out.push_str(&tag[..insert_pos]);
+        out.push_str(&format!(" {name}=\"{value}\""));
+        out.push_str(&tag[insert_pos..]);
+        out
+    }
+
+    fn parse_viewbox_dims(viewbox: &str) -> Option<(f32, f32)> {
+        let mut nums = Vec::new();
+        for part in viewbox
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|part| !part.is_empty())
+        {
+            if let Ok(value) = part.parse::<f32>() {
+                nums.push(value);
+            }
+        }
+        if nums.len() < 4 {
+            return None;
+        }
+        let width = nums[2];
+        let height = nums[3];
+        if width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0 {
+            Some((width, height))
+        } else {
+            None
+        }
+    }
+
+    fn format_dim(value: f32) -> String {
+        let mut out = format!("{:.3}", value);
+        while out.contains('.') && out.ends_with('0') {
+            out.pop();
+        }
+        if out.ends_with('.') {
+            out.pop();
+        }
+        if out.is_empty() {
+            out.push('0');
+        }
+        out
+    }
+
     fn process_job(&mut self, job: MermaidRequest) -> MermaidResult {
         let MermaidRequest {
             svg_key,
@@ -1048,33 +1352,38 @@ impl MermaidWorker {
             scale_bucket,
             bg,
         } = job;
+        let code_ref = code.as_deref();
         let svg_result = match svg {
             Some(svg) => Ok(svg),
-            None => match code {
-                Some(code) => self.render_svg(svg_key, &code),
+            None => match code_ref {
+                Some(code) => self.render_svg(svg_key, code),
                 None => Err("Mermaid render request missing code".to_string()),
             },
         };
 
         match svg_result {
-            Ok(svg) => match self.rasterize_svg(&svg, width_bucket, scale_bucket, bg) {
-                Ok((rgba, w, h)) => MermaidResult {
-                    svg_key,
-                    texture_key,
-                    svg: Some(svg),
-                    rgba: Some(rgba),
-                    size: Some((w, h)),
-                    error: None,
-                },
-                Err(err) => MermaidResult {
-                    svg_key,
-                    texture_key,
-                    svg: Some(svg),
-                    rgba: None,
-                    size: None,
-                    error: Some(err),
-                },
-            },
+            Ok(svg) => {
+                let svg = Self::normalize_svg_size(&svg);
+                Self::maybe_dump_svg(svg_key, code_ref, &svg);
+                match self.rasterize_svg(&svg, width_bucket, scale_bucket, bg) {
+                    Ok((rgba, w, h)) => MermaidResult {
+                        svg_key,
+                        texture_key,
+                        svg: Some(svg),
+                        rgba: Some(rgba),
+                        size: Some((w, h)),
+                        error: None,
+                    },
+                    Err(err) => MermaidResult {
+                        svg_key,
+                        texture_key,
+                        svg: Some(svg),
+                        rgba: None,
+                        size: None,
+                        error: Some(err),
+                    },
+                }
+            }
             Err(err) => MermaidResult {
                 svg_key,
                 texture_key,
@@ -1171,11 +1480,35 @@ var window = globalThis;
 var __mdmdview_text_cache = {};
 function __mdmdview_measure_text(text, fontSize) {
   var size = fontSize || 16;
-  var key = size + '|' + text;
+  var raw = text ? String(text) : '';
+  var key = size + '|' + raw;
   var hit = __mdmdview_text_cache[key];
   if (hit) { return hit; }
-  var width = (text ? text.length : 0) * size * 0.6;
-  var height = size * 1.2;
+  if (typeof __mdmdview_measure_text_native === 'function') {
+    try {
+      var native = __mdmdview_measure_text_native(raw, size);
+      if (native && typeof native.width === 'number' && typeof native.height === 'number') {
+        __mdmdview_text_cache[key] = native;
+        return native;
+      }
+      if (native && typeof native.length === 'number' && native.length >= 2) {
+        var w = Number(native[0]);
+        var h = Number(native[1]);
+        if (isFinite(w) && isFinite(h)) {
+          var converted = { width: w, height: h };
+          __mdmdview_text_cache[key] = converted;
+          return converted;
+        }
+      }
+    } catch (e) {}
+  }
+  var lines = raw.split(/\n/);
+  var maxLen = 0;
+  for (var i = 0; i < lines.length; i++) {
+    if (lines[i].length > maxLen) { maxLen = lines[i].length; }
+  }
+  var width = maxLen * size * 0.5;
+  var height = lines.length * size * 0.72;
   var res = { width: width, height: height };
   __mdmdview_text_cache[key] = res;
   return res;
@@ -1195,11 +1528,349 @@ function __mdmdview_get_font_size(el) {
   }
   return size;
 }
-function __mdmdview_bbox(el) {
-  var text = (el && el.textContent) ? el.textContent : '';
+function __mdmdview_parse_num(value) {
+  var num = parseFloat(value);
+  return isNaN(num) ? 0 : num;
+}
+function __mdmdview_parse_length(value, fontSize) {
+  if (value === null || value === undefined) { return 0; }
+  var raw = String(value).trim();
+  if (!raw) { return 0; }
+  var num = parseFloat(raw);
+  if (isNaN(num)) { return 0; }
+  if (raw.indexOf('em') >= 0) {
+    return num * (fontSize || 16);
+  }
+  return num;
+}
+function __mdmdview_transform_point(el, x, y) {
+  var box = __mdmdview_apply_transform(el, { x: x, y: y, width: 0, height: 0 });
+  return { x: box.x, y: box.y };
+}
+function __mdmdview_path_points(el) {
+  var d = el && el.getAttribute ? el.getAttribute('d') : null;
+  if (!d) { return []; }
+  var nums = String(d).match(/-?\d*\.?\d+(?:e[-+]?\d+)?/ig);
+  if (!nums || nums.length < 2) { return []; }
+  var points = [];
+  for (var i = 0; i + 1 < nums.length; i += 2) {
+    var x = __mdmdview_parse_num(nums[i]);
+    var y = __mdmdview_parse_num(nums[i + 1]);
+    points.push(__mdmdview_transform_point(el, x, y));
+  }
+  return points;
+}
+function __mdmdview_path_total_length(el) {
+  var points = __mdmdview_path_points(el);
+  if (points.length < 2) { return 0; }
+  var total = 0;
+  for (var i = 1; i < points.length; i++) {
+    var dx = points[i].x - points[i - 1].x;
+    var dy = points[i].y - points[i - 1].y;
+    total += Math.sqrt(dx * dx + dy * dy);
+  }
+  return total;
+}
+function __mdmdview_path_point_at_length(el, length) {
+  var points = __mdmdview_path_points(el);
+  if (!points.length) { return { x: 0, y: 0 }; }
+  if (points.length === 1) { return points[0]; }
+  var remaining = Math.max(0, __mdmdview_parse_num(length));
+  for (var i = 1; i < points.length; i++) {
+    var p0 = points[i - 1];
+    var p1 = points[i];
+    var dx = p1.x - p0.x;
+    var dy = p1.y - p0.y;
+    var seg = Math.sqrt(dx * dx + dy * dy);
+    if (seg <= 0) { continue; }
+    if (remaining <= seg) {
+      var t = remaining / seg;
+      return { x: p0.x + dx * t, y: p0.y + dy * t };
+    }
+    remaining -= seg;
+  }
+  return points[points.length - 1];
+}
+function __mdmdview_text_metrics(el) {
   var size = __mdmdview_get_font_size(el);
-  var m = __mdmdview_measure_text(text, size);
-  return { x: 0, y: 0, width: m.width, height: m.height };
+  if (!el || !el.children || !el.children.length) {
+    var raw = el ? __mdmdview_collect_text(el) : '';
+    return __mdmdview_measure_text(raw, size);
+  }
+  var max_w = 0;
+  var max_h = 0;
+  var lines = 0;
+  for (var i = 0; i < el.children.length; i++) {
+    var child = el.children[i];
+    var tag = (child.tagName || '').toLowerCase();
+    if (tag !== 'tspan') { continue; }
+    var text = __mdmdview_collect_text(child);
+    var m = __mdmdview_measure_text(text, size);
+    if (m.width > max_w) { max_w = m.width; }
+    if (m.height > max_h) { max_h = m.height; }
+    lines += 1;
+  }
+  if (!lines) {
+    var fallback = __mdmdview_collect_text(el);
+    return __mdmdview_measure_text(fallback, size);
+  }
+  var line_height = max_h > 0 ? max_h : size * 1.2;
+  return { width: max_w, height: lines * line_height };
+}
+function __mdmdview_apply_matrix(bbox, a, b, c, d, e, f) {
+  if (!bbox) { return bbox; }
+  var x = bbox.x;
+  var y = bbox.y;
+  var w = bbox.width;
+  var h = bbox.height;
+  var pts = [
+    [x, y],
+    [x + w, y],
+    [x, y + h],
+    [x + w, y + h]
+  ];
+  var min_x = Infinity;
+  var min_y = Infinity;
+  var max_x = -Infinity;
+  var max_y = -Infinity;
+  for (var i = 0; i < pts.length; i++) {
+    var px = pts[i][0];
+    var py = pts[i][1];
+    var nx = a * px + c * py + e;
+    var ny = b * px + d * py + f;
+    if (nx < min_x) { min_x = nx; }
+    if (ny < min_y) { min_y = ny; }
+    if (nx > max_x) { max_x = nx; }
+    if (ny > max_y) { max_y = ny; }
+  }
+  if (!isFinite(min_x) || !isFinite(min_y) || !isFinite(max_x) || !isFinite(max_y)) {
+    return bbox;
+  }
+  return { x: min_x, y: min_y, width: max_x - min_x, height: max_y - min_y };
+}
+function __mdmdview_apply_transform(el, bbox) {
+  if (!el || !bbox) { return bbox; }
+  var transform = el.getAttribute ? el.getAttribute('transform') : null;
+  if (!transform) { return bbox; }
+  var current = bbox;
+  var re = /([a-zA-Z]+)\(([^)]+)\)/g;
+  var match = null;
+  while ((match = re.exec(String(transform))) !== null) {
+    var name = match[1].toLowerCase();
+    var params = match[2].split(/[, ]+/).filter(function(p) { return p.length; });
+    var nums = [];
+    for (var i = 0; i < params.length; i++) {
+      nums.push(__mdmdview_parse_num(params[i]));
+    }
+    if (name === 'translate') {
+      var tx = nums.length ? nums[0] : 0;
+      var ty = nums.length > 1 ? nums[1] : 0;
+      current = __mdmdview_apply_matrix(current, 1, 0, 0, 1, tx, ty);
+    } else if (name === 'scale') {
+      var sx = nums.length ? nums[0] : 1;
+      var sy = nums.length > 1 ? nums[1] : sx;
+      current = __mdmdview_apply_matrix(current, sx, 0, 0, sy, 0, 0);
+    } else if (name === 'matrix' && nums.length >= 6) {
+      current = __mdmdview_apply_matrix(
+        current,
+        nums[0],
+        nums[1],
+        nums[2],
+        nums[3],
+        nums[4],
+        nums[5]
+      );
+    } else if (name === 'rotate' && nums.length) {
+      var angle = nums[0] * Math.PI / 180.0;
+      var cos = Math.cos(angle);
+      var sin = Math.sin(angle);
+      if (nums.length >= 3) {
+        var cx = nums[1];
+        var cy = nums[2];
+        current = __mdmdview_apply_matrix(current, 1, 0, 0, 1, -cx, -cy);
+        current = __mdmdview_apply_matrix(current, cos, sin, -sin, cos, 0, 0);
+        current = __mdmdview_apply_matrix(current, 1, 0, 0, 1, cx, cy);
+      } else {
+        current = __mdmdview_apply_matrix(current, cos, sin, -sin, cos, 0, 0);
+      }
+    } else if (name === 'skewx' && nums.length) {
+      var ax = nums[0] * Math.PI / 180.0;
+      current = __mdmdview_apply_matrix(current, 1, 0, Math.tan(ax), 1, 0, 0);
+    } else if (name === 'skewy' && nums.length) {
+      var ay = nums[0] * Math.PI / 180.0;
+      current = __mdmdview_apply_matrix(current, 1, Math.tan(ay), 0, 1, 0, 0);
+    }
+  }
+  return current;
+}
+function __mdmdview_bbox(el) {
+  if (!el) { return { x: 0, y: 0, width: 0, height: 0 }; }
+  var tag = (el.tagName || '').toLowerCase();
+  if (
+    tag === 'style'
+    || tag === 'defs'
+    || tag === 'script'
+    || tag === 'title'
+    || tag === 'desc'
+    || tag === 'metadata'
+    || tag === 'marker'
+    || tag === 'clippath'
+    || tag === 'mask'
+    || tag === 'pattern'
+    || tag === 'lineargradient'
+    || tag === 'radialgradient'
+    || tag === 'stop'
+  ) {
+    return { x: 0, y: 0, width: 0, height: 0 };
+  }
+  if (tag === '#text') {
+    var text = el.textContent || '';
+    var size = __mdmdview_get_font_size(el);
+    var m = __mdmdview_measure_text(text, size);
+    return __mdmdview_apply_transform(el, { x: 0, y: 0, width: m.width, height: m.height });
+  }
+  if (tag === 'text' || tag === 'tspan') {
+    var metrics = __mdmdview_text_metrics(el);
+    var fontSize = __mdmdview_get_font_size(el);
+    var tx = __mdmdview_parse_num(el.getAttribute ? el.getAttribute('x') : 0);
+    var ty = __mdmdview_parse_num(el.getAttribute ? el.getAttribute('y') : 0);
+    var dx = __mdmdview_parse_length(el.getAttribute ? el.getAttribute('dx') : 0, fontSize);
+    var dy = __mdmdview_parse_length(el.getAttribute ? el.getAttribute('dy') : 0, fontSize);
+    if (tag === 'text' && el.children && el.children.length) {
+      var first = el.children[0];
+      var firstTag = (first.tagName || '').toLowerCase();
+      if (firstTag === 'tspan') {
+        if (!dx) { dx = __mdmdview_parse_length(first.getAttribute('dx'), fontSize); }
+        if (!dy) { dy = __mdmdview_parse_length(first.getAttribute('dy'), fontSize); }
+      }
+    }
+    tx += dx;
+    ty += dy;
+    var anchor = el.getAttribute ? el.getAttribute('text-anchor') : null;
+    if (!anchor && el.style && el.style.textAnchor) { anchor = el.style.textAnchor; }
+    if (anchor === 'middle') {
+      tx -= metrics.width * 0.5;
+    } else if (anchor === 'end' || anchor === 'right') {
+      tx -= metrics.width;
+    }
+    var baseline = el.getAttribute ? el.getAttribute('dominant-baseline') : null;
+    if (!baseline && el.style && el.style.dominantBaseline) { baseline = el.style.dominantBaseline; }
+    var y = ty - metrics.height * 0.3;
+    if (baseline === 'middle' || baseline === 'central') {
+      y = ty - metrics.height * 0.5;
+    } else if (baseline === 'hanging') {
+      y = ty;
+    }
+    return __mdmdview_apply_transform(el, {
+      x: tx,
+      y: y,
+      width: metrics.width,
+      height: metrics.height
+    });
+  }
+  if (tag === 'rect') {
+    var rx = __mdmdview_parse_num(el.getAttribute('x'));
+    var ry = __mdmdview_parse_num(el.getAttribute('y'));
+    var rw = __mdmdview_parse_num(el.getAttribute('width'));
+    var rh = __mdmdview_parse_num(el.getAttribute('height'));
+    return __mdmdview_apply_transform(el, { x: rx, y: ry, width: rw, height: rh });
+  }
+  if (tag === 'circle') {
+    var cx = __mdmdview_parse_num(el.getAttribute('cx'));
+    var cy = __mdmdview_parse_num(el.getAttribute('cy'));
+    var r = __mdmdview_parse_num(el.getAttribute('r'));
+    return __mdmdview_apply_transform(el, { x: cx - r, y: cy - r, width: r * 2, height: r * 2 });
+  }
+  if (tag === 'ellipse') {
+    var ecx = __mdmdview_parse_num(el.getAttribute('cx'));
+    var ecy = __mdmdview_parse_num(el.getAttribute('cy'));
+    var erx = __mdmdview_parse_num(el.getAttribute('rx'));
+    var ery = __mdmdview_parse_num(el.getAttribute('ry'));
+    return __mdmdview_apply_transform(el, { x: ecx - erx, y: ecy - ery, width: erx * 2, height: ery * 2 });
+  }
+  if (tag === 'line') {
+    var x1 = __mdmdview_parse_num(el.getAttribute('x1'));
+    var y1 = __mdmdview_parse_num(el.getAttribute('y1'));
+    var x2 = __mdmdview_parse_num(el.getAttribute('x2'));
+    var y2 = __mdmdview_parse_num(el.getAttribute('y2'));
+    var min_x = Math.min(x1, x2);
+    var min_y = Math.min(y1, y2);
+    var max_x = Math.max(x1, x2);
+    var max_y = Math.max(y1, y2);
+    return __mdmdview_apply_transform(el, { x: min_x, y: min_y, width: max_x - min_x, height: max_y - min_y });
+  }
+  if (tag === 'polygon' || tag === 'polyline') {
+    var points = el.getAttribute('points');
+    if (points) {
+      var parts = String(points).trim().split(/[\s,]+/).filter(function(p) { return p.length; });
+      if (parts.length >= 2) {
+        var min_px = Infinity;
+        var min_py = Infinity;
+        var max_px = -Infinity;
+        var max_py = -Infinity;
+        for (var i = 0; i + 1 < parts.length; i += 2) {
+          var px = __mdmdview_parse_num(parts[i]);
+          var py = __mdmdview_parse_num(parts[i + 1]);
+          if (px < min_px) { min_px = px; }
+          if (py < min_py) { min_py = py; }
+          if (px > max_px) { max_px = px; }
+          if (py > max_py) { max_py = py; }
+        }
+        if (isFinite(min_px) && isFinite(min_py) && isFinite(max_px) && isFinite(max_py)) {
+          return __mdmdview_apply_transform(el, {
+            x: min_px,
+            y: min_py,
+            width: max_px - min_px,
+            height: max_py - min_py
+          });
+        }
+      }
+    }
+  }
+  if (tag === 'path') {
+    var d = el.getAttribute('d');
+    if (d) {
+      var nums = String(d).match(/-?\d*\.?\d+(?:e[-+]?\d+)?/ig);
+      if (nums && nums.length >= 2) {
+        var min_px = Infinity;
+        var min_py = Infinity;
+        var max_px = -Infinity;
+        var max_py = -Infinity;
+        for (var i = 0; i + 1 < nums.length; i += 2) {
+          var px = __mdmdview_parse_num(nums[i]);
+          var py = __mdmdview_parse_num(nums[i + 1]);
+          if (px < min_px) { min_px = px; }
+          if (py < min_py) { min_py = py; }
+          if (px > max_px) { max_px = px; }
+          if (py > max_py) { max_py = py; }
+        }
+        if (isFinite(min_px) && isFinite(min_py) && isFinite(max_px) && isFinite(max_py)) {
+          return __mdmdview_apply_transform(el, { x: min_px, y: min_py, width: max_px - min_px, height: max_py - min_py });
+        }
+      }
+    }
+  }
+  if (el.children && el.children.length) {
+    var min_x = Infinity;
+    var min_y = Infinity;
+    var max_x = -Infinity;
+    var max_y = -Infinity;
+    for (var i = 0; i < el.children.length; i++) {
+      var child_box = __mdmdview_bbox(el.children[i]);
+      if (!child_box) { continue; }
+      if (child_box.x < min_x) { min_x = child_box.x; }
+      if (child_box.y < min_y) { min_y = child_box.y; }
+      if (child_box.x + child_box.width > max_x) { max_x = child_box.x + child_box.width; }
+      if (child_box.y + child_box.height > max_y) { max_y = child_box.y + child_box.height; }
+    }
+    if (isFinite(min_x) && isFinite(min_y) && isFinite(max_x) && isFinite(max_y)) {
+      return __mdmdview_apply_transform(el, { x: min_x, y: min_y, width: max_x - min_x, height: max_y - min_y });
+    }
+  }
+  var fallback_text = el.textContent || '';
+  var fallback_size = __mdmdview_get_font_size(el);
+  var fallback = __mdmdview_measure_text(fallback_text, fallback_size);
+  return __mdmdview_apply_transform(el, { x: 0, y: 0, width: fallback.width, height: fallback.height });
 }
 function __mdmdview_escape_text(text) {
   return String(text)
@@ -1207,19 +1878,55 @@ function __mdmdview_escape_text(text) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 }
+function __mdmdview_collect_text(node) {
+  if (!node) { return ''; }
+  if (node.tagName === '#text') { return node.textContent || ''; }
+  var out = '';
+  if (node.children && node.children.length) {
+    for (var i = 0; i < node.children.length; i++) {
+      out += __mdmdview_collect_text(node.children[i]);
+    }
+  }
+  if (out && out.length) { return out; }
+  return node.textContent || '';
+}
 function __mdmdview_escape_attr(text) {
   return String(text)
     .replace(/&/g, '&amp;')
     .replace(/"/g, '&quot;');
 }
+function __mdmdview_style_text(style) {
+  if (!style) { return ''; }
+  if (typeof style.cssText === 'string' && style.cssText.trim().length) {
+    return style.cssText;
+  }
+  var parts = [];
+  for (var key in style) {
+    if (!Object.prototype.hasOwnProperty.call(style, key)) { continue; }
+    if (key === 'cssText') { continue; }
+    var val = style[key];
+    if (typeof val === 'function') { continue; }
+    if (val === null || val === undefined || val === '') { continue; }
+    parts.push(key + ':' + String(val));
+  }
+  return parts.join(';');
+}
 function __mdmdview_serialize_attrs(node) {
   var out = '';
   if (!node || !node.attributes) { return out; }
+  var has_style = false;
   for (var key in node.attributes) {
     if (!Object.prototype.hasOwnProperty.call(node.attributes, key)) { continue; }
     var val = node.attributes[key];
     if (val === null || val === undefined) { continue; }
+    if (key === 'style') { has_style = true; }
     out += ' ' + key + '="' + __mdmdview_escape_attr(val) + '"';
+  }
+  if (!has_style && node.style) {
+    var style_text = __mdmdview_style_text(node.style);
+    if (style_text) {
+      out += ' style="' + __mdmdview_escape_attr(style_text) + '"';
+    }
   }
   return out;
 }
@@ -1231,12 +1938,21 @@ function __mdmdview_serialize(node) {
   var tag = node.tagName || '';
   var attrs = __mdmdview_serialize_attrs(node);
   var content = '';
+  var lower = String(tag).toLowerCase();
   if (node.children && node.children.length) {
-    for (var i = 0; i < node.children.length; i++) {
-      content += __mdmdview_serialize(node.children[i]);
+    if (lower === 'style' || lower === 'script') {
+      content = __mdmdview_collect_text(node);
+    } else {
+      for (var i = 0; i < node.children.length; i++) {
+        content += __mdmdview_serialize(node.children[i]);
+      }
     }
   } else if (node.textContent) {
-    content = __mdmdview_escape_text(node.textContent);
+    if (lower === 'style' || lower === 'script') {
+      content = node.textContent;
+    } else {
+      content = __mdmdview_escape_text(node.textContent);
+    }
   }
   return '<' + tag + attrs + '>' + content + '</' + tag + '>';
 }
@@ -1249,7 +1965,7 @@ function __mdmdview_serialize_children(node) {
   return content;
 }
 function __mdmdview_make_style() {
-  var style = {};
+  var style = { cssText: '' };
   style.setProperty = function(key, value) { style[key] = String(value); };
   style.removeProperty = function(key) { delete style[key]; };
   style.getPropertyValue = function(key) {
@@ -1331,6 +2047,13 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
         if (!Object.prototype.hasOwnProperty.call(this.attributes, key)) { continue; }
         copy.attributes[key] = this.attributes[key];
       }
+      if (this.style) {
+        for (var prop in this.style) {
+          if (!Object.prototype.hasOwnProperty.call(this.style, prop)) { continue; }
+          if (typeof this.style[prop] === 'function') { continue; }
+          copy.style[prop] = this.style[prop];
+        }
+      }
       if (deep && this.children && this.children.length) {
         for (var i = 0; i < this.children.length; i++) {
           copy.appendChild(this.children[i].cloneNode(true));
@@ -1340,8 +2063,44 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
     },
     getBBox: function() { return __mdmdview_bbox(this); },
     getBoundingClientRect: function() { return __mdmdview_bbox(this); },
-    getComputedTextLength: function() { return __mdmdview_bbox(this).width; }
+    getComputedTextLength: function() { return __mdmdview_bbox(this).width; },
+    getTotalLength: function() { return __mdmdview_path_total_length(this); },
+    getPointAtLength: function(len) { return __mdmdview_path_point_at_length(this, len); }
   };
+  var classList = {
+    add: function() {
+      var list = __mdmdview_get_class_list(node);
+      for (var i = 0; i < arguments.length; i++) {
+        var cls = String(arguments[i]);
+        if (cls && list.indexOf(cls) < 0) { list.push(cls); }
+      }
+      __mdmdview_set_class_list(node, list);
+    },
+    remove: function() {
+      var list = __mdmdview_get_class_list(node);
+      var next = [];
+      for (var i = 0; i < list.length; i++) {
+        var keep = true;
+        for (var j = 0; j < arguments.length; j++) {
+          if (list[i] === String(arguments[j])) { keep = false; break; }
+        }
+        if (keep) { next.push(list[i]); }
+      }
+      __mdmdview_set_class_list(node, next);
+    },
+    contains: function(cls) { return __mdmdview_has_class(node, cls); },
+    toggle: function(cls, force) {
+      var list = __mdmdview_get_class_list(node);
+      var name = String(cls);
+      var has = list.indexOf(name) >= 0;
+      var should_add = force === undefined ? !has : !!force;
+      if (should_add && !has) { list.push(name); }
+      if (!should_add && has) { list = list.filter(function(item) { return item !== name; }); }
+      __mdmdview_set_class_list(node, list);
+      return should_add;
+    }
+  };
+  node.classList = classList;
   Object.defineProperty(node, 'innerHTML', {
     get: function() { return __mdmdview_serialize_children(this); },
     set: function(value) {
@@ -1350,6 +2109,14 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
       this.firstChild = null;
       this.textContent = value ? String(value) : '';
     },
+    configurable: true
+  });
+  Object.defineProperty(node, 'className', {
+    get: function() {
+      var cls = this.getAttribute('class');
+      return cls ? String(cls) : '';
+    },
+    set: function(value) { this.setAttribute('class', value); },
     configurable: true
   });
   Object.defineProperty(node, 'outerHTML', {
@@ -1419,6 +2186,20 @@ function __mdmdview_find_by_tag(node, tag, matches) {
   for (var i = 0; i < node.children.length; i++) {
     __mdmdview_find_by_tag(node.children[i], tag, matches);
   }
+}
+function __mdmdview_get_class_list(node) {
+  if (!node) { return []; }
+  var raw = null;
+  if (node.getAttribute) { raw = node.getAttribute('class'); }
+  if (raw === null || raw === undefined) { raw = node.attributes && node.attributes['class']; }
+  if (!raw) { return []; }
+  return String(raw).split(/\s+/).filter(function(item) { return item.length > 0; });
+}
+function __mdmdview_set_class_list(node, list) {
+  if (!node) { return; }
+  var value = (list || []).filter(function(item) { return item.length > 0; }).join(' ');
+  if (node.setAttribute) { node.setAttribute('class', value); }
+  else if (node.attributes) { node.attributes['class'] = value; }
 }
 function __mdmdview_has_class(node, className) {
   if (!node || !className) { return false; }
@@ -1822,6 +2603,62 @@ window.console = {
 window.fetch = function(){ throw new Error('fetch disabled'); };
 window.XMLHttpRequest = function(){ throw new Error('XMLHttpRequest disabled'); };
 window.DOMPurify = { sanitize: function(html){ return html; } };
+window.__mdmdview_viewport_width = 1200;
+window.__mdmdview_viewport_height = 900;
+Object.defineProperty(window, 'innerWidth', {
+  get: function() { return window.__mdmdview_viewport_width || 0; },
+  configurable: true
+});
+Object.defineProperty(window, 'innerHeight', {
+  get: function() { return window.__mdmdview_viewport_height || 0; },
+  configurable: true
+});
+if (!Object.prototype.hasOwnProperty('parentElement')) {
+  Object.defineProperty(Object.prototype, 'parentElement', {
+    get: function() {
+      var p = this && this.parentNode ? this.parentNode : null;
+      if (p && p.tagName) { return p; }
+      return null;
+    },
+    configurable: true
+  });
+}
+if (!Object.prototype.hasOwnProperty('offsetWidth')) {
+  Object.defineProperty(Object.prototype, 'offsetWidth', {
+    get: function() {
+      if (this && typeof this.getBBox === 'function') {
+        var width = this.getBBox().width || 0;
+        if (width) { return width; }
+      }
+      return window.innerWidth || 0;
+    },
+    configurable: true
+  });
+}
+if (!Object.prototype.hasOwnProperty('offsetHeight')) {
+  Object.defineProperty(Object.prototype, 'offsetHeight', {
+    get: function() {
+      if (this && typeof this.getBBox === 'function') {
+        var height = this.getBBox().height || 0;
+        if (height) { return height; }
+      }
+      return window.innerHeight || 0;
+    },
+    configurable: true
+  });
+}
+if (!Object.prototype.hasOwnProperty('clientWidth')) {
+  Object.defineProperty(Object.prototype, 'clientWidth', {
+    get: function() { return this.offsetWidth || 0; },
+    configurable: true
+  });
+}
+if (!Object.prototype.hasOwnProperty('clientHeight')) {
+  Object.defineProperty(Object.prototype, 'clientHeight', {
+    get: function() { return this.offsetHeight || 0; },
+    configurable: true
+  });
+}
 "#;
 
 #[cfg(feature = "mermaid-quickjs")]
@@ -2071,6 +2908,8 @@ mod tests {
         let flow = "graph TD; A-->B;";
         let seq = "sequenceDiagram\nAlice->>Bob: Hello\nBob-->>Alice: Hi";
         let class = "classDiagram\nClass01 <|-- Class02\nClass01 : +int id\nClass02 : +String name";
+        let er = "erDiagram\nCUSTOMER ||--o{ ORDER : places\nORDER ||--|{ LINE_ITEM : contains\nCUSTOMER {\n  int id\n  string name\n}\nORDER {\n  int id\n  date created\n}\nLINE_ITEM {\n  int id\n  int qty\n}\n";
+        let gantt = "gantt\ntitle Sample Gantt\ndateFormat  YYYY-MM-DD\nsection A\nTask 1 :a1, 2024-01-01, 5d\nTask 2 :after a1, 3d\nsection B\nTask 3 :b1, 2024-01-06, 4d\n";
 
         let flow_svg = worker
             .render_svg(MermaidRenderer::hash_str(flow), flow)
@@ -2081,10 +2920,18 @@ mod tests {
         let class_svg = worker
             .render_svg(MermaidRenderer::hash_str(class), class)
             .expect("class render");
+        let er_svg = worker
+            .render_svg(MermaidRenderer::hash_str(er), er)
+            .expect("er render");
+        let gantt_svg = worker
+            .render_svg(MermaidRenderer::hash_str(gantt), gantt)
+            .expect("gantt render");
 
         assert!(flow_svg.contains("<svg"));
         assert!(seq_svg.contains("<svg"));
         assert!(class_svg.contains("<svg"));
+        assert!(er_svg.contains("<svg"));
+        assert!(gantt_svg.contains("<svg"));
 
         let width_bucket = MermaidRenderer::width_bucket(600.0);
         let scale_bucket = MermaidRenderer::scale_bucket(1.0);
