@@ -4904,11 +4904,10 @@ impl MarkdownRenderer {
                 None => return None,
             }
         } else {
-            let img = image::load_from_memory(&bytes).ok()?;
-            let rgba = img.to_rgba8();
-            let (w, h) = rgba.dimensions();
-            let ci = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
-            (ci, w, h)
+            match image_decode::raster_bytes_to_color_image_with_bg(&bytes, None) {
+                Some((ci, w, h)) => (ci, w, h),
+                None => return None,
+            }
         };
         let tex = ui.ctx().load_texture(
             format!("img:{}", resolved_src),
@@ -4926,7 +4925,7 @@ impl MarkdownRenderer {
 
     fn image_source_stale(cached_modified: Option<SystemTime>, path: &Path) -> bool {
         if !path.exists() {
-            return false;
+            return cached_modified.is_some();
         }
         let current = Self::disk_image_timestamp(path);
         match (cached_modified, current) {
@@ -5444,6 +5443,9 @@ mod tests {
         std::thread::sleep(StdDuration::from_millis(5));
         std::fs::write(&file_path, [4u8, 3, 2, 1]).expect("rewrite image");
 
+        assert!(MarkdownRenderer::image_source_stale(initial, &file_path));
+
+        std::fs::remove_file(&file_path).expect("remove image");
         assert!(MarkdownRenderer::image_source_stale(initial, &file_path));
     }
 

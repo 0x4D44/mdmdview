@@ -279,6 +279,44 @@ mod tests {
     }
 
     #[test]
+    fn test_load_window_state_rejects_invalid_numbers() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+
+        let mut config = temp.path().join("MarkdownView");
+        std::fs::create_dir_all(&config).expect("create config dir");
+        config.push("window_state.txt");
+        std::fs::write(&config, "x y 10 20 true").expect("write bad data");
+
+        assert!(load_window_state().is_none());
+    }
+
+    #[test]
+    fn test_load_window_state_parses_maximized_true() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+
+        let mut config = temp.path().join("MarkdownView");
+        std::fs::create_dir_all(&config).expect("create config dir");
+        config.push("window_state.txt");
+        std::fs::write(&config, "10 20 300 400 true").expect("write data");
+
+        let loaded = load_window_state().expect("load");
+        assert!(loaded.maximized);
+    }
+
+    #[test]
+    fn test_load_window_state_returns_none_when_missing() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+
+        assert!(load_window_state().is_none());
+    }
+
+    #[test]
     fn test_config_dir_falls_back_to_xdg() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");

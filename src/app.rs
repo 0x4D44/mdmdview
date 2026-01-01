@@ -1689,11 +1689,8 @@ impl MarkdownViewerApp {
                 });
             });
     }
-}
 
-impl eframe::App for MarkdownViewerApp {
-    /// Update function called every frame
-    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+    fn update_impl(&mut self, ctx: &Context) {
         self.handle_screenshot_events(ctx);
         if self.screenshot.as_ref().is_some_and(|state| state.done) {
             return;
@@ -2029,6 +2026,13 @@ impl eframe::App for MarkdownViewerApp {
             // Render drag-and-drop overlay (must be last to appear on top)
             self.render_drag_overlay(ctx);
         }
+    }
+}
+
+impl eframe::App for MarkdownViewerApp {
+    /// Update function called every frame
+    fn update(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        self.update_impl(ctx);
     }
 
     fn auto_save_interval(&self) -> std::time::Duration {
@@ -2437,6 +2441,22 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    fn run_app_frame(app: &mut MarkdownViewerApp, ctx: &egui::Context, input: egui::RawInput) {
+        let _ = ctx.run(input, |ctx| {
+            app.update_impl(ctx);
+        });
+    }
+
+    fn default_input() -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(960.0, 640.0),
+            )),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_normalize_line_endings() {
@@ -3136,5 +3156,137 @@ The end.
             .unwrap()
             .contains("No markdown files"));
         Ok(())
+    }
+
+    #[test]
+    fn test_toggle_write_mode_tracks_cursor_and_focus() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_mode = ViewMode::Raw;
+        app.write_enabled = false;
+        app.raw_focus_requested = false;
+
+        let ctx = egui::Context::default();
+        let editor_id = egui::Id::new("raw_editor");
+        let mut state = egui::text_edit::TextEditState::default();
+        let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(3));
+        state.cursor.set_char_range(Some(cr));
+        state.store(&ctx, editor_id);
+
+        app.toggle_write_mode(&ctx);
+        assert!(app.write_enabled);
+        assert!(app.raw_focus_requested);
+
+        app.toggle_write_mode(&ctx);
+        assert!(!app.write_enabled);
+        assert_eq!(app.raw_cursor, Some(3));
+    }
+
+    #[test]
+    fn test_find_next_and_previous_wraps() {
+        let mut app = MarkdownViewerApp::new();
+        app.load_content("Alpha\n\nBeta\n\nGamma", Some("Search".to_string()));
+        app.search_query = "beta".to_string();
+
+        app.find_next();
+        assert_eq!(app.last_match_index, Some(1));
+        assert_eq!(app.pending_scroll_to_element, Some(1));
+
+        app.find_next();
+        assert_eq!(app.last_match_index, Some(1));
+
+        app.find_previous();
+        assert_eq!(app.last_match_index, Some(1));
+    }
+
+    #[test]
+    fn test_update_impl_rendered_view_runs() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        app.nav_request = Some(NavigationRequest::PageDown);
+        app.toggle_fullscreen = true;
+
+        let mut temp_file = tempfile::Builder::new().suffix(".md").tempfile()?;
+        temp_file.write_all(b"# Dropped\nContent")?;
+        temp_file.flush()?;
+
+        let ctx = egui::Context::default();
+        let mut input = default_input();
+        if let Some(vp) = input.viewports.get_mut(&egui::ViewportId::ROOT) {
+            vp.monitor_size = Some(egui::vec2(1024.0, 768.0));
+            vp.outer_rect = Some(egui::Rect::from_min_size(
+                egui::pos2(1200.0, 900.0),
+                egui::vec2(800.0, 600.0),
+            ));
+            vp.inner_rect = Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(800.0, 600.0),
+            ));
+            vp.fullscreen = Some(false);
+            vp.maximized = Some(false);
+        }
+        input.hovered_files.push(egui::HoveredFile {
+            path: Some(temp_file.path().to_path_buf()),
+            ..Default::default()
+        });
+        input.dropped_files.push(egui::DroppedFile {
+            path: Some(temp_file.path().to_path_buf()),
+            ..Default::default()
+        });
+
+        run_app_frame(&mut app, &ctx, input);
+
+        assert!(app.drag_hover);
+        assert!(app.current_file.is_some());
+        assert!(app.last_window_pos.is_some());
+        assert!(app.last_window_size.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn test_update_impl_reload_without_file_sets_error() {
+        let mut app = MarkdownViewerApp::new();
+        app.reload_requested = true;
+
+        let ctx = egui::Context::default();
+        let input = default_input();
+        run_app_frame(&mut app, &ctx, input);
+
+        assert!(app.error_message.is_some());
+    }
+
+    #[test]
+    fn test_update_impl_raw_read_only_renders() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_mode = ViewMode::Raw;
+        app.write_enabled = false;
+        app.raw_buffer = "Line 1\nLine 2".to_string();
+        app.current_content = app.raw_buffer.clone();
+
+        let ctx = egui::Context::default();
+        let input = default_input();
+        run_app_frame(&mut app, &ctx, input);
+
+        assert_eq!(app.raw_buffer, "Line 1\nLine 2");
+    }
+
+    #[test]
+    fn test_update_impl_moves_raw_cursor() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_mode = ViewMode::Raw;
+        app.write_enabled = true;
+        app.raw_buffer = "Line 1\nLine 2\nLine 3".to_string();
+        app.current_content = app.raw_buffer.clone();
+        app.pending_raw_cursor_line_move = Some(1);
+
+        let ctx = egui::Context::default();
+        let editor_id = egui::Id::new("raw_editor");
+        let mut state = egui::text_edit::TextEditState::default();
+        let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(0));
+        state.cursor.set_char_range(Some(cr));
+        state.store(&ctx, editor_id);
+
+        let input = default_input();
+        run_app_frame(&mut app, &ctx, input);
+
+        assert!(app.raw_cursor.unwrap_or(0) > 0);
     }
 }

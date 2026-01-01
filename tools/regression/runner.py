@@ -205,7 +205,6 @@ def run_mdmdview_capture(
 
     env = dict(os.environ)
     env["MDMDVIEW_MERMAID_RENDERER"] = "embedded"
-    env["MDMDVIEW_ENABLE_KROKI"] = "0"
     subprocess.run(cmd, check=True, env=env)
 
 

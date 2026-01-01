@@ -165,6 +165,7 @@ fn load_fonts_from_dir(ctx: &egui::Context, dir: &Path) -> Result<(), String> {
     let mut fonts = egui::FontDefinitions::default();
     let mut prop_names = Vec::new();
     let mut mono_names = Vec::new();
+    let mut used_names = std::collections::HashSet::new();
 
     for path in font_paths {
         let bytes =
@@ -174,7 +175,14 @@ fn load_fonts_from_dir(ctx: &egui::Context, dir: &Path) -> Result<(), String> {
             .and_then(|stem| stem.to_str())
             .map(|stem| stem.to_string())
             .unwrap_or_else(|| format!("font-{}", prop_names.len() + mono_names.len()));
-        let name = format!("test-{name}");
+        let base = format!("test-{name}");
+        let mut name = base.clone();
+        let mut counter = 1usize;
+        while used_names.contains(&name) {
+            name = format!("{base}-{counter}");
+            counter += 1;
+        }
+        used_names.insert(name.clone());
 
         fonts
             .font_data

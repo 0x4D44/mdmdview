@@ -24,9 +24,6 @@ cargo run
 # Run with a specific file
 cargo run -- document.md
 
-# Run with Kroki enabled
-MDMDVIEW_ENABLE_KROKI=1 cargo run
-
 # Run tests
 cargo test
 
@@ -98,7 +95,7 @@ The application supports dragging files and folders directly from your file expl
    - Syntax highlighting with syntect
    - Inline element handling (code, links, formatting)
    - Image loading and texture management with live refresh
-   - Mermaid diagram rendering (Kroki service or QuickJS offline)
+   - Mermaid diagram rendering (QuickJS offline when feature enabled)
    - Table rendering with striped rows
    - Internal anchor navigation for links like `[Section](#section)`
    - Search highlighting with grapheme-aware text matching
@@ -185,22 +182,14 @@ Images are loaded and cached with live refresh:
 
 ### Mermaid Diagram Rendering
 
-Two rendering modes available:
-1. **Kroki Service** (default, network-based):
-   - Network-based rendering via Kroki API
-   - Enable with `MDMDVIEW_ENABLE_KROKI=1` environment variable
-   - Custom instance: `MDMDVIEW_KROKI_URL=https://your-instance.com`
-   - Background rendering with worker pool (max 4 concurrent workers)
-   - Queue status UI panel when workers busy
+Embedded QuickJS rendering (offline):
+- Enable at compile time with `--features mermaid-quickjs`
+- Requires `assets/vendor/mermaid.min.js` file
+- JavaScript embedded during build via `build.rs`
+- Uses `rquickjs` crate for JS execution
+- No network dependency
 
-2. **QuickJS** (optional, offline):
-   - Enable at compile time with `--features mermaid-quickjs`
-   - Requires `assets/vendor/mermaid.min.js` file
-   - JavaScript embedded during build via `build.rs`
-   - Uses `rquickjs` crate for JS execution
-   - No network dependency
-
-Both modes share caching and zoom behavior. Diagram textures are stored with refresh timestamps.
+Diagram textures are cached and scale with zoom.
 
 ### Font and Rendering
 
@@ -293,8 +282,10 @@ Key types for markdown representation:
   - Adds `rquickjs` dependency
 
 ### Environment Variables
-- `MDMDVIEW_ENABLE_KROKI=1`: Enable Kroki service for Mermaid diagram rendering
-- `MDMDVIEW_KROKI_URL`: Custom Kroki server URL (default: public Kroki instance)
+- `MDMDVIEW_MERMAID_RENDERER`: Mermaid renderer (`embedded`, `off`)
+- `MDMDVIEW_MERMAID_SECURITY`: Mermaid security level (`strict`, `loose`)
+- `MDMDVIEW_MERMAID_BG`: Mermaid background (`theme`, `light`, `dark`, `transparent`)
+- `MDMDVIEW_MERMAID_BG_COLOR`: Override Mermaid background color (hex)
 - `RUST_LOG`: Control logging level in debug builds (via `env_logger`)
 
 ## Platform-Specific Features
