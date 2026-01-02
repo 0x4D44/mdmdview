@@ -171,12 +171,50 @@ fn save_window_state_registry(state: &WindowState) -> std::io::Result<()> {
 }
 
 #[cfg(all(windows, test))]
+thread_local! {
+    static FORCED_REGISTRY_LOAD: std::cell::RefCell<Option<WindowState>> =
+        std::cell::RefCell::new(None);
+    static FORCED_REGISTRY_SAVE_ERROR: std::cell::RefCell<bool> =
+        std::cell::RefCell::new(false);
+}
+
+#[cfg(all(windows, test))]
+fn take_forced_registry_load() -> Option<WindowState> {
+    FORCED_REGISTRY_LOAD.with(|slot| slot.borrow_mut().take())
+}
+
+#[cfg(all(windows, test))]
+fn take_forced_registry_save_error() -> bool {
+    FORCED_REGISTRY_SAVE_ERROR.with(|flag| flag.replace(false))
+}
+
+#[cfg(all(windows, test))]
+fn force_registry_load_once(state: WindowState) {
+    FORCED_REGISTRY_LOAD.with(|slot| {
+        *slot.borrow_mut() = Some(state);
+    });
+}
+
+#[cfg(all(windows, test))]
+fn force_registry_save_error_once() {
+    FORCED_REGISTRY_SAVE_ERROR.with(|flag| {
+        *flag.borrow_mut() = true;
+    });
+}
+
+#[cfg(all(windows, test))]
 fn load_window_state_registry() -> Option<WindowState> {
-    None
+    take_forced_registry_load()
 }
 
 #[cfg(all(windows, test))]
 fn save_window_state_registry(_state: &WindowState) -> std::io::Result<()> {
+    if take_forced_registry_save_error() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "forced registry error",
+        ));
+    }
     Ok(())
 }
 
@@ -262,6 +300,74 @@ mod tests {
         assert_eq!(loaded.pos, state.pos);
         assert_eq!(loaded.size, state.size);
         assert_eq!(loaded.maximized, state.maximized);
+    }
+
+    #[test]
+    fn test_save_window_state_creates_dir_and_writes_file() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+
+        let config_dir = temp.path().join("MarkdownView");
+        let _ = fs::remove_dir_all(&config_dir);
+
+        let state = WindowState {
+            pos: [10.0, 20.0],
+            size: [800.0, 600.0],
+            maximized: true,
+        };
+        save_window_state(&state).expect("save");
+
+        let path = config_dir.join("window_state.txt");
+        let contents = fs::read_to_string(&path).expect("read");
+        let mut parts = contents.split_whitespace();
+        let pos_x: f32 = parts.next().expect("pos x").parse().expect("parse pos x");
+        let pos_y: f32 = parts.next().expect("pos y").parse().expect("parse pos y");
+        let size_x: f32 = parts.next().expect("size x").parse().expect("parse size x");
+        let size_y: f32 = parts.next().expect("size y").parse().expect("parse size y");
+        let max_flag = parts.next().expect("max flag");
+        assert_eq!(pos_x, state.pos[0]);
+        assert_eq!(pos_y, state.pos[1]);
+        assert_eq!(size_x, state.size[0]);
+        assert_eq!(size_y, state.size[1]);
+        assert_eq!(max_flag, "1");
+    }
+
+    #[test]
+    fn test_load_window_state_prefers_registry_when_forced() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+
+        let state = WindowState {
+            pos: [42.0, 24.0],
+            size: [800.0, 600.0],
+            maximized: true,
+        };
+        force_registry_load_once(state);
+
+        let loaded = load_window_state().expect("load");
+        assert_eq!(loaded.pos, state.pos);
+        assert_eq!(loaded.size, state.size);
+        assert_eq!(loaded.maximized, state.maximized);
+    }
+
+    #[test]
+    fn test_save_window_state_registry_error_still_writes_file() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+        force_registry_save_error_once();
+
+        let state = WindowState {
+            pos: [10.0, 20.0],
+            size: [1024.0, 768.0],
+            maximized: false,
+        };
+        save_window_state(&state).expect("save");
+
+        let path = temp.path().join("MarkdownView").join("window_state.txt");
+        assert!(path.exists());
     }
 
     #[test]

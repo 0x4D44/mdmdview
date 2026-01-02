@@ -1,5 +1,17 @@
 use egui::ColorImage;
+#[cfg(test)]
+use std::cell::RefCell;
 use std::io::Cursor;
+
+#[cfg(test)]
+thread_local! {
+    static FORCED_ZERO_SVG_DIMENSIONS: RefCell<bool> = RefCell::new(false);
+}
+
+#[cfg(test)]
+fn take_forced_zero_svg_dimensions() -> bool {
+    FORCED_ZERO_SVG_DIMENSIONS.with(|flag| flag.replace(false))
+}
 
 const MAX_IMAGE_SIDE: u32 = 4096;
 const MAX_IMAGE_PIXELS: u64 = MAX_IMAGE_SIDE as u64 * MAX_IMAGE_SIDE as u64;
@@ -71,6 +83,11 @@ pub(crate) fn svg_bytes_to_color_image_with_bg(
     let sz = tree.size();
     let pix = sz.to_int_size();
     let (mut w, mut h) = (pix.width(), pix.height());
+    #[cfg(test)]
+    if take_forced_zero_svg_dimensions() {
+        w = 0;
+        h = 0;
+    }
     if w == 0 || h == 0 {
         w = 256;
         h = 256;
@@ -109,6 +126,15 @@ mod tests {
     use image::{ImageOutputFormat, RgbaImage};
     use std::io::Cursor;
 
+    struct ForcedZeroSvgDimensions;
+
+    impl ForcedZeroSvgDimensions {
+        fn new() -> Self {
+            FORCED_ZERO_SVG_DIMENSIONS.with(|flag| flag.replace(true));
+            Self
+        }
+    }
+
     fn encode_png(rgba: &RgbaImage) -> Vec<u8> {
         let mut bytes = Vec::new();
         let mut cursor = Cursor::new(&mut bytes);
@@ -125,8 +151,7 @@ mod tests {
         let bytes = encode_png(&rgba);
 
         let bg = [0, 0, 255, 200];
-        let (img, w, h) =
-            bytes_to_color_image_guess(&bytes, Some(bg)).expect("png decode");
+        let (img, w, h) = bytes_to_color_image_guess(&bytes, Some(bg)).expect("png decode");
         assert_eq!((w, h), (1, 1));
 
         let px = img.pixels[0];
@@ -168,8 +193,30 @@ mod tests {
         let svg = r#"<svg width="64" height="64" xmlns="http://www.w3.org/2000/svg">
 <circle cx="32" cy="32" r="20" fill="blue"/>
 </svg>"#;
-        let (_img, w, h) =
-            bytes_to_color_image_guess(svg.as_bytes(), None).expect("svg fallback");
+        let (_img, w, h) = bytes_to_color_image_guess(svg.as_bytes(), None).expect("svg fallback");
         assert_eq!((w, h), (64, 64));
+    }
+
+    #[test]
+    fn test_raster_exceeds_limits_zero_dimensions() {
+        assert!(raster_exceeds_limits(0, 10));
+        assert!(raster_exceeds_limits(10, 0));
+    }
+
+    #[test]
+    fn test_raster_bytes_rejects_large_buffer() {
+        let bytes = vec![0u8; MAX_IMAGE_BYTES + 1];
+        assert!(raster_bytes_to_color_image_with_bg(&bytes, None).is_none());
+    }
+
+    #[test]
+    fn test_svg_zero_dimensions_defaults_to_256() {
+        let _forced = ForcedZeroSvgDimensions::new();
+        let svg = r#"<svg width="64" height="64" xmlns="http://www.w3.org/2000/svg">
+<rect width="64" height="64" fill="red"/>
+</svg>"#;
+        let (_img, w, h) =
+            svg_bytes_to_color_image_with_bg(svg.as_bytes(), None).expect("svg decode");
+        assert_eq!((w, h), (256, 256));
     }
 }

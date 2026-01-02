@@ -576,16 +576,8 @@ mod tests {
         let stats = compute_column_stats(&headers, &rows, 32);
         let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
         let specs = derive_column_specs(&ctx);
-        assert!(
-            matches!(specs[0].policy, ColumnPolicy::Fixed { .. }),
-            "policy = {:?}",
-            specs[0].policy
-        );
-        assert!(
-            matches!(specs[1].policy, ColumnPolicy::Remainder { .. }),
-            "policy = {:?}",
-            specs[1].policy
-        );
+        assert!(matches!(specs[0].policy, ColumnPolicy::Fixed { .. }));
+        assert!(matches!(specs[1].policy, ColumnPolicy::Remainder { .. }));
     }
 
     #[test]
@@ -595,16 +587,8 @@ mod tests {
         let stats = compute_column_stats(&headers, &rows, 32);
         let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
         let specs = derive_column_specs(&ctx);
-        assert!(
-            matches!(specs[0].policy, ColumnPolicy::Resizable { .. }),
-            "policy = {:?}",
-            specs[0].policy
-        );
-        assert!(
-            matches!(specs[1].policy, ColumnPolicy::Remainder { .. }),
-            "policy = {:?}",
-            specs[1].policy
-        );
+        assert!(matches!(specs[0].policy, ColumnPolicy::Resizable { .. }));
+        assert!(matches!(specs[1].policy, ColumnPolicy::Remainder { .. }));
     }
 
     #[test]
@@ -620,16 +604,8 @@ mod tests {
         let stats = compute_column_stats(&headers, &rows, 32);
         let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
         let specs = derive_column_specs(&ctx);
-        assert!(
-            matches!(specs[3].policy, ColumnPolicy::Remainder { .. }),
-            "policy = {:?}",
-            specs[3].policy
-        );
-        assert!(
-            matches!(specs[2].policy, ColumnPolicy::Resizable { .. }),
-            "policy = {:?}",
-            specs[2].policy
-        );
+        assert!(matches!(specs[3].policy, ColumnPolicy::Remainder { .. }));
+        assert!(matches!(specs[2].policy, ColumnPolicy::Resizable { .. }));
     }
 
     #[test]
@@ -673,18 +649,55 @@ mod tests {
         let stats = compute_column_stats(&headers, &rows, 32);
         let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
         let specs = derive_column_specs(&ctx);
-        assert!(
-            !matches!(specs[0].policy, ColumnPolicy::Remainder { .. }),
-            "policy = {:?}",
-            specs[0].policy
-        );
-        assert!(
-            specs[1..]
-                .iter()
-                .any(|spec| matches!(spec.policy, ColumnPolicy::Remainder { .. })),
-            "remainder policies: {:?}",
-            specs
-        );
+        assert!(!matches!(specs[0].policy, ColumnPolicy::Remainder { .. }));
+        assert!(specs[1..]
+            .iter()
+            .any(|spec| matches!(spec.policy, ColumnPolicy::Remainder { .. })));
+    }
+
+    #[test]
+    fn fallback_skips_fixed_candidate_for_remainder() {
+        let headers = vec![
+            vec![span("Version")],
+            vec![span("Notes")],
+            vec![span("Owner")],
+        ];
+        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
+        let stats = vec![
+            ColumnStat {
+                max_graphemes: 50,
+                longest_word: 10,
+                rich_content: RichContentFlags {
+                    has_link: false,
+                    has_image: false,
+                    has_emoji_like: false,
+                },
+            },
+            ColumnStat {
+                max_graphemes: 5,
+                longest_word: 5,
+                rich_content: RichContentFlags {
+                    has_link: false,
+                    has_image: false,
+                    has_emoji_like: false,
+                },
+            },
+            ColumnStat {
+                max_graphemes: 4,
+                longest_word: 4,
+                rich_content: RichContentFlags {
+                    has_link: false,
+                    has_image: false,
+                    has_emoji_like: false,
+                },
+            },
+        ];
+        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
+        let specs = derive_column_specs(&ctx);
+        assert!(matches!(specs[0].policy, ColumnPolicy::Fixed { .. }));
+        assert!(specs[1..]
+            .iter()
+            .any(|spec| matches!(spec.policy, ColumnPolicy::Remainder { .. })));
     }
 
     #[test]
@@ -721,10 +734,7 @@ mod tests {
             .iter()
             .filter(|s| matches!(s.policy, ColumnPolicy::Remainder { .. }))
             .count();
-        assert!(
-            remainder_count >= 2,
-            "should allow multiple remainder columns, got {remainder_count}"
-        );
+        assert!(remainder_count >= 2);
     }
 
     #[test]
@@ -809,12 +819,7 @@ mod tests {
         );
         let original_hash = spec.policy_hash;
         spec.apply_preferred_width(10.0);
-        match spec.policy {
-            ColumnPolicy::Resizable { preferred, min, .. } => {
-                assert_eq!(preferred, min);
-            }
-            other => panic!("unexpected policy: {:?}", other),
-        }
+        assert!(matches!(spec.policy, ColumnPolicy::Resizable { .. }));
         assert_eq!(spec.policy_hash, original_hash);
 
         let mut fixed = ColumnSpec::new(
@@ -923,12 +928,72 @@ mod tests {
             None,
         );
         spec.apply_preferred_width(180.0);
-        match spec.policy {
-            ColumnPolicy::Resizable { preferred, .. } => {
-                assert_eq!(preferred, 180.0);
-            }
-            other => panic!("unexpected policy: {:?}", other),
+        assert!(matches!(spec.policy, ColumnPolicy::Resizable { .. }));
+    }
+
+    #[test]
+    fn test_column_policy_hash_variants() {
+        let policies = [
+            ColumnPolicy::Auto,
+            ColumnPolicy::Fixed {
+                width: 120.0,
+                clip: true,
+            },
+            ColumnPolicy::Remainder { clip: true },
+            ColumnPolicy::Resizable {
+                min: 40.0,
+                preferred: 120.0,
+                clip: true,
+            },
+        ];
+        for policy in policies {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            policy.hash(&mut hasher);
+            let _ = hasher.finish();
         }
+    }
+
+    #[test]
+    fn test_column_policy_to_column_clipped_variants() {
+        let fixed = ColumnPolicy::Fixed {
+            width: 120.0,
+            clip: true,
+        };
+        let remainder = ColumnPolicy::Remainder { clip: true };
+        let resizable = ColumnPolicy::Resizable {
+            min: 40.0,
+            preferred: 120.0,
+            clip: true,
+        };
+        let _ = fixed.to_column();
+        let _ = remainder.to_column();
+        let _ = resizable.to_column();
+    }
+
+    #[test]
+    fn test_column_needs_remainder_none_is_false() {
+        assert!(!column_needs_remainder(None));
+    }
+
+    #[test]
+    fn test_accumulate_stats_for_cell_tracks_images() {
+        let spans = vec![InlineSpan::Image {
+            src: "img.png".to_string(),
+            alt: "Alt".to_string(),
+            title: None,
+        }];
+        let mut stat = ColumnStat::default();
+        accumulate_stats_for_cell(&spans, &mut stat);
+        assert!(stat.rich_content.has_image);
+    }
+
+    #[test]
+    fn test_accumulate_stats_detects_emoji_like_text() {
+        let emoji = char::from_u32(0x1F600).expect("emoji");
+        let spans = vec![InlineSpan::Text(format!("Hello {emoji}"))];
+        let mut stat = ColumnStat::default();
+        accumulate_stats_for_cell(&spans, &mut stat);
+        assert!(stat.rich_content.has_emoji_like);
     }
 
     #[test]

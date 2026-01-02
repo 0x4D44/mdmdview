@@ -49,7 +49,7 @@
 - **ðŸ“ Raw Mode with Edit** - View and edit source markdown (`Ctrl+R` to toggle, `Ctrl+E` to edit)
 - **ðŸ”— Internal Anchors** - In-document navigation via `[link](#anchor)` syntax
 - **ðŸ“Š Table Support** - Professional grid layout with headers and striped rows
-- **ðŸŽ¨ Mermaid Diagrams** - Render flowcharts, sequence diagrams, and more (enable embedded QuickJS)
+- **ðŸŽ¨ Mermaid Diagrams** - Render flowcharts, sequence diagrams, and more
 - **ðŸ˜€ Emoji Support** - Embedded Twemoji assets with shortcode expansion (`:rocket:` â†’ ðŸš€)
 - **ðŸŒ Encoding Fallback** - Opens non-UTF-8 legacy files via lossy decoding
 - **ðŸ’¾ Window State Persistence** - Remembers position, size, and zoom level across sessions
@@ -102,14 +102,15 @@ cargo build --release
 ./target/release/mdmdview
 ```
 
-#### Optional Features
+#### Mermaid Rendering (Default)
 
-**Embedded Mermaid Rendering** (QuickJS, offline):
-```bash
-# Requires assets/vendor/mermaid.min.js
-cargo build --release --features mermaid-embedded
-```
+Embedded Mermaid rendering (QuickJS, offline) is enabled by default.
 On Windows, QuickJS builds require a `patch` tool in `PATH` (e.g., Git for Windows or MSYS2).
+
+```bash
+# Build without embedded Mermaid rendering
+cargo build --release --no-default-features
+```
 
 ---
 
@@ -243,7 +244,7 @@ mdmdview supports all CommonMark elements with professional formatting:
   - Shortcode expansion: `:rocket:`, `:tada:`, `:heart:`
   - Native Unicode emoji rendering
 - **Mermaid Diagrams** - Flowcharts, sequence diagrams, gantt charts, etc.
-  - Renderer enabled when built with `mermaid-embedded`
+  - Embedded renderer is built by default (disable with `--no-default-features`)
   - Select renderer via `MDMDVIEW_MERMAID_RENDERER` (`embedded`, `off`)
 
 ### Special Features
@@ -259,7 +260,7 @@ mdmdview supports all CommonMark elements with professional formatting:
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `MDMDVIEW_MERMAID_RENDERER` | Mermaid renderer (`embedded`, `off`) | `embedded` if built, otherwise `off` |
+| `MDMDVIEW_MERMAID_RENDERER` | Mermaid renderer (`embedded`, `off`) | `embedded` (or `off` with `--no-default-features`) |
 | `MDMDVIEW_MERMAID_SECURITY` | Embedded Mermaid security level (`strict`, `loose`) | `strict` |
 | `MDMDVIEW_MERMAID_WORKERS` | QuickJS worker count (1-16) | auto |
 | `MDMDVIEW_MERMAID_TIMEOUT_MS` | QuickJS render timeout (ms) | `2000` |
@@ -270,7 +271,7 @@ mdmdview supports all CommonMark elements with professional formatting:
 
 **Example:**
 ```bash
-# Use embedded Mermaid renderer (requires build with mermaid-embedded)
+# Use embedded Mermaid renderer (default)
 MDMDVIEW_MERMAID_RENDERER=embedded mdmdview document.md
 
 # Enable debug logging
@@ -335,7 +336,7 @@ mdmdview/
    - Conversion to egui widgets
    - Syntax highlighting with syntect
    - Image loading and texture caching
-   - Mermaid diagram rendering (enable embedded QuickJS)
+   - Mermaid diagram rendering (embedded QuickJS)
    - Table layout with proper sizing
    - Search result highlighting
    - Emoji rendering with Twemoji assets
@@ -350,7 +351,7 @@ mdmdview/
    - Windows resource file generation
    - Version info from Cargo.toml
    - Icon embedding
-   - Mermaid.js embedding for QuickJS renderer
+   - Mermaid.js embedding for embedded renderer
 
 ### Key Design Decisions
 
@@ -374,8 +375,8 @@ cargo build
 # Release build (optimized, ~4.8MB)
 cargo build --release
 
-# With embedded Mermaid renderer (opt-in)
-cargo build --release --features mermaid-embedded
+# Without embedded Mermaid renderer
+cargo build --release --no-default-features
 
 # Run in development mode
 cargo run
@@ -535,7 +536,7 @@ mdmdview uses `String::from_utf8_lossy` for legacy encodings:
 ### Mermaid Diagrams Not Rendering
 
 **Embedded mode:**
-- Build with `--features mermaid-embedded`
+- Ensure you did not build with `--no-default-features`
 - Optionally set `MDMDVIEW_MERMAID_RENDERER=embedded`
 - Ensure `assets/vendor/mermaid.min.js` exists before building
 - Check that diagram syntax is valid

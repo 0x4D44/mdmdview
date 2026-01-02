@@ -209,10 +209,10 @@ A small WEBP sample is bundled for testing.
 
 ![WEBP Sample](assets/samples/webp_sample.webp "WEBP sample")
 
-## Mermaid Diagram (feature-gated)
+## Mermaid Diagram (embedded)
 
-When the `mermaid-quickjs` feature is enabled, Mermaid code blocks are rendered as diagrams.
-Otherwise, the source is shown with an informational note.
+Mermaid code blocks are rendered as diagrams by default.
+Build with `--no-default-features` or set `MDMDVIEW_MERMAID_RENDERER=off` to show the source instead.
 
 ```mermaid
 graph TD;
@@ -470,13 +470,9 @@ mod tests {
     #[test]
     fn test_sample_files_content_not_empty() {
         for file in SAMPLE_FILES {
-            assert!(
-                !file.content.is_empty(),
-                "File {} has empty content",
-                file.name
-            );
-            assert!(!file.title.is_empty(), "File {} has empty title", file.name);
-            assert!(!file.name.is_empty(), "File has empty name");
+            assert!(!file.content.is_empty());
+            assert!(!file.title.is_empty());
+            assert!(!file.name.is_empty());
         }
     }
 
@@ -487,11 +483,7 @@ mod tests {
         for file in SAMPLE_FILES {
             let parser = Parser::new_ext(file.content, Options::all());
             let events: Vec<_> = parser.collect();
-            assert!(
-                !events.is_empty(),
-                "File {} produces no markdown events",
-                file.name
-            );
+            assert!(!events.is_empty());
         }
     }
 

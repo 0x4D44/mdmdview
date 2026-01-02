@@ -559,6 +559,96 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_cli_missing_screenshot_input() {
+        let args = vec!["--screenshot".to_string()];
+        let err = parse_cli_from(args)
+            .err()
+            .expect("expected missing screenshot input error");
+        assert!(err.contains("--screenshot requires a value"));
+    }
+
+    #[test]
+    fn test_parse_cli_missing_screenshot_output() {
+        let args = vec!["--screenshot".to_string(), "doc.md".to_string()];
+        let err = parse_cli_from(args)
+            .err()
+            .expect("expected missing output error");
+        assert!(err.contains("Missing --output"));
+    }
+
+    #[test]
+    fn test_parse_cli_invalid_values() {
+        let args = vec!["--width".to_string(), "nope".to_string()];
+        let err = parse_cli_from(args)
+            .err()
+            .expect("expected invalid width error");
+        assert!(err.contains("Invalid --width"));
+
+        let args = vec!["--theme".to_string(), "blue".to_string()];
+        let err = parse_cli_from(args)
+            .err()
+            .expect("expected invalid theme error");
+        assert!(err.contains("Unsupported theme"));
+    }
+
+    #[test]
+    fn test_parse_cli_missing_flag_value() {
+        let args = vec!["--height".to_string()];
+        let err = parse_cli_from(args)
+            .err()
+            .expect("expected missing height value error");
+        assert!(err.contains("--height requires a value"));
+    }
+
+    #[test]
+    fn test_parse_cli_scroll_clamps() {
+        let args = vec![
+            "--scroll".to_string(),
+            "2.5".to_string(),
+            "doc.md".to_string(),
+        ];
+        let opts = parse_cli_from(args).expect("parse");
+        assert_eq!(opts.scroll, Some(1.0));
+        assert_eq!(opts.initial_file, Some(PathBuf::from("doc.md")));
+    }
+
+    #[test]
+    fn test_parse_cli_additional_flags() {
+        let args = vec![
+            "--screenshot".to_string(),
+            "doc.md".to_string(),
+            "--output".to_string(),
+            "out.png".to_string(),
+            "--content-only".to_string(),
+            "--wait-ms".to_string(),
+            "1200".to_string(),
+            "--settle-frames".to_string(),
+            "3".to_string(),
+            "--zoom".to_string(),
+            "1.5".to_string(),
+            "--theme".to_string(),
+            "light".to_string(),
+            "--test-fonts".to_string(),
+            "fonts".to_string(),
+        ];
+        let opts = parse_cli_from(args).expect("parse");
+        assert!(opts.screenshot);
+        assert_eq!(opts.content_only, true);
+        assert_eq!(opts.wait_ms, Some(1200));
+        assert_eq!(opts.settle_frames, Some(3));
+        assert_eq!(opts.zoom, Some(1.5));
+        assert_eq!(opts.theme, Some(ThemeChoice::Light));
+        assert_eq!(opts.test_fonts, Some(PathBuf::from("fonts")));
+    }
+
+    #[test]
+    fn test_parse_cli_ignores_extra_args() {
+        let args = vec!["doc.md".to_string(), "extra.md".to_string()];
+        let opts = parse_cli_from(args).expect("parse");
+        assert_eq!(opts.initial_file, Some(PathBuf::from("doc.md")));
+    }
+
+    #[test]
     fn test_main_stub_executes() {
         super::main();
     }

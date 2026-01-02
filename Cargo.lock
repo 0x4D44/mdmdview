@@ -2203,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "mdmdview"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "crossbeam-channel",

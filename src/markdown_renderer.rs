@@ -41,6 +41,8 @@ struct InlineStyle {
 #[cfg(test)]
 thread_local! {
     static FORCED_RENDER_ACTIONS: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
+    static FORCED_TABLE_POLICIES: RefCell<Option<Vec<ColumnPolicy>>> = RefCell::new(None);
+    static FORCED_PARSE_ERROR: RefCell<bool> = RefCell::new(false);
 }
 
 #[cfg(test)]
@@ -51,6 +53,21 @@ fn render_action_triggered(triggered: bool, action: &'static str) -> bool {
 #[cfg(not(test))]
 fn render_action_triggered(triggered: bool, _action: &'static str) -> bool {
     triggered
+}
+
+#[cfg(test)]
+fn take_forced_table_policies() -> Option<Vec<ColumnPolicy>> {
+    FORCED_TABLE_POLICIES.with(|policies| policies.borrow_mut().take())
+}
+
+#[cfg(test)]
+pub(crate) fn force_parse_error_once() {
+    FORCED_PARSE_ERROR.with(|flag| flag.replace(true));
+}
+
+#[cfg(test)]
+fn take_forced_parse_error() -> bool {
+    FORCED_PARSE_ERROR.with(|flag| flag.replace(false))
 }
 
 /// Font size configuration
@@ -1055,12 +1072,8 @@ impl MarkdownRenderer {
                 idx += 1;
             }
             b'0'..=b'9' => {
-                let start = idx;
                 while idx < bytes.len() && bytes[idx].is_ascii_digit() {
                     idx += 1;
-                }
-                if start == idx {
-                    return None;
                 }
                 if idx < bytes.len() && (bytes[idx] == b'.' || bytes[idx] == b')') {
                     idx += 1;
@@ -1362,6 +1375,11 @@ impl MarkdownRenderer {
 
     /// Parse markdown content into elements with proper inline handling
     pub fn parse(&self, markdown: &str) -> Result<Vec<MarkdownElement>, anyhow::Error> {
+        #[cfg(test)]
+        if take_forced_parse_error() {
+            return Err(anyhow::anyhow!("forced parse error"));
+        }
+
         let mut options = Options::empty();
         options.insert(Options::ENABLE_STRIKETHROUGH);
         options.insert(Options::ENABLE_TABLES);
@@ -2803,14 +2821,14 @@ impl MarkdownRenderer {
     }
 
     fn render_text_context_menu(&self, ui: &mut egui::Ui, text: &str) {
-        if ui.button("Copy Text").clicked() {
+        if render_action_triggered(ui.button("Copy Text").clicked(), "copy_text") {
             self.copy_text_and_close(ui, text);
         }
         ui.label("Tip: Use Ctrl+C to copy selected text");
     }
 
     fn render_inline_code_context_menu(&self, ui: &mut egui::Ui, code: &str) {
-        if ui.button("Copy Code").clicked() {
+        if render_action_triggered(ui.button("Copy Code").clicked(), "copy_inline_code") {
             self.copy_text_and_close(ui, code);
         }
     }
@@ -2821,32 +2839,35 @@ impl MarkdownRenderer {
         code: &str,
         language: Option<&str>,
     ) {
-        if ui.button("Copy Code").clicked() {
+        if render_action_triggered(ui.button("Copy Code").clicked(), "copy_code_block") {
             self.copy_text_and_close(ui, code);
         }
         if let Some(lang) = language {
-            if ui.button(format!("Copy as {}", lang)).clicked() {
+            if render_action_triggered(
+                ui.button(format!("Copy as {}", lang)).clicked(),
+                "copy_code_block_lang",
+            ) {
                 self.copy_text_and_close(ui, &format!("```{}\n{}\n```", lang, code));
             }
         }
     }
 
     fn render_link_context_menu(&self, ui: &mut egui::Ui, text: &str, url: &str) {
-        if ui.button("Open Link").clicked() {
+        if render_action_triggered(ui.button("Open Link").clicked(), "open_link") {
             self.trigger_link(url);
             ui.close_menu();
         }
         ui.separator();
-        if ui.button("Copy Link Text").clicked() {
+        if render_action_triggered(ui.button("Copy Link Text").clicked(), "copy_link_text") {
             self.copy_text_and_close(ui, text);
         }
-        if ui.button("Copy Link URL").clicked() {
+        if render_action_triggered(ui.button("Copy Link URL").clicked(), "copy_link_url") {
             self.copy_text_and_close(ui, url);
         }
     }
 
     fn render_cell_context_menu(&self, ui: &mut egui::Ui, text: &str) {
-        if ui.button("Copy Cell Text").clicked() {
+        if render_action_triggered(ui.button("Copy Cell Text").clicked(), "copy_cell_text") {
             self.copy_text_and_close(ui, text);
         }
     }
@@ -3678,15 +3699,11 @@ impl MarkdownRenderer {
         let ctx =
             TableColumnContext::new(headers, rows, &column_stats, self.font_sizes.body, table_id);
         let mut column_specs = derive_column_specs(&ctx);
-        let row_max = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-        let target_cols = column_specs.len().max(row_max).max(1);
-        while column_specs.len() < target_cols {
-            column_specs.push(ColumnSpec::new(
-                column_specs.len(),
-                format!("Column {}", column_specs.len() + 1),
-                crate::table_support::ColumnPolicy::Remainder { clip: false },
-                None,
-            ));
+        #[cfg(test)]
+        if let Some(policies) = take_forced_table_policies() {
+            for (spec, policy) in column_specs.iter_mut().zip(policies.into_iter()) {
+                spec.set_policy(policy);
+            }
         }
         self.apply_persisted_widths(table_id, &mut column_specs);
         let column_aligns: Vec<Align> = (0..column_specs.len())
@@ -3721,10 +3738,7 @@ impl MarkdownRenderer {
                 ColumnPolicy::Auto => flexible_indices.push(idx),
             }
         }
-        let min_flex_total: f32 = flexible_indices
-            .iter()
-            .map(|idx| min_widths[*idx])
-            .sum();
+        let min_flex_total: f32 = flexible_indices.iter().map(|idx| min_widths[*idx]).sum();
         let desired_total_width = resolved_widths.iter().sum::<f32>() + spacing_total;
         let content_width = desired_total_width.max(available_width);
         let remaining_for_flex = available_for_columns - fixed_total;
@@ -4648,14 +4662,10 @@ impl MarkdownRenderer {
         let desired_total: f32 = desired.iter().sum();
         let min_total: f32 = mins.iter().sum();
 
-        let mut widths = if min_total >= clamped_available {
-            if min_total <= f32::EPSILON {
-                vec![clamped_available / mins.len() as f32; mins.len()]
-            } else {
-                mins.iter()
-                    .map(|m| m * (clamped_available / min_total))
-                    .collect()
-            }
+        let widths = if min_total >= clamped_available {
+            mins.iter()
+                .map(|m| m * (clamped_available / min_total))
+                .collect()
         } else if desired_total <= clamped_available {
             let slack = desired_total - min_total;
             if slack <= f32::EPSILON {
@@ -4673,26 +4683,12 @@ impl MarkdownRenderer {
                 .map(|(d, m)| (d - m).max(0.0))
                 .collect();
             let total_slack: f32 = slack.iter().sum();
-            if total_slack <= f32::EPSILON {
-                let bonus = extra / widths.len() as f32;
-                for w in &mut widths {
-                    *w += bonus;
-                }
-            } else {
-                for (w, s) in widths.iter_mut().zip(slack.iter()) {
-                    *w += extra * (*s / total_slack);
-                }
+            for (w, s) in widths.iter_mut().zip(slack.iter()) {
+                *w += extra * (*s / total_slack);
             }
             widths
         };
 
-        let sum: f32 = widths.iter().sum();
-        if sum > clamped_available + 0.5 {
-            let ratio = clamped_available / sum;
-            for w in &mut widths {
-                *w *= ratio;
-            }
-        }
         widths
     }
 
@@ -5076,8 +5072,43 @@ mod tests {
     use image::codecs::png::PngEncoder;
     use image::ColorType;
     use image::ImageEncoder;
+    use std::env;
     use std::fs;
+    use std::str::FromStr;
+    use std::sync::Mutex;
+    use syntect::highlighting::{Color, FontStyle, ScopeSelectors, StyleModifier, ThemeItem};
     use tempfile::tempdir;
+
+    static MERMAID_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let lock = MERMAID_ENV_LOCK.lock().expect("lock mermaid env");
+            let previous = env::var(key).ok();
+            env::set_var(key, value);
+            Self {
+                key,
+                previous,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = &self.previous {
+                env::set_var(self.key, prev);
+            } else {
+                env::remove_var(self.key);
+            }
+        }
+    }
 
     struct ForcedRenderActions {
         actions: Vec<&'static str>,
@@ -5104,6 +5135,25 @@ mod tests {
                 for action in &self.actions {
                     set.remove(action);
                 }
+            });
+        }
+    }
+
+    struct ForcedTablePolicies;
+
+    impl ForcedTablePolicies {
+        fn new(policies: Vec<ColumnPolicy>) -> Self {
+            FORCED_TABLE_POLICIES.with(|slot| {
+                *slot.borrow_mut() = Some(policies);
+            });
+            Self
+        }
+    }
+
+    impl Drop for ForcedTablePolicies {
+        fn drop(&mut self) {
+            FORCED_TABLE_POLICIES.with(|slot| {
+                slot.borrow_mut().take();
             });
         }
     }
@@ -5182,6 +5232,14 @@ mod tests {
     }
 
     #[test]
+    fn test_markdown_renderer_default_uses_defaults() {
+        let renderer = MarkdownRenderer::default();
+        let defaults = FontSizes::default();
+        assert_eq!(renderer.font_sizes.body, defaults.body);
+        assert_eq!(renderer.font_sizes.code, defaults.code);
+    }
+
+    #[test]
     fn test_superscript_expansion_basic() {
         let s = "5^th^ and m^2^";
         let out = MarkdownRenderer::expand_superscripts(s);
@@ -5194,24 +5252,18 @@ mod tests {
         // Test that single carets (not paired) are left as-is
         let s = "2^32 = 4,294,967,296";
         let out = MarkdownRenderer::expand_superscripts(s);
-        assert_eq!(
-            out, "2^32 = 4,294,967,296",
-            "Single caret should be preserved"
-        );
+        assert_eq!(out, "2^32 = 4,294,967,296");
 
         // Test the problematic line from the bug report
         let problematic = "A 32-bit address bus would provide 2^32 = 4,294,967,296 bytes (4 GB) of addressable memory.";
         let fixed = MarkdownRenderer::expand_superscripts(problematic);
-        assert_eq!(
-            fixed, problematic,
-            "Text should remain unchanged when no paired carets exist"
-        );
+        assert_eq!(fixed, problematic);
 
         // Test mixed cases
         let mixed = "Use 2^32 for math and 5^th^ for ordinal";
         let result = MarkdownRenderer::expand_superscripts(mixed);
-        assert!(result.contains("2^32"), "Single caret should be preserved");
-        assert!(result.contains("5ᵗʰ"), "Paired carets should be converted");
+        assert!(result.contains("2^32"));
+        assert!(result.contains("5ᵗʰ"));
     }
 
     #[test]
@@ -5473,15 +5525,9 @@ mod tests {
         let parsed = renderer.parse(md).expect("parse ok");
         assert_eq!(parsed.len(), 2);
         let first_plain = MarkdownRenderer::element_plain_text(&parsed[0]);
-        assert!(
-            first_plain.contains("footnote[^1]"),
-            "footnote marker should remain visible, got {first_plain}"
-        );
+        assert!(first_plain.contains("footnote[^1]"));
         let second_plain = MarkdownRenderer::element_plain_text(&parsed[1]);
-        assert!(
-            second_plain.contains("[^1]: footnote body."),
-            "footnote definition should remain visible, got {second_plain}"
-        );
+        assert!(second_plain.contains("[^1]: footnote body."));
     }
 
     #[test]
@@ -5531,7 +5577,7 @@ mod tests {
             "horizontal-rules",
             "tables",
         ] {
-            assert!(ids.iter().any(|id| id == expected), "missing id {expected}");
+            assert!(ids.iter().any(|id| id == expected));
         }
     }
 
@@ -5544,7 +5590,7 @@ mod tests {
         match &parsed[0] {
             MarkdownElement::Paragraph(spans) => {
                 let img = spans.iter().find(|s| matches!(s, InlineSpan::Image { .. }));
-                assert!(img.is_some(), "image inline span present");
+                assert!(img.is_some());
                 if let InlineSpan::Image { src, alt, title } = img.unwrap() {
                     assert_eq!(src, "images/pic.webp");
                     assert_eq!(alt, "Alt text");
@@ -5623,6 +5669,16 @@ mod tests {
     }
 
     #[test]
+    fn test_cell_single_emoji_emphasis() {
+        let renderer = MarkdownRenderer::new();
+        let rocket = crate::emoji_catalog::shortcode_map()
+            .get(":rocket:")
+            .expect("rocket shortcode");
+        let spans = vec![InlineSpan::Emphasis((*rocket).to_string())];
+        assert!(renderer.cell_single_emoji(&spans).is_some());
+    }
+
+    #[test]
     fn test_cell_fragments_inline_emoji_stays_text() {
         let renderer = MarkdownRenderer::new();
         let rocket = crate::emoji_catalog::shortcode_map()
@@ -5667,10 +5723,7 @@ mod tests {
         let style = egui::Style::default();
         let build = renderer.build_layout_job(&style, &spans, 180.0, false, Align::LEFT);
         assert_eq!(build.job.wrap.max_width, 180.0);
-        assert!(
-            build.job.text.contains("column entry"),
-            "plain text should be preserved"
-        );
+        assert!(build.job.text.contains("column entry"));
     }
 
     #[test]
@@ -5681,14 +5734,11 @@ mod tests {
         let style = egui::Style::default();
         let build = renderer.build_layout_job(&style, &spans, 200.0, false, Align::LEFT);
         let highlight_bg = style.visuals.selection.bg_fill;
-        assert!(
-            build
-                .job
-                .sections
-                .iter()
-                .any(|s| s.format.background == highlight_bg),
-            "at least one section should carry highlight background"
-        );
+        assert!(build
+            .job
+            .sections
+            .iter()
+            .any(|s| s.format.background == highlight_bg));
     }
 
     #[test]
@@ -5715,26 +5765,87 @@ mod tests {
     }
 
     #[test]
+    fn test_build_layout_job_skips_images() {
+        let renderer = MarkdownRenderer::new();
+        let style = egui::Style::default();
+        let spans = vec![InlineSpan::Image {
+            src: "dummy.png".to_string(),
+            alt: "alt".to_string(),
+            title: None,
+        }];
+
+        let build = renderer.build_layout_job(&style, &spans, 120.0, false, Align::LEFT);
+        assert!(build.plain_text.is_empty());
+    }
+
+    #[test]
+    fn test_append_spans_empty_and_code_light() {
+        let renderer = MarkdownRenderer::new();
+        let style = egui::Style::default();
+        let mut job = LayoutJob::default();
+        let mut plain_text = String::new();
+
+        assert_eq!(
+            renderer.append_plain_span(
+                &style,
+                &mut job,
+                &mut plain_text,
+                "",
+                InlineStyle::default(),
+                None
+            ),
+            0
+        );
+        assert_eq!(
+            renderer.append_code_span(&style, &mut job, &mut plain_text, ""),
+            0
+        );
+
+        let mut light_style = style.clone();
+        light_style.visuals.dark_mode = false;
+        assert!(renderer.append_code_span(&light_style, &mut job, &mut plain_text, "code") > 0);
+
+        let mut empty_job = LayoutJob::default();
+        let mut empty_plain = String::new();
+        assert_eq!(
+            renderer.append_text_sections(
+                &style,
+                &mut empty_job,
+                &mut empty_plain,
+                "",
+                12.0,
+                InlineStyle::default(),
+                None
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn test_is_html_line_break_and_indented_code_tabs() {
+        assert!(!MarkdownRenderer::is_html_line_break("<b"));
+        assert!(MarkdownRenderer::is_html_line_break("<br >"));
+        assert!(!MarkdownRenderer::is_html_line_break("<brx>"));
+        assert!(MarkdownRenderer::is_indented_code_line("\tcode"));
+    }
+
+    #[test]
+    fn test_escape_pipes_inline_code_multi_backticks() {
+        let out = MarkdownRenderer::escape_pipes_in_inline_code_line("``code|``");
+        assert!(out.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
     fn test_table_width_solver_keeps_short_columns_readable() {
         let mins = vec![90.0, 90.0, 90.0, 90.0];
         let desired = vec![120.0, 120.0, 360.0, 160.0];
         let widths = MarkdownRenderer::resolve_table_widths(420.0, &mins, &desired);
         assert_eq!(widths.len(), 4);
         // Narrow columns should stay near their minimums even when a wide column exists
-        assert!(
-            widths[0] >= 85.0,
-            "Version column shrank too far: {}",
-            widths[0]
-        );
-        assert!(
-            widths[2] > widths[0],
-            "Wide column should retain more width"
-        );
+        assert!(widths[0] >= 85.0);
+        assert!(widths[2] > widths[0]);
         let sum: f32 = widths.iter().sum();
-        assert!(
-            (sum - 420.0).abs() < 0.5,
-            "Widths should consume available space, got {sum}"
-        );
+        assert!((sum - 420.0).abs() < 0.5);
     }
 
     #[test]
@@ -5743,15 +5854,9 @@ mod tests {
         let desired = vec![200.0, 240.0, 360.0, 160.0];
         let widths = MarkdownRenderer::resolve_table_widths(260.0, &mins, &desired);
         assert_eq!(widths.len(), 4);
-        assert!(
-            widths.iter().all(|w| *w > 0.0),
-            "Widths must stay positive even when clamped hard"
-        );
+        assert!(widths.iter().all(|w| *w > 0.0));
         let sum: f32 = widths.iter().sum();
-        assert!(
-            (sum - 260.0).abs() < 0.5,
-            "Widths should sum to available space even under tight constraints"
-        );
+        assert!((sum - 260.0).abs() < 0.5);
     }
 
     #[test]
@@ -5835,10 +5940,7 @@ mod tests {
 > | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes in blockquote table inline code"
-        );
+        assert!(prepared.contains(&expected));
     }
 
     #[test]
@@ -5846,10 +5948,7 @@ mod tests {
         let md = ">\t| Col | Notes |\n>\t| --- | --- |\n>\t| code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes in blockquote table inline code with tab"
-        );
+        assert!(prepared.contains(&expected));
     }
 
     #[test]
@@ -5991,10 +6090,7 @@ mod tests {
     | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes for table inside nested list"
-        );
+        assert!(prepared.contains(&expected));
     }
 
     #[test]
@@ -6002,10 +6098,7 @@ mod tests {
         let md = "- Outer\n\t- | Col | Notes |\n\t  | --- | --- |\n\t  | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes for tab-indented nested list table"
-        );
+        assert!(prepared.contains(&expected));
     }
 
     #[test]
@@ -6017,10 +6110,7 @@ mod tests {
       | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes for 4-space nested list table"
-        );
+        assert!(prepared.contains(&expected));
     }
 
     #[test]
@@ -6031,10 +6121,7 @@ mod tests {
      | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes for list marker with 4-space content indent"
-        );
+        assert!(prepared.contains(&expected));
     }
 
     #[test]
@@ -6059,10 +6146,7 @@ mod tests {
           | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes for deeply nested list table"
-        );
+        assert!(prepared.contains(&expected));
     }
 
     #[test]
@@ -6074,10 +6158,7 @@ mod tests {
     > | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes for table inside list blockquote"
-        );
+        assert!(prepared.contains(&expected));
     }
 
     #[test]
@@ -6088,10 +6169,7 @@ mod tests {
   > | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes for blockquote table starting on list marker line"
-        );
+        assert!(prepared.contains(&expected));
     }
 
     #[test]
@@ -6113,10 +6191,7 @@ mod tests {
 >   | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes for table inside blockquote list"
-        );
+        assert!(prepared.contains(&expected));
     }
 
     #[test]
@@ -6128,10 +6203,7 @@ mod tests {
     | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes for table after ordered list marker line"
-        );
+        assert!(prepared.contains(&expected));
     }
 
     #[test]
@@ -6160,14 +6232,8 @@ mod tests {
 Paragraph with `x|y` inline.";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes inside table inline code"
-        );
-        assert!(
-            prepared.contains("`x|y`"),
-            "Expected inline code pipes outside table to remain unescaped"
-        );
+        assert!(prepared.contains(&expected));
+        assert!(prepared.contains("`x|y`"));
     }
 
     #[test]
@@ -6179,14 +6245,8 @@ Paragraph with `x|y` inline.";
 Paragraph with escaped \\| pipe.";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes inside table inline code"
-        );
-        assert!(
-            prepared.contains("escaped \\| pipe"),
-            "Expected escaped pipe outside table to remain unescaped"
-        );
+        assert!(prepared.contains(&expected));
+        assert!(prepared.contains("escaped \\| pipe"));
     }
 
     #[test]
@@ -6198,14 +6258,8 @@ Paragraph with escaped \\| pipe.";
 Paragraph with `x|y` and pipe | outside.";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes inside list table inline code"
-        );
-        assert!(
-            prepared.contains("`x|y`"),
-            "Expected inline code pipes after list table to remain unescaped"
-        );
+        assert!(prepared.contains(&expected));
+        assert!(prepared.contains("`x|y`"));
     }
 
     #[test]
@@ -6218,14 +6272,8 @@ Paragraph with `x|y` and pipe | outside.";
   Paragraph with `x|y` and pipe | outside.";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes inside nested list table inline code"
-        );
-        assert!(
-            prepared.contains("`x|y`"),
-            "Expected inline code pipes after nested list table to remain unescaped"
-        );
+        assert!(prepared.contains(&expected));
+        assert!(prepared.contains("`x|y`"));
     }
 
     #[test]
@@ -6234,14 +6282,8 @@ Paragraph with `x|y` and pipe | outside.";
             "- Outer\n\t- | Col | Notes |\n\t  | --- | --- |\n\t  | code | `a|b|c` |\nParagraph with `x|y` and pipe | outside.";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes inside tab-indented list table inline code"
-        );
-        assert!(
-            prepared.contains("`x|y`"),
-            "Expected inline code pipes after tab-indented list table to remain unescaped"
-        );
+        assert!(prepared.contains(&expected));
+        assert!(prepared.contains("`x|y`"));
     }
 
     #[test]
@@ -6254,10 +6296,7 @@ Paragraph with `x|y` and pipe | outside.";
     | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
         let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(
-            prepared.contains(&expected),
-            "Expected escaped pipes for list table after blank line"
-        );
+        assert!(prepared.contains(&expected));
     }
 
     #[test]
@@ -6278,10 +6317,7 @@ Not a table";
 | --- | --- |
 | code | `a|b |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        assert!(
-            !prepared.contains(PIPE_SENTINEL),
-            "Unmatched backticks should not trigger pipe escaping"
-        );
+        assert!(!prepared.contains(PIPE_SENTINEL));
     }
 
     #[test]
@@ -6320,7 +6356,7 @@ Not a table";
             })
             .collect();
         assert_eq!(tables.len(), 2);
-        assert_ne!(tables[0], tables[1], "table ids should differ by position");
+        assert_ne!(tables[0], tables[1]);
     }
 
     #[test]
@@ -6385,6 +6421,74 @@ fn main() {}
 
         renderer.clear_table_layout_cache();
         assert_eq!(renderer.table_layout_cache_stats(), (0, 0));
+    }
+
+    #[test]
+    fn test_cell_layout_cache_eviction() {
+        let mut cache = CellLayoutCache::new(2);
+        let build = LayoutJobBuild {
+            job: LayoutJob::default(),
+            plain_text: String::new(),
+            link_ranges: Vec::new(),
+        };
+        let key = |row, col| CellLayoutKey {
+            row: Some(row),
+            col,
+            width: 120,
+            align: 0,
+            strong: false,
+            text_color: [0, 0, 0, 255],
+            highlight_hash: 0,
+            content_hash: row as u64,
+        };
+
+        let key_a = key(0, 0);
+        let key_b = key(1, 0);
+        let key_c = key(2, 0);
+
+        cache.insert(key_a.clone(), build.clone());
+        cache.insert(key_b.clone(), build.clone());
+        cache.insert(key_c.clone(), build);
+
+        assert!(cache.get(&key_a).is_none());
+        assert!(cache.get(&key_b).is_some());
+        assert!(cache.get(&key_c).is_some());
+    }
+
+    #[test]
+    fn test_cell_layout_cache_handles_empty_order() {
+        let mut cache = CellLayoutCache::new(1);
+        let build = LayoutJobBuild {
+            job: LayoutJob::default(),
+            plain_text: String::new(),
+            link_ranges: Vec::new(),
+        };
+        let key_a = CellLayoutKey {
+            row: Some(0),
+            col: 0,
+            width: 120,
+            align: 0,
+            strong: false,
+            text_color: [0, 0, 0, 255],
+            highlight_hash: 0,
+            content_hash: 1,
+        };
+        let key_b = CellLayoutKey {
+            row: Some(1),
+            col: 0,
+            width: 120,
+            align: 0,
+            strong: false,
+            text_color: [0, 0, 0, 255],
+            highlight_hash: 0,
+            content_hash: 2,
+        };
+
+        cache.insert(key_a, build.clone());
+        cache.order.clear();
+        cache.insert(key_b.clone(), build);
+
+        assert!(cache.get(&key_b).is_some());
     }
 
     #[test]
@@ -6457,25 +6561,12 @@ fn main() {}
                 _ => None,
             })
             .collect();
-        assert!(
-            tables.len() >= 3,
-            "expected at least 3 tables, got {}",
-            tables.len()
-        );
+        assert!(tables.len() >= 3);
         let (first_headers, first_rows, first_alignments) = tables[0];
         for (headers, rows, alignments) in tables.iter() {
-            assert_eq!(headers.len(), 3, "header count {:?}", headers.len());
-            assert_eq!(
-                alignments.len(),
-                3,
-                "alignment count {:?}",
-                alignments.len()
-            );
-            assert!(
-                rows.iter().all(|row| row.len() == 3),
-                "row lengths {:?}",
-                rows.iter().map(|row| row.len()).collect::<Vec<_>>()
-            );
+            assert_eq!(headers.len(), 3);
+            assert_eq!(alignments.len(), 3);
+            assert!(rows.iter().all(|row| row.len() == 3));
         }
         let table_id = renderer.compute_table_id(first_headers, first_rows, first_alignments, 0);
         let available = Cell::new(0.0f32);
@@ -6515,20 +6606,12 @@ fn main() {}
             .entry(table_id)
             .map(|entry| entry.current_widths().to_vec())
             .unwrap_or_default();
-        assert_eq!(widths.len(), 3, "widths = {:?}", widths);
-        assert!(
-            widths.iter().all(|w| *w > 8.0),
-            "widths too small: {:?}",
-            widths
-        );
+        assert_eq!(widths.len(), 3);
+        assert!(widths.iter().all(|w| *w > 8.0));
         let total_width =
             widths.iter().sum::<f32>() + spacing.get() * widths.len().saturating_sub(1) as f32;
         assert!(
-            !(total_width > available.get() + 1.0 && estimated_before <= available.get() + 0.5),
-            "actual width {} exceeds available {} (estimated {})",
-            total_width,
-            available.get(),
-            estimated_before
+            !(total_width > available.get() + 1.0 && estimated_before <= available.get() + 0.5)
         );
         Ok(())
     }
@@ -6596,6 +6679,16 @@ fn main() {}
     #[test]
     fn test_context_menu_helpers_execute() {
         let renderer = MarkdownRenderer::new();
+        let _actions = ForcedRenderActions::new(&[
+            "copy_text",
+            "copy_inline_code",
+            "copy_code_block",
+            "copy_code_block_lang",
+            "open_link",
+            "copy_link_text",
+            "copy_link_url",
+            "copy_cell_text",
+        ]);
         with_test_ui(|_, ui| {
             renderer.render_text_context_menu(ui, "text");
             renderer.render_inline_code_context_menu(ui, "code");
@@ -6847,10 +6940,7 @@ fn main() {}
         with_test_ui(|_, ui| {
             let single = renderer.measure_inline_spans(ui, &single_line);
             let multi = renderer.measure_inline_spans(ui, &multi_line);
-            assert!(
-                multi < single,
-                "multi-line width ({multi}) should be less than single-line width ({single})"
-            );
+            assert!(multi < single);
         });
     }
 
@@ -6863,10 +6953,7 @@ fn main() {}
         with_test_ui(|_, ui| {
             let unicode_width = renderer.measure_inline_spans(ui, &unicode);
             let ascii_width = renderer.measure_inline_spans(ui, &ascii);
-            assert!(
-                (unicode_width - ascii_width).abs() < 0.5,
-                "normalized width mismatch (unicode {unicode_width}, ascii {ascii_width})"
-            );
+            assert!((unicode_width - ascii_width).abs() < 0.5);
         });
     }
 
@@ -7157,6 +7244,219 @@ fn main() {}
     }
 
     #[test]
+    fn test_collect_blockquotes_event_variants() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![
+            Event::Start(Tag::BlockQuote),
+            Event::Start(Tag::Paragraph),
+            Event::Text("para".into()),
+            Event::End(Tag::Paragraph),
+            Event::Start(Tag::Heading(pulldown_cmark::HeadingLevel::H2, None, vec![])),
+            Event::Text("Heading".into()),
+            Event::End(Tag::Heading(pulldown_cmark::HeadingLevel::H2, None, vec![])),
+            Event::Start(Tag::List(None)),
+            Event::Start(Tag::Item),
+            Event::Text("item".into()),
+            Event::End(Tag::Item),
+            Event::End(Tag::List(None)),
+            Event::Start(Tag::CodeBlock(pulldown_cmark::CodeBlockKind::Fenced(
+                "rust".into(),
+            ))),
+            Event::Text("fn main() {}\n".into()),
+            Event::End(Tag::CodeBlock(pulldown_cmark::CodeBlockKind::Fenced(
+                "rust".into(),
+            ))),
+            Event::Start(Tag::Table(vec![Alignment::Left])),
+            Event::Start(Tag::TableHead),
+            Event::Start(Tag::TableRow),
+            Event::Start(Tag::TableCell),
+            Event::Text("H".into()),
+            Event::End(Tag::TableCell),
+            Event::End(Tag::TableRow),
+            Event::End(Tag::TableHead),
+            Event::Start(Tag::TableRow),
+            Event::Start(Tag::TableCell),
+            Event::Text("R".into()),
+            Event::End(Tag::TableCell),
+            Event::End(Tag::TableRow),
+            Event::End(Tag::Table(vec![Alignment::Left])),
+            Event::Start(Tag::Emphasis),
+            Event::Text("em".into()),
+            Event::End(Tag::Emphasis),
+            Event::Start(Tag::Strong),
+            Event::Text("strong".into()),
+            Event::End(Tag::Strong),
+            Event::Start(Tag::Strikethrough),
+            Event::Text("strike".into()),
+            Event::End(Tag::Strikethrough),
+            Event::Start(Tag::Link(
+                LinkType::Inline,
+                "https://example.com".into(),
+                "".into(),
+            )),
+            Event::Text("link".into()),
+            Event::End(Tag::Link(
+                LinkType::Inline,
+                "https://example.com".into(),
+                "".into(),
+            )),
+            Event::Start(Tag::Image(
+                LinkType::Inline,
+                "img.png".into(),
+                "Title".into(),
+            )),
+            Event::Text("alt".into()),
+            Event::End(Tag::Image(
+                LinkType::Inline,
+                "img.png".into(),
+                "Title".into(),
+            )),
+            Event::Code("code".into()),
+            Event::SoftBreak,
+            Event::HardBreak,
+            Event::Html("<br>".into()),
+            Event::Rule,
+            Event::Start(Tag::BlockQuote),
+            Event::Start(Tag::Paragraph),
+            Event::Text("Nested".into()),
+            Event::End(Tag::Paragraph),
+            Event::End(Tag::BlockQuote),
+            Event::End(Tag::BlockQuote),
+        ];
+        let mut slugs = HashMap::new();
+        let (quotes, next) = renderer.collect_blockquotes(&events, 1, 1, &mut slugs)?;
+        assert_eq!(next, events.len());
+        assert!(!quotes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_list_block_elements() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![
+            Event::Start(Tag::List(Some(1))),
+            Event::Start(Tag::Item),
+            Event::Start(Tag::Heading(pulldown_cmark::HeadingLevel::H3, None, vec![])),
+            Event::Text("Heading".into()),
+            Event::End(Tag::Heading(pulldown_cmark::HeadingLevel::H3, None, vec![])),
+            Event::Start(Tag::Table(vec![Alignment::Left])),
+            Event::Start(Tag::TableHead),
+            Event::Start(Tag::TableRow),
+            Event::Start(Tag::TableCell),
+            Event::Text("H".into()),
+            Event::End(Tag::TableCell),
+            Event::End(Tag::TableRow),
+            Event::End(Tag::TableHead),
+            Event::Start(Tag::TableRow),
+            Event::Start(Tag::TableCell),
+            Event::Text("R".into()),
+            Event::End(Tag::TableCell),
+            Event::End(Tag::TableRow),
+            Event::End(Tag::Table(vec![Alignment::Left])),
+            Event::Start(Tag::CodeBlock(pulldown_cmark::CodeBlockKind::Fenced(
+                "rust".into(),
+            ))),
+            Event::Text("fn main() {}\n".into()),
+            Event::End(Tag::CodeBlock(pulldown_cmark::CodeBlockKind::Fenced(
+                "rust".into(),
+            ))),
+            Event::Start(Tag::BlockQuote),
+            Event::Start(Tag::Paragraph),
+            Event::Text("Quote".into()),
+            Event::End(Tag::Paragraph),
+            Event::End(Tag::BlockQuote),
+            Event::Rule,
+            Event::HardBreak,
+            Event::End(Tag::Item),
+            Event::End(Tag::List(Some(1))),
+        ];
+        let mut slugs = HashMap::new();
+        let (items, next) = renderer.parse_list(&events, 1, &mut slugs)?;
+        assert_eq!(next, events.len());
+        assert_eq!(items.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_element_variants() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let mut slugs = HashMap::new();
+        let mut elements = Vec::new();
+
+        let paragraph = vec![
+            Event::Start(Tag::Paragraph),
+            Event::Text("para".into()),
+            Event::End(Tag::Paragraph),
+        ];
+        let next = renderer.parse_element(&paragraph, 0, &mut elements, &mut slugs)?;
+        assert_eq!(next, paragraph.len());
+
+        let heading = vec![
+            Event::Start(Tag::Heading(pulldown_cmark::HeadingLevel::H2, None, vec![])),
+            Event::Text("Heading".into()),
+            Event::End(Tag::Heading(pulldown_cmark::HeadingLevel::H2, None, vec![])),
+        ];
+        let next = renderer.parse_element(&heading, 0, &mut elements, &mut slugs)?;
+        assert_eq!(next, heading.len());
+
+        let code_block = vec![
+            Event::Start(Tag::CodeBlock(pulldown_cmark::CodeBlockKind::Fenced(
+                "rust".into(),
+            ))),
+            Event::Text("fn main() {}\n".into()),
+            Event::End(Tag::CodeBlock(pulldown_cmark::CodeBlockKind::Fenced(
+                "rust".into(),
+            ))),
+        ];
+        let next = renderer.parse_element(&code_block, 0, &mut elements, &mut slugs)?;
+        assert_eq!(next, code_block.len());
+
+        let list = vec![
+            Event::Start(Tag::List(None)),
+            Event::Start(Tag::Item),
+            Event::Text("item".into()),
+            Event::End(Tag::Item),
+            Event::End(Tag::List(None)),
+        ];
+        let next = renderer.parse_element(&list, 0, &mut elements, &mut slugs)?;
+        assert_eq!(next, list.len());
+
+        let quote = vec![
+            Event::Start(Tag::BlockQuote),
+            Event::Start(Tag::Paragraph),
+            Event::Text("quote".into()),
+            Event::End(Tag::Paragraph),
+            Event::End(Tag::BlockQuote),
+        ];
+        let next = renderer.parse_element(&quote, 0, &mut elements, &mut slugs)?;
+        assert_eq!(next, quote.len());
+
+        let table = vec![
+            Event::Start(Tag::Table(vec![Alignment::Left])),
+            Event::Start(Tag::TableHead),
+            Event::Start(Tag::TableRow),
+            Event::Start(Tag::TableCell),
+            Event::Text("H".into()),
+            Event::End(Tag::TableCell),
+            Event::End(Tag::TableRow),
+            Event::End(Tag::TableHead),
+            Event::Start(Tag::TableRow),
+            Event::Start(Tag::TableCell),
+            Event::Text("R".into()),
+            Event::End(Tag::TableCell),
+            Event::End(Tag::TableRow),
+            Event::End(Tag::Table(vec![Alignment::Left])),
+        ];
+        let next = renderer.parse_element(&table, 0, &mut elements, &mut slugs)?;
+        assert_eq!(next, table.len());
+
+        let rule = vec![Event::Rule];
+        let next = renderer.parse_element(&rule, 0, &mut elements, &mut slugs)?;
+        assert_eq!(next, rule.len());
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_code_block_with_language() -> Result<()> {
         let renderer = MarkdownRenderer::new();
         let elements = renderer.parse("```rust\nfn main() {}\n```")?;
@@ -7222,6 +7522,7 @@ fn main() {}
 
     #[test]
     fn test_resolve_table_widths_branches() {
+        assert!(MarkdownRenderer::resolve_table_widths(50.0, &[], &[]).is_empty());
         assert_eq!(
             MarkdownRenderer::resolve_table_widths(100.0, &[10.0, 10.0], &[20.0, 30.0]),
             vec![20.0, 30.0]
@@ -7474,11 +7775,7 @@ fn main() {}
         with_test_ui(|_, ui| {
             let build = renderer.build_layout_job(ui.style(), &spans, 200.0, true, Align::Center);
             let galley = ui.fonts(|f| f.layout_job(build.job.clone()));
-            assert!(
-                galley.rect.center().x.abs() <= 0.01,
-                "center rect should be near 0, got {:?}",
-                galley.rect
-            );
+            assert!(galley.rect.center().x.abs() <= 0.01);
         });
     }
 
@@ -7531,11 +7828,1044 @@ fn main() {}
     }
 
     #[test]
-    fn test_render_code_block_highlight_and_fallback() {
+    fn test_find_syntax_for_language_mappings() {
+        let renderer = MarkdownRenderer::new();
+        assert!(renderer.find_syntax_for_language("markdown").is_some());
+        assert!(renderer.find_syntax_for_language("shell").is_some());
+        assert!(renderer.find_syntax_for_language("yaml").is_some());
+    }
+
+    #[test]
+    fn test_find_syntax_for_language_mapped_names() {
+        let renderer = MarkdownRenderer::new();
+        let langs = [
+            "python",
+            "javascript",
+            "typescript",
+            "c++",
+            "cpp",
+            "c#",
+            "shell",
+            "bash",
+            "powershell",
+            "yaml",
+            "markdown",
+            "sql",
+            "toml",
+        ];
+        for lang in langs {
+            let _ = renderer.find_syntax_for_language(lang);
+        }
+    }
+
+    #[test]
+    fn test_estimate_table_image_height_with_title() {
+        let renderer = MarkdownRenderer::new();
+        let span = InlineSpan::Image {
+            src: "assets/samples/logo.svg".to_string(),
+            alt: "logo".to_string(),
+            title: Some("Caption".to_string()),
+        };
+        with_test_ui(|_, ui| {
+            let height = renderer.estimate_table_image_height(ui, &span, 120.0);
+            assert!(height > 0.0);
+            let fallback = renderer.estimate_table_image_height(
+                ui,
+                &InlineSpan::Text("text".to_string()),
+                120.0,
+            );
+            assert!(fallback > 0.0);
+        });
+    }
+
+    #[test]
+    fn test_render_table_emoji() {
         let renderer = MarkdownRenderer::new();
         with_test_ui(|_, ui| {
+            renderer.render_table_emoji(ui, "\u{1f600}");
+        });
+    }
+
+    #[test]
+    fn test_render_list_block_non_paragraph() {
+        let renderer = MarkdownRenderer::new();
+        let block = MarkdownElement::CodeBlock {
+            language: Some("rust".to_string()),
+            text: "fn main() {}".to_string(),
+        };
+        with_test_ui(|_, ui| {
+            renderer.render_list_block(ui, &block, 12.0, Color32::WHITE);
+        });
+    }
+
+    #[test]
+    fn test_measure_inline_spans_with_image() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![InlineSpan::Image {
+            src: "assets/samples/logo.svg".to_string(),
+            alt: "logo".to_string(),
+            title: None,
+        }];
+        with_test_ui(|_, ui| {
+            let width = renderer.measure_inline_spans(ui, &spans);
+            assert!(width > 0.0);
+        });
+    }
+
+    #[test]
+    fn test_parse_blockquote_with_nested_blocks() {
+        let renderer = MarkdownRenderer::new();
+        let md = r#"> # Quote Heading
+> Paragraph **bold** *em* ~~strike~~ [link](https://example.com)
+> ![alt](assets/samples/logo.svg "Logo")
+> - Item one
+>   - Nested item
+> 
+> ```rust
+> let x = 1;
+> ```
+> 
+> | H1 | H2 |
+> | --- | --- |
+> | 🎉 | ![a](assets/samples/logo.svg "Img") |
+"#;
+        let elements = renderer.parse(md).expect("parse");
+        assert!(elements
+            .iter()
+            .any(|e| matches!(e, MarkdownElement::Quote { .. })));
+    }
+
+    #[test]
+    fn test_parse_list_with_heading_and_table() {
+        let renderer = MarkdownRenderer::new();
+        let md = r#"- # Item heading
+  Paragraph text with `code` and **strong**
+  - Nested child
+- | A | B |
+  | - | - |
+  | 1 | 2 |
+- ```rust
+  fn main() {}
+  ```
+- > Quote in list
+- ---
+"#;
+        let elements = renderer.parse(md).expect("parse");
+        assert!(elements
+            .iter()
+            .any(|e| matches!(e, MarkdownElement::List { .. })));
+    }
+
+    #[test]
+    fn test_parse_list_inline_variants() {
+        let renderer = MarkdownRenderer::new();
+        let md = r#"- Item with *em* **strong** ~~strike~~ `code` [link](https://example.com) ![alt](assets/emoji/1f600.png "title")  
+  next line"#;
+        let elements = renderer.parse(md).expect("parse");
+        assert!(elements
+            .iter()
+            .any(|e| matches!(e, MarkdownElement::List { .. })));
+    }
+
+    #[test]
+    fn test_parse_blockquote_with_varied_content() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let md = r#"
+> ### Quote Heading
+> Paragraph with *em* **strong** ~~strike~~ `code` [link](https://example.com) ![alt](assets/emoji/1f600.png "title")  
+> Next line<br>
+>
+> - item one
+> - item two
+>
+> | h1 | h2 |
+> | --- | --- |
+> | a | b |
+>
+> ```rust
+> fn main() {
+>     // comment
+> }
+> ```
+>
+> > Nested quote
+>
+> ---
+"#;
+        let elements = renderer.parse(md)?;
+        assert!(elements
+            .iter()
+            .any(|e| matches!(e, MarkdownElement::Quote { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn test_find_syntax_for_language_variants() {
+        let renderer = MarkdownRenderer::new();
+        assert!(renderer.find_syntax_for_language("rs").is_some());
+        let cs_ext = renderer.syntax_set.find_syntax_by_extension("cs");
+        let cs_lang = renderer.find_syntax_for_language("csharp");
+        assert_eq!(cs_lang.is_some(), cs_ext.is_some());
+        let ps_ext = renderer.syntax_set.find_syntax_by_extension("ps1");
+        let ps_lang = renderer.find_syntax_for_language("powershell");
+        assert_eq!(ps_lang.is_some(), ps_ext.is_some());
+        assert!(renderer.find_syntax_for_language("madeuplang").is_none());
+    }
+
+    #[test]
+    fn test_generate_emoji_image_variants() {
+        let renderer = MarkdownRenderer::new();
+        let emojis = [
+            "\u{1f389}",
+            "\u{2705}",
+            "\u{1f680}",
+            "\u{1f642}",
+            "\u{1f600}",
+            "\u{1f609}",
+            "\u{2b50}",
+            "\u{1f525}",
+            "\u{1f44d}",
+            "\u{1f44e}",
+            "\u{1f4a1}",
+            "\u{2753}",
+            "\u{2757}",
+            "\u{1f4dd}",
+            "\u{1f9e0}",
+            "\u{1f9ea}",
+            "\u{1f4e6}",
+            "\u{1f527}",
+            "x",
+        ];
+        for emoji in emojis {
+            let image = renderer.generate_emoji_image(emoji, 8);
+            assert_eq!(image.size, [8, 8]);
+        }
+    }
+
+    #[test]
+    fn test_measure_inline_spans_code_and_image() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|ctx, ui| {
+            let tex = ctx.load_texture(
+                "test-image",
+                egui::ColorImage::new([2, 2], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            renderer.image_textures.borrow_mut().insert(
+                "image.png".to_string(),
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [64, 32],
+                    modified: None,
+                },
+            );
+            let spans = vec![
+                InlineSpan::Text("Hello".to_string()),
+                InlineSpan::Code("line1\nline2".to_string()),
+                InlineSpan::Image {
+                    src: "image.png".to_string(),
+                    alt: "Alt".to_string(),
+                    title: None,
+                },
+            ];
+            let width = renderer.measure_inline_spans(ui, &spans);
+            assert!(width > 0.0);
+        });
+    }
+
+    #[test]
+    fn test_get_or_load_image_texture_cache_and_remote() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            assert!(renderer
+                .get_or_load_image_texture(ui, "https://example.com/logo.png")
+                .is_none());
+        });
+
+        let temp = tempdir()?;
+        let image_path = temp.path().join("image.png");
+        std::fs::write(&image_path, tiny_png_bytes())?;
+        let resolved = image_path.to_string_lossy().to_string();
+        with_test_ui(|_, ui| {
+            let first = renderer.get_or_load_image_texture(ui, &resolved);
+            assert!(first.is_some());
+            let second = renderer.get_or_load_image_texture(ui, &resolved);
+            assert!(second.is_some());
+        });
+        Ok(())
+    }
+
+    #[test]
+    fn test_render_table_tablebuilder_policy_mix() {
+        let renderer = MarkdownRenderer::new();
+        let headers = vec![
+            vec![InlineSpan::Text("Version".to_string())],
+            vec![InlineSpan::Text("Author".to_string())],
+            vec![InlineSpan::Text("Notes".to_string())],
+            vec![InlineSpan::Text("Example".to_string())],
+            vec![InlineSpan::Text("Misc".to_string())],
+        ];
+        let rows = vec![vec![
+            vec![InlineSpan::Text("1".to_string())],
+            vec![InlineSpan::Text("Ada".to_string())],
+            vec![InlineSpan::Text("Line 1\nLine 2".to_string())],
+            vec![InlineSpan::Image {
+                src: "image.png".to_string(),
+                alt: "Alt".to_string(),
+                title: Some("Title".to_string()),
+            }],
+            vec![InlineSpan::Link {
+                text: "Link".to_string(),
+                url: "https://example.com".to_string(),
+            }],
+        ]];
+
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1200.0, 720.0),
+            )),
+            ..Default::default()
+        };
+        run_frame_with_input(&ctx, input, |ctx, ui| {
+            let tex = ctx.load_texture(
+                "table-image",
+                egui::ColorImage::new([2, 2], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            renderer.image_textures.borrow_mut().insert(
+                "image.png".to_string(),
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [120, 80],
+                    modified: None,
+                },
+            );
+            let table_id = renderer.compute_table_id(&headers, &rows, &[], 12);
+            renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
+        });
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1200.0, 720.0),
+            )),
+            ..Default::default()
+        };
+        run_frame_with_input(&ctx, input, |_, ui| {
+            let table_id = renderer.compute_table_id(&headers, &rows, &[], 12);
+            renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
+        });
+    }
+
+    #[test]
+    fn test_render_table_tablebuilder_extra_columns() {
+        let renderer = MarkdownRenderer::new();
+        let headers = vec![vec![InlineSpan::Text("H1".to_string())]];
+        let rows = vec![vec![
+            vec![InlineSpan::Text("C1".to_string())],
+            vec![InlineSpan::Text("C2".to_string())],
+            vec![InlineSpan::Text("C3".to_string())],
+        ]];
+        with_test_ui(|_, ui| {
+            let table_id = renderer.compute_table_id(&headers, &rows, &[], 13);
+            renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
+        });
+    }
+
+    #[test]
+    fn test_render_table_tablebuilder_forced_policies() {
+        let renderer = MarkdownRenderer::new();
+        let _forced = ForcedTablePolicies::new(vec![
+            ColumnPolicy::Auto,
+            ColumnPolicy::Fixed {
+                width: 120.0,
+                clip: true,
+            },
+            ColumnPolicy::Resizable {
+                min: 60.0,
+                preferred: 120.0,
+                clip: true,
+            },
+            ColumnPolicy::Remainder { clip: true },
+        ]);
+        let headers = vec![
+            vec![InlineSpan::Text("A".to_string())],
+            vec![InlineSpan::Text("B".to_string())],
+            vec![InlineSpan::Text("C".to_string())],
+            vec![InlineSpan::Text("D".to_string())],
+        ];
+        let rows = vec![vec![
+            vec![InlineSpan::Text("1".to_string())],
+            vec![InlineSpan::Text("2".to_string())],
+            vec![InlineSpan::Text("3".to_string())],
+            vec![InlineSpan::Text("4".to_string())],
+        ]];
+        with_test_ui(|_, ui| {
+            let table_id = renderer.compute_table_id(&headers, &rows, &[], 14);
+            renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
+        });
+    }
+
+    #[test]
+    fn test_render_table_tablebuilder_scaled_down_min_flex() {
+        let renderer = MarkdownRenderer::new();
+        let headers = vec![
+            vec![InlineSpan::Text("Notes".to_string())],
+            vec![InlineSpan::Text("Summary".to_string())],
+            vec![InlineSpan::Text("Details".to_string())],
+        ];
+        let rows = vec![vec![
+            vec![InlineSpan::Text("Long text 1".to_string())],
+            vec![InlineSpan::Text("Long text 2".to_string())],
+            vec![InlineSpan::Text("Long text 3".to_string())],
+        ]];
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(120.0, 120.0),
+            )),
+            ..Default::default()
+        };
+        run_frame_with_input(&ctx, input, |_, ui| {
+            let table_id = renderer.compute_table_id(&headers, &rows, &[], 15);
+            renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
+        });
+    }
+
+    #[test]
+    fn test_render_list_variants() {
+        let renderer = MarkdownRenderer::new();
+        let items = vec![
+            ListItem {
+                blocks: vec![MarkdownElement::Header {
+                    level: 2,
+                    spans: vec![InlineSpan::Text("Header".to_string())],
+                    id: "header".to_string(),
+                }],
+            },
+            ListItem { blocks: vec![] },
+        ];
+        with_test_ui(|_, ui| {
+            renderer.render_list(ui, false, &items);
+            renderer.render_list(ui, true, &items);
+            renderer.render_list(ui, false, &[]);
+        });
+    }
+
+    #[test]
+    fn test_render_element_body_header_levels() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            for level in 3..=6 {
+                let element = MarkdownElement::Header {
+                    level,
+                    spans: vec![InlineSpan::Text(format!("H{}", level))],
+                    id: format!("h{}", level),
+                };
+                renderer.render_element_body(ui, &element);
+            }
+        });
+    }
+
+    #[test]
+    fn test_render_table_tablebuilder_hscroll() {
+        let renderer = MarkdownRenderer::new();
+        let headers: Vec<Vec<InlineSpan>> = (0..8)
+            .map(|i| vec![InlineSpan::Text(format!("H{}", i + 1))])
+            .collect();
+        let row: Vec<Vec<InlineSpan>> = (0..8)
+            .map(|i| vec![InlineSpan::Text(format!("col{}", i + 1))])
+            .collect();
+        let rows = vec![row];
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(200.0, 120.0),
+            )),
+            ..Default::default()
+        };
+        run_frame_with_input(&ctx, input, |_, ui| {
+            let table_id = renderer.compute_table_id(&headers, &rows, &[], 10);
+            renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
+        });
+    }
+
+    #[test]
+    fn test_render_table_tablebuilder_scaled_down() {
+        let renderer = MarkdownRenderer::new();
+        let headers = vec![
+            vec![InlineSpan::Text("Wide Header One".to_string())],
+            vec![InlineSpan::Text("Wide Header Two".to_string())],
+        ];
+        let long_text = "W".repeat(80);
+        let rows = vec![vec![
+            vec![InlineSpan::Text(long_text.clone())],
+            vec![InlineSpan::Text(long_text)],
+        ]];
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(180.0, 120.0),
+            )),
+            ..Default::default()
+        };
+        run_frame_with_input(&ctx, input, |_, ui| {
+            let table_id = renderer.compute_table_id(&headers, &rows, &[], 11);
+            renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
+        });
+    }
+
+    #[test]
+    fn test_list_marker_info_any_indent_variants() {
+        assert!(MarkdownRenderer::list_marker_info_any_indent("").is_none());
+        assert!(MarkdownRenderer::list_marker_info_any_indent("   ").is_none());
+
+        let (rest, indent, content_indent, leading_cols) =
+            MarkdownRenderer::list_marker_info_any_indent(" 1. item").expect("marker");
+        assert_eq!(rest, "item");
+        assert_eq!(indent, 1);
+        assert_eq!(content_indent, 4);
+        assert_eq!(leading_cols, 1);
+
+        let (rest, indent, content_indent, leading_cols) =
+            MarkdownRenderer::list_marker_info_any_indent("2)\titem").expect("marker");
+        assert_eq!(rest, "item");
+        assert_eq!(indent, 2);
+        assert_eq!(content_indent, 4);
+        assert_eq!(leading_cols, 0);
+    }
+
+    #[test]
+    fn test_collect_until_tag_end_breaks_and_code() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![
+            Event::Start(Tag::Emphasis),
+            Event::Text("alpha".into()),
+            Event::Code("beta".into()),
+            Event::SoftBreak,
+            Event::Html("<br>".into()),
+            Event::HardBreak,
+            Event::Html("<span>".into()),
+            Event::End(Tag::Emphasis),
+        ];
+        let (text, next) = renderer.collect_until_tag_end(&events, 1, Tag::Emphasis, true)?;
+        assert_eq!(next, events.len());
+        assert_eq!(text, "alphabeta\n\n\n");
+
+        let (text, next) = renderer.collect_until_tag_end(&events, 1, Tag::Emphasis, false)?;
+        assert_eq!(next, events.len());
+        assert_eq!(text, "alphabeta   ");
+
+        let unclosed = vec![Event::Text("tail".into()), Event::SoftBreak];
+        let (text, next) = renderer.collect_until_tag_end(&unclosed, 0, Tag::Emphasis, true)?;
+        assert_eq!(next, unclosed.len());
+        assert_eq!(text, "tail\n");
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_inline_spans_with_breaks_link_image_and_unclosed() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![
+            Event::Start(Tag::Paragraph),
+            Event::Start(Tag::Link(
+                LinkType::Inline,
+                "https://example.com".into(),
+                "".into(),
+            )),
+            Event::Text("link".into()),
+            Event::End(Tag::Link(
+                LinkType::Inline,
+                "https://example.com".into(),
+                "".into(),
+            )),
+            Event::Start(Tag::Image(
+                LinkType::Inline,
+                "img.png".into(),
+                "Title".into(),
+            )),
+            Event::Text("alt".into()),
+            Event::End(Tag::Image(
+                LinkType::Inline,
+                "img.png".into(),
+                "Title".into(),
+            )),
+            Event::FootnoteReference("note".into()),
+            Event::End(Tag::Paragraph),
+        ];
+        let (spans, next) =
+            renderer.parse_inline_spans_with_breaks(&events, 1, Tag::Paragraph, true)?;
+        assert_eq!(next, events.len());
+        assert!(spans
+            .iter()
+            .any(|span| matches!(span, InlineSpan::Link { .. })));
+        assert!(spans
+            .iter()
+            .any(|span| matches!(span, InlineSpan::Image { .. })));
+
+        let unclosed = vec![Event::Text("tail".into())];
+        let (spans, next) =
+            renderer.parse_inline_spans_with_breaks(&unclosed, 0, Tag::Paragraph, true)?;
+        assert_eq!(next, unclosed.len());
+        assert_eq!(MarkdownRenderer::spans_plain_text(&spans), "tail");
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_list_inline_variants_unclosed() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![
+            Event::Start(Tag::List(Some(1))),
+            Event::Text("skip".into()),
+            Event::Start(Tag::Item),
+            Event::Start(Tag::Heading(pulldown_cmark::HeadingLevel::H2, None, vec![])),
+            Event::Text("Dup".into()),
+            Event::End(Tag::Heading(pulldown_cmark::HeadingLevel::H2, None, vec![])),
+            Event::Start(Tag::Heading(pulldown_cmark::HeadingLevel::H2, None, vec![])),
+            Event::Text("Dup".into()),
+            Event::End(Tag::Heading(pulldown_cmark::HeadingLevel::H2, None, vec![])),
+            Event::Start(Tag::Emphasis),
+            Event::Text("em".into()),
+            Event::End(Tag::Emphasis),
+            Event::Start(Tag::Strong),
+            Event::Text("strong".into()),
+            Event::End(Tag::Strong),
+            Event::Start(Tag::Strikethrough),
+            Event::Text("strike".into()),
+            Event::End(Tag::Strikethrough),
+            Event::Start(Tag::Link(
+                LinkType::Inline,
+                "https://example.com".into(),
+                "".into(),
+            )),
+            Event::Text("link".into()),
+            Event::End(Tag::Link(
+                LinkType::Inline,
+                "https://example.com".into(),
+                "".into(),
+            )),
+            Event::Start(Tag::Image(LinkType::Inline, "img.png".into(), "".into())),
+            Event::Text("alt".into()),
+            Event::End(Tag::Image(LinkType::Inline, "img.png".into(), "".into())),
+            Event::Text("tail".into()),
+            Event::SoftBreak,
+            Event::FootnoteReference("note".into()),
+        ];
+        let mut slugs = HashMap::new();
+        let (items, next) = renderer.parse_list(&events, 1, &mut slugs)?;
+        assert_eq!(next, events.len());
+        assert_eq!(items.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_collect_blockquotes_unclosed_variants() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![
+            Event::Start(Tag::BlockQuote),
+            Event::Text("plain".into()),
+            Event::Code("code".into()),
+            Event::Start(Tag::Heading(pulldown_cmark::HeadingLevel::H2, None, vec![])),
+            Event::Text("Dup".into()),
+            Event::End(Tag::Heading(pulldown_cmark::HeadingLevel::H2, None, vec![])),
+            Event::Start(Tag::Heading(pulldown_cmark::HeadingLevel::H2, None, vec![])),
+            Event::Text("Dup".into()),
+            Event::End(Tag::Heading(pulldown_cmark::HeadingLevel::H2, None, vec![])),
+            Event::Start(Tag::Link(
+                LinkType::Inline,
+                "https://example.com".into(),
+                "".into(),
+            )),
+            Event::Text("link".into()),
+            Event::End(Tag::Link(
+                LinkType::Inline,
+                "https://example.com".into(),
+                "".into(),
+            )),
+            Event::Start(Tag::Image(LinkType::Inline, "img.png".into(), "".into())),
+            Event::Text("alt".into()),
+            Event::End(Tag::Image(LinkType::Inline, "img.png".into(), "".into())),
+            Event::FootnoteReference("note".into()),
+        ];
+        let mut slugs = HashMap::new();
+        let (quotes, next) = renderer.collect_blockquotes(&events, 1, 1, &mut slugs)?;
+        assert_eq!(next, events.len());
+        let mut ids = Vec::new();
+        for (_, blocks) in &quotes {
+            for block in blocks {
+                if let MarkdownElement::Header { id, .. } = block {
+                    ids.push(id.clone());
+                }
+            }
+        }
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_render_inline_span_context_menus() {
+        let renderer = MarkdownRenderer::new();
+        let code_span = InlineSpan::Code("inline".to_string());
+        let ctx = egui::Context::default();
+        let click = input_with_click(egui::pos2(12.0, 12.0), egui::PointerButton::Secondary);
+        run_frame_with_input(&ctx, click, |_, ui| {
+            renderer.render_inline_span(ui, &code_span, None, None);
+        });
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(320.0, 240.0),
+            )),
+            ..Default::default()
+        };
+        run_frame_with_input(&ctx, input, |_, ui| {
+            renderer.render_inline_span(ui, &code_span, None, None);
+        });
+
+        let link_span = InlineSpan::Link {
+            text: "Link".to_string(),
+            url: "https://example.com".to_string(),
+        };
+        let ctx = egui::Context::default();
+        let click = input_with_click(egui::pos2(12.0, 12.0), egui::PointerButton::Secondary);
+        run_frame_with_input(&ctx, click, |_, ui| {
+            renderer.render_inline_span(ui, &link_span, None, None);
+        });
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(320.0, 240.0),
+            )),
+            ..Default::default()
+        };
+        run_frame_with_input(&ctx, input, |_, ui| {
+            renderer.render_inline_span(ui, &link_span, None, None);
+        });
+    }
+
+    #[test]
+    fn test_render_inline_span_image_scale_and_title() {
+        let renderer = MarkdownRenderer::new();
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(40.0, 240.0),
+            )),
+            ..Default::default()
+        };
+        run_frame_with_input(&ctx, input, |_, ui| {
+            let color_image = egui::ColorImage::new([200, 120], Color32::WHITE);
+            let tex =
+                ui.ctx()
+                    .load_texture("img:test.png", color_image, egui::TextureOptions::LINEAR);
+            renderer.image_textures.borrow_mut().insert(
+                "test.png".to_string(),
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [200, 120],
+                    modified: None,
+                },
+            );
+            let span = InlineSpan::Image {
+                src: "test.png".to_string(),
+                alt: "Alt".to_string(),
+                title: Some("Title".to_string()),
+            };
+            renderer.render_inline_span(ui, &span, None, None);
+        });
+    }
+
+    #[test]
+    fn test_measure_inline_spans_empty_lines_and_styles() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            let spans = vec![
+                InlineSpan::Strong("Bold\n\nLine".to_string()),
+                InlineSpan::Emphasis("Em\n".to_string()),
+                InlineSpan::Strikethrough("Strike".to_string()),
+                InlineSpan::Link {
+                    text: "Link\n".to_string(),
+                    url: "https://example.com".to_string(),
+                },
+                InlineSpan::Code("code\n\nmore".to_string()),
+            ];
+            let width = renderer.measure_inline_spans(ui, &spans);
+            assert!(width > 0.0);
+        });
+    }
+
+    #[test]
+    fn test_estimate_table_cell_height_variants() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            let style = ui.style().clone();
+            let empty =
+                renderer.estimate_table_cell_height(&style, ui, &[], 100.0, Align::LEFT, 18.0);
+            assert_eq!(empty, 18.0);
+
+            let emoji_spans = vec![InlineSpan::Text("😀".to_string())];
+            let emoji_height = renderer.estimate_table_cell_height(
+                &style,
+                ui,
+                &emoji_spans,
+                100.0,
+                Align::LEFT,
+                18.0,
+            );
+            assert!(emoji_height >= 18.0);
+
+            let spans = vec![
+                InlineSpan::Text("alpha".to_string()),
+                InlineSpan::Image {
+                    src: "missing.png".to_string(),
+                    alt: "Alt".to_string(),
+                    title: None,
+                },
+            ];
+            let height =
+                renderer.estimate_table_cell_height(&style, ui, &spans, 40.0, Align::LEFT, 18.0);
+            assert!(height >= 18.0);
+        });
+    }
+
+    #[test]
+    fn test_estimate_table_column_widths_scaling() {
+        let renderer = MarkdownRenderer::new();
+        let empty = renderer.estimate_table_column_widths(&[], 120.0, 6.0);
+        assert_eq!(empty, vec![120.0]);
+
+        let specs = vec![
+            ColumnSpec::new(
+                0,
+                "A".to_string(),
+                ColumnPolicy::Fixed {
+                    width: 100.0,
+                    clip: false,
+                },
+                None,
+            ),
+            ColumnSpec::new(
+                1,
+                "B".to_string(),
+                ColumnPolicy::Fixed {
+                    width: 100.0,
+                    clip: false,
+                },
+                None,
+            ),
+        ];
+        let widths = renderer.estimate_table_column_widths(&specs, 100.0, 10.0);
+        assert_eq!(widths.len(), 2);
+        let sum: f32 = widths.iter().sum();
+        assert!((sum - 90.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn test_escape_table_pipes_in_inline_code_nested_lists() {
+        let md_parent = "\
+- Parent
+  | Col | Notes |
+  | --- | --- |
+  | code | `a|b` |
+";
+        let escaped_parent = MarkdownRenderer::escape_table_pipes_in_inline_code(md_parent);
+        assert!(escaped_parent.contains(PIPE_SENTINEL));
+
+        let md_nested = "\
+- Parent
+    - | Col | Notes |
+      | --- | --- |
+      | code | `a|b` |
+";
+        let escaped_nested = MarkdownRenderer::escape_table_pipes_in_inline_code(md_nested);
+        assert!(escaped_nested.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
+    fn test_parse_table_unclosed_and_noise() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![
+            Event::Start(Tag::Table(vec![Alignment::Left])),
+            Event::Start(Tag::TableHead),
+            Event::Start(Tag::TableRow),
+            Event::Start(Tag::TableCell),
+            Event::Text("H".into()),
+            Event::End(Tag::TableCell),
+            Event::End(Tag::TableRow),
+            Event::End(Tag::TableHead),
+            Event::Start(Tag::TableRow),
+            Event::Text("noise".into()),
+            Event::Start(Tag::TableCell),
+            Event::Text("R".into()),
+            Event::End(Tag::TableCell),
+            Event::End(Tag::TableRow),
+            Event::Text("after".into()),
+        ];
+        let (headers, rows, next) = renderer.parse_table(&events, 1)?;
+        assert_eq!(headers.len(), 1);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(next, events.len());
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_code_block_unclosed() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![
+            Event::Start(Tag::CodeBlock(pulldown_cmark::CodeBlockKind::Fenced(
+                "rust".into(),
+            ))),
+            Event::Text("fn main() {}".into()),
+            Event::Html("<span>".into()),
+        ];
+        let (code, language, next) = renderer.parse_code_block(&events, 0)?;
+        assert_eq!(language.as_deref(), Some("rust"));
+        assert_eq!(code, "fn main() {}");
+        assert_eq!(next, events.len());
+        Ok(())
+    }
+
+    #[test]
+    fn test_has_pipe_outside_inline_code_backticks() {
+        assert!(MarkdownRenderer::has_pipe_outside_inline_code(r"\`|`"));
+        assert!(!MarkdownRenderer::has_pipe_outside_inline_code("``a|b``"));
+    }
+
+    #[test]
+    fn test_row_needs_height_estimate_variants() {
+        let renderer = MarkdownRenderer::new();
+        let row_with_image = vec![vec![InlineSpan::Image {
+            src: "missing.png".to_string(),
+            alt: "Alt".to_string(),
+            title: None,
+        }]];
+        assert!(renderer.row_needs_height_estimate(&row_with_image));
+
+        let row_with_newline = vec![vec![InlineSpan::Text("line1\nline2".to_string())]];
+        assert!(renderer.row_needs_height_estimate(&row_with_newline));
+
+        let row_plain = vec![vec![InlineSpan::Text("plain".to_string())]];
+        assert!(!renderer.row_needs_height_estimate(&row_plain));
+    }
+
+    #[test]
+    fn test_is_allowed_scheme_variants() {
+        assert!(MarkdownRenderer::is_allowed_scheme("http://example.com"));
+        assert!(MarkdownRenderer::is_allowed_scheme("https://example.com"));
+        assert!(MarkdownRenderer::is_allowed_scheme(
+            "mailto:test@example.com"
+        ));
+        assert!(!MarkdownRenderer::is_allowed_scheme("ftp://example.com"));
+    }
+
+    #[test]
+    fn test_render_table_tablebuilder_scaled_down_adjustments() {
+        let renderer = MarkdownRenderer::new();
+        let headers = vec![
+            vec![InlineSpan::Text("A".to_string())],
+            vec![InlineSpan::Text("B".to_string())],
+            vec![InlineSpan::Text("C".to_string())],
+        ];
+        let rows = vec![vec![
+            vec![InlineSpan::Text("row1".to_string())],
+            vec![InlineSpan::Text("row2".to_string())],
+            vec![InlineSpan::Text("row3".to_string())],
+        ]];
+        let ctx = egui::Context::default();
+        let widths = [220.0, 240.0];
+        for (idx, width) in widths.iter().enumerate() {
+            let _forced = ForcedTablePolicies::new(vec![
+                ColumnPolicy::Resizable {
+                    min: 40.0,
+                    preferred: 200.0,
+                    clip: false,
+                },
+                ColumnPolicy::Auto,
+                ColumnPolicy::Remainder { clip: false },
+            ]);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(*width, 120.0),
+                )),
+                ..Default::default()
+            };
+            run_frame_with_input(&ctx, input, |_, ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let table_id = renderer.compute_table_id(&headers, &rows, &[], 90 + idx as u64);
+                renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
+            });
+        }
+    }
+
+    #[test]
+    fn test_render_code_block_mermaid_and_context_menu() {
+        let renderer = MarkdownRenderer::new();
+        let _guard = EnvVarGuard::set("MDMDVIEW_MERMAID_RENDERER", "off");
+        with_test_ui(|_, ui| {
+            renderer.render_code_block(ui, Some("mermaid"), "graph TD; A-->B;");
+        });
+
+        let ctx = egui::Context::default();
+        let click = input_with_click(egui::pos2(12.0, 12.0), egui::PointerButton::Secondary);
+        run_frame_with_input(&ctx, click, |_, ui| {
             renderer.render_code_block(ui, Some("rust"), "fn main() {}");
-            renderer.render_code_block(ui, Some("notalanguage"), "code");
+        });
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(320.0, 240.0),
+            )),
+            ..Default::default()
+        };
+        run_frame_with_input(&ctx, input, |_, ui| {
+            renderer.render_code_block(ui, Some("rust"), "fn main() {}");
+        });
+    }
+
+    #[test]
+    fn test_render_code_block_highlight_styles() {
+        let mut renderer = MarkdownRenderer::new();
+        let theme = renderer
+            .theme_set
+            .themes
+            .get_mut("base16-ocean.dark")
+            .expect("theme");
+        let selector = ScopeSelectors::from_str("keyword").expect("selector");
+        theme.scopes.insert(
+            0,
+            ThemeItem {
+                scope: selector,
+                style: StyleModifier {
+                    foreground: Some(Color::WHITE),
+                    background: Some(Color::BLACK),
+                    font_style: Some(FontStyle::BOLD | FontStyle::ITALIC),
+                },
+            },
+        );
+        with_test_ui(|_, ui| {
+            renderer.render_code_block(ui, Some("rust"), "fn main() {}");
+        });
+    }
+
+    #[test]
+    fn test_render_code_block_highlight_and_fallback() {
+        let renderer = MarkdownRenderer::new();
+        let code = "fn main() {\n    let value = 1;\n    // comment with  spaces\n    \n}\n";
+        with_test_ui(|_, ui| {
+            renderer.render_code_block(ui, Some("rust"), code);
+        });
+
+        let mut fallback_renderer = MarkdownRenderer::new();
+        fallback_renderer.syntax_set = SyntaxSet::new();
+        with_test_ui(|_, ui| {
+            fallback_renderer.render_code_block(ui, Some("notalanguage"), "code");
         });
     }
 
