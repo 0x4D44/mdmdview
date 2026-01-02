@@ -3,10 +3,10 @@ use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use egui::{Color32, RichText, Stroke};
 #[cfg(feature = "mermaid-quickjs")]
 use std::cell::RefCell;
-#[cfg(any(test, feature = "mermaid-quickjs"))]
-use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 #[cfg(feature = "mermaid-quickjs")]
 use std::collections::HashSet;
+#[cfg(any(test, feature = "mermaid-quickjs"))]
+use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
 #[cfg(any(test, feature = "mermaid-quickjs"))]
 use std::hash::{Hash, Hasher};
 
@@ -345,10 +345,12 @@ impl MermaidRenderer {
                     .inner_margin(8.0)
                     .show(ui, |ui| {
                         ui.label(
-                            RichText::new("Mermaid rendering is unavailable (embedded JS missing).")
-                                .color(Color32::from_rgb(200, 160, 80))
-                                .family(egui::FontFamily::Monospace)
-                                .size(code_font_size),
+                            RichText::new(
+                                "Mermaid rendering is unavailable (embedded JS missing).",
+                            )
+                            .color(Color32::from_rgb(200, 160, 80))
+                            .family(egui::FontFamily::Monospace)
+                            .size(code_font_size),
                         );
                         ui.add_space(6.0);
                         ui.label(
@@ -945,45 +947,45 @@ impl TextMeasurer {
         self.fontdb
             .with_face_data(face_id, |data, index| {
                 let face = ttf_parser::Face::parse(data, index).ok()?;
-            let units_per_em = face.units_per_em() as f32;
-            if !units_per_em.is_finite() || units_per_em <= 0.0 {
-                return None;
-            }
-            let scale = font_size / units_per_em;
-            let fallback_advance = units_per_em * 0.5;
-            let mut max_width_units = 0.0_f32;
-            let mut line_count = 0u32;
+                let units_per_em = face.units_per_em() as f32;
+                if !units_per_em.is_finite() || units_per_em <= 0.0 {
+                    return None;
+                }
+                let scale = font_size / units_per_em;
+                let fallback_advance = units_per_em * 0.5;
+                let mut max_width_units = 0.0_f32;
+                let mut line_count = 0u32;
 
-            for line in text.split('\n') {
-                line_count += 1;
-                let mut width_units = 0.0_f32;
-                for ch in line.chars() {
-                    if let Some(glyph) = face.glyph_index(ch) {
-                        if let Some(adv) = face.glyph_hor_advance(glyph) {
-                            width_units += adv as f32;
+                for line in text.split('\n') {
+                    line_count += 1;
+                    let mut width_units = 0.0_f32;
+                    for ch in line.chars() {
+                        if let Some(glyph) = face.glyph_index(ch) {
+                            if let Some(adv) = face.glyph_hor_advance(glyph) {
+                                width_units += adv as f32;
+                            } else {
+                                width_units += fallback_advance;
+                            }
                         } else {
                             width_units += fallback_advance;
                         }
-                    } else {
-                        width_units += fallback_advance;
+                    }
+                    if width_units > max_width_units {
+                        max_width_units = width_units;
                     }
                 }
-                if width_units > max_width_units {
-                    max_width_units = width_units;
+
+                if line_count == 0 {
+                    line_count = 1;
                 }
-            }
 
-            if line_count == 0 {
-                line_count = 1;
-            }
-
-            let width = max_width_units * scale;
-            let height = font_size * 0.72 * line_count as f32;
-            if width.is_finite() && height.is_finite() {
-                Some((width, height))
-            } else {
-                None
-            }
+                let width = max_width_units * scale;
+                let height = font_size * 0.72 * line_count as f32;
+                if width.is_finite() && height.is_finite() {
+                    Some((width, height))
+                } else {
+                    None
+                }
             })
             .flatten()
     }
@@ -1101,13 +1103,10 @@ impl MermaidWorker {
         let js = Self::patch_mermaid_js(js);
         let init_result: Result<(), String> = engine.ctx.with(|ctx| {
             let measurer = Arc::clone(&text_measurer);
-            let measure_fn = Function::new(
-                ctx.clone(),
-                move |text: String, font_size: f64| {
-                    let (width, height) = measurer.measure_text(&text, font_size as f32);
-                    vec![width as f64, height as f64]
-                },
-            )
+            let measure_fn = Function::new(ctx.clone(), move |text: String, font_size: f64| {
+                let (width, height) = measurer.measure_text(&text, font_size as f32);
+                vec![width as f64, height as f64]
+            })
             .map_err(|err| {
                 format!(
                     "Mermaid text measure init error: {}",
@@ -1156,9 +1155,9 @@ impl MermaidWorker {
         self.deadline_ms.store(deadline, Ordering::Relaxed);
         let result = self.engine.ctx.with(|ctx| {
             let wrapper = MERMAID_RENDER_WRAPPER;
-            let func: Function =
-                ctx.eval(wrapper)
-                    .map_err(|err| MermaidWorker::format_js_error(&ctx, err))?;
+            let func: Function = ctx
+                .eval(wrapper)
+                .map_err(|err| MermaidWorker::format_js_error(&ctx, err))?;
             let id = format!("m{:016x}", key);
             let site_config = MermaidRenderer::mermaid_site_config_json(key);
             let maybe: MaybePromise = func
@@ -2849,11 +2848,12 @@ mod tests {
         std::env::remove_var("MDMDVIEW_MERMAID_RENDERER");
         let (default_pref, explicit) = MermaidRenderer::mermaid_renderer_preference();
         assert!(!explicit);
-        if cfg!(feature = "mermaid-quickjs") {
-            assert_eq!(default_pref, MermaidRenderPreference::Embedded);
+        let expected = if cfg!(feature = "mermaid-quickjs") {
+            MermaidRenderPreference::Embedded
         } else {
-            assert_eq!(default_pref, MermaidRenderPreference::Off);
-        }
+            MermaidRenderPreference::Off
+        };
+        assert_eq!(default_pref, expected);
 
         {
             let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "embedded");
@@ -2866,6 +2866,12 @@ mod tests {
             let (pref, explicit) = MermaidRenderer::mermaid_renderer_preference();
             assert!(explicit);
             assert_eq!(pref, MermaidRenderPreference::Off);
+        }
+        {
+            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "bogus");
+            let (pref, explicit) = MermaidRenderer::mermaid_renderer_preference();
+            assert!(!explicit);
+            assert_eq!(pref, expected);
         }
     }
 
@@ -3007,8 +3013,14 @@ mod tests {
         );
 
         let factor = MermaidRenderer::MERMAID_SCALE_BUCKET_FACTOR;
-        assert_eq!(MermaidRenderer::scale_bucket(0.1), (0.5 * factor).round() as u32);
-        assert_eq!(MermaidRenderer::scale_bucket(10.0), (4.0 * factor).round() as u32);
+        assert_eq!(
+            MermaidRenderer::scale_bucket(0.1),
+            (0.5 * factor).round() as u32
+        );
+        assert_eq!(
+            MermaidRenderer::scale_bucket(10.0),
+            (4.0 * factor).round() as u32
+        );
     }
 
     #[test]
@@ -3024,7 +3036,26 @@ mod tests {
     fn test_mermaid_bg_fill_light_mode() {
         let _lock = env_lock();
         let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG", "light");
-        assert_eq!(MermaidRenderer::mermaid_bg_fill(), Some([255, 255, 255, 255]));
+        assert_eq!(
+            MermaidRenderer::mermaid_bg_fill(),
+            Some([255, 255, 255, 255])
+        );
+    }
+
+    #[test]
+    fn test_mermaid_bg_fill_color_override() {
+        let _lock = env_lock();
+        std::env::remove_var("MDMDVIEW_MERMAID_BG");
+        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG_COLOR", "#11223344");
+        assert_eq!(MermaidRenderer::mermaid_bg_fill(), Some([17, 34, 51, 68]));
+    }
+
+    #[test]
+    fn test_mermaid_bg_fill_theme_fallback() {
+        let _lock = env_lock();
+        let _guard_mode = EnvGuard::set("MDMDVIEW_MERMAID_BG", "theme");
+        let _guard_bkg = EnvGuard::set("MDMDVIEW_MERMAID_MAIN_BKG", "#010203");
+        assert_eq!(MermaidRenderer::mermaid_bg_fill(), Some([1, 2, 3, 255]));
     }
 
     #[test]
@@ -3060,4 +3091,23 @@ mod tests {
         assert!(rendered_embedded);
     }
 
+    #[test]
+    fn test_mermaid_cache_insert_existing_key_and_empty_order() {
+        let mut cache = LruCache::new(1);
+        cache.insert(1u8, "one".to_string());
+        cache.insert(1u8, "uno".to_string());
+        assert_eq!(cache.get(&1), Some("uno".to_string()));
+
+        cache.entries.clear();
+        cache.entries.insert(2u8, "two".to_string());
+        cache.order.clear();
+        cache.insert(3u8, "three".to_string());
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn test_mermaid_has_pending_default_false() {
+        let renderer = MermaidRenderer::new();
+        assert!(!renderer.has_pending());
+    }
 }

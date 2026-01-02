@@ -1,6 +1,6 @@
 ﻿[package]
 name = "mdmdview"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 description = "A simple markdown viewer for Windows"
 authors = ["Your Name <your.email@example.com>"]
@@ -48,8 +48,8 @@ codegen-units = 1
 panic = "abort"
 
 [features]
-# Default to no Mermaid renderer to avoid requiring external tools at build time.
-default = []
+# Default to the embedded Mermaid renderer (QuickJS).
+default = ["mermaid-embedded"]
 # Enable JavaScript-based Mermaid rendering via QuickJS (embedded)
 mermaid-quickjs = ["dep:rquickjs"]
 # Embedded Mermaid support (alias for mermaid-quickjs)

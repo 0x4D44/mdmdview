@@ -15,8 +15,8 @@ cargo build
 # Optimized release build (preferred for distribution)
 cargo build --release
 
-# Build with offline Mermaid support
-cargo build --release --features mermaid-quickjs
+# Build without embedded Mermaid support
+cargo build --release --no-default-features
 
 # Run in development
 cargo run
@@ -95,7 +95,7 @@ The application supports dragging files and folders directly from your file expl
    - Syntax highlighting with syntect
    - Inline element handling (code, links, formatting)
    - Image loading and texture management with live refresh
-   - Mermaid diagram rendering (QuickJS offline when feature enabled)
+   - Mermaid diagram rendering (QuickJS offline, built by default)
    - Table rendering with striped rows
    - Internal anchor navigation for links like `[Section](#section)`
    - Search highlighting with grapheme-aware text matching
@@ -122,7 +122,7 @@ The application supports dragging files and folders directly from your file expl
 
 7. **Build Script** (`build.rs`)
    - Windows resource file generation (icon, version info, metadata)
-   - Mermaid.js embedding for offline rendering (if `mermaid-quickjs` feature enabled)
+   - Mermaid.js embedding for offline rendering (embedded renderer)
    - Version parsing from Cargo.toml into Windows file properties
 
 ### Key Architecture Decisions
@@ -133,7 +133,7 @@ The application supports dragging files and folders directly from your file expl
 - **syntect**: Syntax highlighting for code blocks
 - **Windows Integration**: Custom icon and metadata via build.rs
 - **Cross-platform**: Runs on Windows, Linux, and macOS with platform-specific optimizations
-- **Optional Features**: Mermaid QuickJS rendering can be compiled in with `--features mermaid-quickjs`
+- **Optional Features**: Mermaid QuickJS rendering is enabled by default; disable with `--no-default-features`
 
 ### Navigation System
 
@@ -183,7 +183,7 @@ Images are loaded and cached with live refresh:
 ### Mermaid Diagram Rendering
 
 Embedded QuickJS rendering (offline):
-- Enable at compile time with `--features mermaid-quickjs`
+- Built in by default; disable with `--no-default-features`
 - Requires `assets/vendor/mermaid.min.js` file
 - JavaScript embedded during build via `build.rs`
 - Uses `rquickjs` crate for JS execution
@@ -276,10 +276,12 @@ Key types for markdown representation:
 ## Feature Flags and Environment Variables
 
 ### Cargo Features
-- `mermaid-quickjs`: Enables offline Mermaid rendering via QuickJS
-  - Build with: `cargo build --features mermaid-quickjs`
+- `mermaid-embedded`: Enables offline Mermaid rendering via QuickJS (default)
+  - Disable with: `cargo build --no-default-features`
   - Requires `assets/vendor/mermaid.min.js` file
   - Adds `rquickjs` dependency
+- `mermaid-quickjs`: Alias for `mermaid-embedded` (compatibility)
+  - Build with: `cargo build --features mermaid-quickjs`
 
 ### Environment Variables
 - `MDMDVIEW_MERMAID_RENDERER`: Mermaid renderer (`embedded`, `off`)
