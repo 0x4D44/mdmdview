@@ -2,7 +2,7 @@
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use egui::{Color32, RichText, Stroke};
 #[cfg(feature = "mermaid-quickjs")]
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 #[cfg(feature = "mermaid-quickjs")]
 use std::collections::HashSet;
 #[cfg(any(test, feature = "mermaid-quickjs"))]
@@ -119,6 +119,8 @@ struct MermaidRequest {
     svg: Option<String>,
     width_bucket: u32,
     scale_bucket: u32,
+    viewport_width: u32,
+    viewport_height: u32,
     bg: Option<[u8; 4]>,
 }
 
@@ -171,6 +173,8 @@ pub(crate) struct MermaidRenderer {
     #[cfg(feature = "mermaid-quickjs")]
     mermaid_pending: RefCell<HashSet<String>>,
     #[cfg(feature = "mermaid-quickjs")]
+    mermaid_frame_pending: Cell<bool>,
+    #[cfg(feature = "mermaid-quickjs")]
     mermaid_svg_cache: RefCell<LruCache<u64, String>>,
     #[cfg(feature = "mermaid-quickjs")]
     mermaid_errors: RefCell<LruCache<u64, String>>,
@@ -219,6 +223,8 @@ impl MermaidRenderer {
             #[cfg(feature = "mermaid-quickjs")]
             mermaid_pending: RefCell::new(HashSet::new()),
             #[cfg(feature = "mermaid-quickjs")]
+            mermaid_frame_pending: Cell::new(false),
+            #[cfg(feature = "mermaid-quickjs")]
             mermaid_svg_cache: RefCell::new(LruCache::new(Self::MERMAID_SVG_CACHE_CAPACITY)),
             #[cfg(feature = "mermaid-quickjs")]
             mermaid_errors: RefCell::new(LruCache::new(Self::MERMAID_ERROR_CACHE_CAPACITY)),
@@ -259,11 +265,16 @@ impl MermaidRenderer {
     pub(crate) fn has_pending(&self) -> bool {
         #[cfg(feature = "mermaid-quickjs")]
         {
-            if !self.mermaid_pending.borrow().is_empty() {
+            if self.mermaid_frame_pending.get() || !self.mermaid_pending.borrow().is_empty() {
                 return true;
             }
         }
         false
+    }
+
+    pub(crate) fn begin_frame(&self) {
+        #[cfg(feature = "mermaid-quickjs")]
+        self.mermaid_frame_pending.set(false);
     }
 
     pub(crate) fn render_block(
@@ -365,6 +376,7 @@ impl MermaidRenderer {
                 let svg_key = Self::hash_str(code);
                 let width_bucket = Self::width_bucket(ui.available_width());
                 let scale_bucket = Self::scale_bucket(ui_scale);
+                let (viewport_width, viewport_height) = Self::viewport_px(ui.ctx());
                 let bg = Self::mermaid_bg_fill();
                 let texture_key = Self::texture_key(svg_key, width_bucket, scale_bucket, bg);
 
@@ -434,6 +446,8 @@ impl MermaidRenderer {
                             svg: request_svg,
                             width_bucket,
                             scale_bucket,
+                            viewport_width,
+                            viewport_height,
                             bg,
                         };
                         match self.enqueue_mermaid_job(request) {
@@ -475,8 +489,9 @@ impl MermaidRenderer {
                         }
                     }
 
-                    let inflight = self.mermaid_pending.borrow().len();
-                    egui::Frame::none()
+                let inflight = self.mermaid_pending.borrow().len();
+                self.mermaid_frame_pending.set(true);
+                egui::Frame::none()
                         .fill(Color32::from_rgb(25, 25, 25))
                         .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
                         .inner_margin(8.0)
@@ -517,6 +532,15 @@ impl MermaidRenderer {
     fn scale_bucket(ui_scale: f32) -> u32 {
         let clamped = ui_scale.clamp(0.5, 4.0);
         (clamped * Self::MERMAID_SCALE_BUCKET_FACTOR).round() as u32
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    fn viewport_px(ctx: &egui::Context) -> (u32, u32) {
+        let screen_rect = ctx.input(|i| i.screen_rect());
+        let pixels_per_point = ctx.input(|i| i.pixels_per_point).max(0.1);
+        let width = (screen_rect.width() * pixels_per_point).round().max(1.0) as u32;
+        let height = (screen_rect.height() * pixels_per_point).round().max(1.0) as u32;
+        (width, height)
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -629,7 +653,7 @@ impl MermaidRenderer {
                 return value.max(100);
             }
         }
-        2_000
+        12_000
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -1020,7 +1044,7 @@ struct MermaidWorker {
 
 #[cfg(feature = "mermaid-quickjs")]
 impl MermaidWorker {
-    const MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+    const MEMORY_LIMIT_BYTES: usize = 1024 * 1024 * 1024;
     const STACK_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
     // DOMPurify expects a real browser DOM; stub sanitize for the QuickJS shim.
@@ -1028,11 +1052,48 @@ impl MermaidWorker {
         const TARGET: &str = "var hD=wRe();";
         const PATCH: &str =
             "var hD=wRe();if(!hD||typeof hD.sanitize!==\"function\"){hD={sanitize:function(html){return String(html);},addHook:function(){},removeHook:function(){},removeHooks:function(){},removeAllHooks:function(){},isSupported:true};}";
-        if js.contains(TARGET) {
+        const D3_TARGET: &str = "FY.prototype={constructor:FY,appendChild:function(i){return this._parent.insertBefore(i,this._next)},insertBefore:function(i,s){return this._parent.insertBefore(i,s)},querySelector:function(i){return this._parent.querySelector(i)},querySelectorAll:function(i){return this._parent.querySelectorAll(i)}};";
+        const D3_PATCH: &str = "FY.prototype={constructor:FY,appendChild:function(i){var p=this._parent||((typeof document!==\"undefined\"&&document.body)?document.body:null);return p?p.insertBefore(i,this._next):i},insertBefore:function(i,s){var p=this._parent||((typeof document!==\"undefined\"&&document.body)?document.body:null);return p?p.insertBefore(i,s):i},querySelector:function(i){var p=this._parent||((typeof document!==\"undefined\"&&document.body)?document.body:null);return p&&p.querySelector?p.querySelector(i):null},querySelectorAll:function(i){var p=this._parent||((typeof document!==\"undefined\"&&document.body)?document.body:null);return p&&p.querySelectorAll?p.querySelectorAll(i):[]}};";
+        const D3_CTOR_TARGET: &str =
+            "function FY(i,s){this.ownerDocument=i.ownerDocument,this.namespaceURI=i.namespaceURI,this._next=null,this._parent=i,this.__data__=s}";
+        const D3_CTOR_PATCH: &str =
+            "function FY(i,s){i=i||((typeof document!==\"undefined\"&&document.body)?document.body:null);this.ownerDocument=i&&i.ownerDocument?i.ownerDocument:(typeof document!==\"undefined\"?document:null);this.namespaceURI=i&&i.namespaceURI?i.namespaceURI:null;this._next=null;this._parent=i;this.__data__=s}";
+        const TEXT_WRAP_TARGET: &str = "u.text().split(/(\\s+|<br>)/).reverse()";
+        const TEXT_WRAP_PATCH: &str = concat!(
+            "String(typeof u.text===\"function\"?u.text():(u.textContent||\"\"))",
+            ".split(/(\\s+|<br>)/).reverse()"
+        );
+        let mut out = if js.contains(TARGET) {
             js.replacen(TARGET, PATCH, 1)
         } else {
             js.to_string()
+        };
+        let debug = std::env::var("MDMDVIEW_MERMAID_PATCH_DEBUG").is_ok();
+        if out.contains(D3_CTOR_TARGET) {
+            out = out.replacen(D3_CTOR_TARGET, D3_CTOR_PATCH, 1);
+            if debug {
+                eprintln!("Mermaid patch: D3 ctor applied");
+            }
+        } else if debug {
+            eprintln!("Mermaid patch: D3 ctor not found");
         }
+        if out.contains(D3_TARGET) {
+            out = out.replacen(D3_TARGET, D3_PATCH, 1);
+            if debug {
+                eprintln!("Mermaid patch: D3 enter applied");
+            }
+        } else if debug {
+            eprintln!("Mermaid patch: D3 enter not found");
+        }
+        if out.contains(TEXT_WRAP_TARGET) {
+            out = out.replacen(TEXT_WRAP_TARGET, TEXT_WRAP_PATCH, 1);
+            if debug {
+                eprintln!("Mermaid patch: D3 text wrap applied");
+            }
+        } else if debug {
+            eprintln!("Mermaid patch: D3 text wrap not found");
+        }
+        out
     }
 
     fn format_js_error(ctx: &rquickjs::Ctx<'_>, err: rquickjs::Error) -> String {
@@ -1129,6 +1190,14 @@ impl MermaidWorker {
             eval("Mermaid DOM shim", MERMAID_DOM_SHIM)?;
             eval("Mermaid JS", &js)?;
             eval("Mermaid init", MERMAID_INIT_SNIPPET)?;
+            if std::env::var("MDMDVIEW_MERMAID_DOM_DEBUG").is_ok() {
+                let dom_ok = ctx
+                    .eval::<bool, _>(
+                        "var root=document.querySelector('body');var d=document.createElement('div');d.setAttribute('id','__mdmdview_dom_test');root.appendChild(d);var f=document.getElementById('__mdmdview_dom_test');!!(f&&f===d);",
+                    )
+                    .unwrap_or(false);
+                eprintln!("Mermaid DOM debug: {}", dom_ok);
+            }
             Ok(())
         });
         if let Err(err) = init_result {
@@ -1148,7 +1217,13 @@ impl MermaidWorker {
         })
     }
 
-    fn render_svg(&mut self, key: u64, code: &str) -> Result<String, String> {
+    fn render_svg(
+        &mut self,
+        key: u64,
+        code: &str,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) -> Result<String, String> {
         use rquickjs::{promise::MaybePromise, Function};
         let timeout_ms = MermaidRenderer::mermaid_timeout_ms();
         let deadline = Self::now_ms().saturating_add(timeout_ms);
@@ -1161,7 +1236,7 @@ impl MermaidWorker {
             let id = format!("m{:016x}", key);
             let site_config = MermaidRenderer::mermaid_site_config_json(key);
             let maybe: MaybePromise = func
-                .call((id.as_str(), code, site_config.as_str()))
+                .call((id.as_str(), code, site_config.as_str(), viewport_width, viewport_height))
                 .map_err(|err| MermaidWorker::format_js_error(&ctx, err))?;
             maybe
                 .finish::<String>()
@@ -1208,6 +1283,46 @@ impl MermaidWorker {
         let filename = format!("{:016x}_{}.svg", svg_key, name);
         let path = dir.join(filename);
         let _ = std::fs::write(path, svg);
+    }
+
+    fn maybe_dump_error(svg_key: u64, code: Option<&str>, err: &str) {
+        let dir = match std::env::var("MDMDVIEW_MERMAID_DUMP_DIR") {
+            Ok(value) if !value.trim().is_empty() => value,
+            _ => return,
+        };
+        let dir = PathBuf::from(dir);
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let label = code
+            .and_then(|snippet| snippet.lines().next())
+            .unwrap_or("mermaid");
+        let mut name = String::new();
+        for ch in label.chars() {
+            if name.len() >= 32 {
+                break;
+            }
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                name.push(ch);
+            } else {
+                name.push('_');
+            }
+        }
+        if name.is_empty() {
+            name.push_str("mermaid");
+        }
+        let filename = format!("{:016x}_{}.err.txt", svg_key, name);
+        let path = dir.join(filename);
+        let mut payload = String::new();
+        payload.push_str("error: ");
+        payload.push_str(err);
+        payload.push('\n');
+        if let Some(code) = code {
+            payload.push_str("\n---\n");
+            payload.push_str(code);
+            payload.push('\n');
+        }
+        let _ = std::fs::write(path, payload);
     }
 
     fn normalize_svg_size(svg: &str) -> String {
@@ -1349,13 +1464,15 @@ impl MermaidWorker {
             svg,
             width_bucket,
             scale_bucket,
+            viewport_width,
+            viewport_height,
             bg,
         } = job;
         let code_ref = code.as_deref();
         let svg_result = match svg {
             Some(svg) => Ok(svg),
             None => match code_ref {
-                Some(code) => self.render_svg(svg_key, code),
+                Some(code) => self.render_svg(svg_key, code, viewport_width, viewport_height),
                 None => Err("Mermaid render request missing code".to_string()),
             },
         };
@@ -1373,24 +1490,30 @@ impl MermaidWorker {
                         size: Some((w, h)),
                         error: None,
                     },
-                    Err(err) => MermaidResult {
-                        svg_key,
-                        texture_key,
-                        svg: Some(svg),
-                        rgba: None,
-                        size: None,
-                        error: Some(err),
-                    },
+                    Err(err) => {
+                        Self::maybe_dump_error(svg_key, code_ref, &err);
+                        MermaidResult {
+                            svg_key,
+                            texture_key,
+                            svg: Some(svg),
+                            rgba: None,
+                            size: None,
+                            error: Some(err),
+                        }
+                    }
                 }
             }
-            Err(err) => MermaidResult {
-                svg_key,
-                texture_key,
-                svg: None,
-                rgba: None,
-                size: None,
-                error: Some(err),
-            },
+            Err(err) => {
+                Self::maybe_dump_error(svg_key, code_ref, &err);
+                MermaidResult {
+                    svg_key,
+                    texture_key,
+                    svg: None,
+                    rgba: None,
+                    size: None,
+                    error: Some(err),
+                }
+            }
         }
     }
 
@@ -1972,6 +2095,68 @@ function __mdmdview_make_style() {
   };
   return style;
 }
+function __mdmdview_detach(child) {
+  if (!child || typeof child !== 'object') { return; }
+  var parent = child.parentNode;
+  if (!parent || !parent.children) { return; }
+  var idx = parent.children.indexOf(child);
+  if (idx >= 0) {
+    parent.children.splice(idx, 1);
+    parent.childNodes = parent.children;
+    parent.firstChild = parent.children[0] || null;
+  }
+  child.parentNode = null;
+}
+function __mdmdview_parse_font_px(font) {
+  if (!font) { return 16; }
+  var match = String(font).match(/(\d+(?:\.\d+)?)px/);
+  if (match && match[1]) {
+    var value = parseFloat(match[1]);
+    if (!isNaN(value)) { return value; }
+  }
+  return 16;
+}
+function __mdmdview_make_canvas_context(canvas) {
+  var ctx = {
+    canvas: canvas,
+    font: '',
+    lineWidth: 1,
+    fillStyle: '#000',
+    strokeStyle: '#000',
+    textAlign: 'start',
+    textBaseline: 'alphabetic',
+    save: function() {},
+    restore: function() {},
+    beginPath: function() {},
+    closePath: function() {},
+    moveTo: function() {},
+    lineTo: function() {},
+    arc: function() {},
+    rect: function() {},
+    fill: function() {},
+    stroke: function() {},
+    clip: function() {},
+    translate: function() {},
+    scale: function() {},
+    rotate: function() {},
+    clearRect: function() {},
+    fillRect: function() {},
+    strokeRect: function() {},
+    drawImage: function() {},
+    setLineDash: function() {},
+    measureText: function(text) {
+      var size = __mdmdview_parse_font_px(ctx.font);
+      var measured = __mdmdview_measure_text(text || '', size);
+      return { width: measured.width || 0 };
+    },
+    fillText: function() {},
+    strokeText: function() {},
+    createLinearGradient: function() { return { addColorStop: function() {} }; },
+    createRadialGradient: function() { return { addColorStop: function() {} }; },
+    createPattern: function() { return null; }
+  };
+  return ctx;
+}
 function __mdmdview_make_element(tag, ownerDoc, ns) {
   var doc = ownerDoc;
   if (!doc && typeof document !== 'undefined' && document) { doc = document; }
@@ -1995,15 +2180,32 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
       this.attributes[key] = v;
       if (key === 'id') { this.id = v; }
     },
+    attr: function(key, value) {
+      if (value === undefined) { return this.getAttribute(key); }
+      if (value === null) { this.removeAttribute(key); return this; }
+      this.setAttribute(key, value);
+      return this;
+    },
     getAttribute: function(key) {
       return Object.prototype.hasOwnProperty.call(this.attributes, key)
         ? this.attributes[key]
         : null;
     },
     getAttributeNS: function(ns, key) { return this.getAttribute(key); },
+    text: function(value) {
+      if (value === undefined) { return this.textContent || ''; }
+      this.textContent = value === null ? '' : String(value);
+      return this;
+    },
+    append: function(tag) {
+      var child = __mdmdview_make_element(tag, this.ownerDocument, this.namespaceURI);
+      this.appendChild(child);
+      return child;
+    },
     removeAttribute: function(key) { delete this.attributes[key]; },
     removeAttributeNS: function(ns, key) { delete this.attributes[key]; },
     appendChild: function(child) {
+      __mdmdview_detach(child);
       this.children.push(child);
       this.childNodes = this.children;
       this.firstChild = this.children[0] || null;
@@ -2024,6 +2226,7 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
     },
     hasChildNodes: function() { return this.children.length > 0; },
     insertBefore: function(child, before) {
+      __mdmdview_detach(child);
       var idx = this.children.indexOf(before);
       if (idx < 0) { this.children.push(child); }
       else { this.children.splice(idx, 0, child); }
@@ -2064,8 +2267,23 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
     getBoundingClientRect: function() { return __mdmdview_bbox(this); },
     getComputedTextLength: function() { return __mdmdview_bbox(this).width; },
     getTotalLength: function() { return __mdmdview_path_total_length(this); },
-    getPointAtLength: function(len) { return __mdmdview_path_point_at_length(this, len); }
+    getPointAtLength: function(len) { return __mdmdview_path_point_at_length(this, len); },
+    addEventListener: function() {},
+    removeEventListener: function() {},
+    dispatchEvent: function() { return false; }
   };
+  var lower = String(tag || '').toLowerCase();
+  if (lower === 'canvas') {
+    node.width = 300;
+    node.height = 150;
+    node.getContext = function(kind) {
+      if (kind && String(kind).toLowerCase() !== '2d') { return null; }
+      if (!node.__mdmdview_ctx) {
+        node.__mdmdview_ctx = __mdmdview_make_canvas_context(node);
+      }
+      return node.__mdmdview_ctx;
+    };
+  }
   var classList = {
     add: function() {
       var list = __mdmdview_get_class_list(node);
@@ -2417,6 +2635,7 @@ function __mdmdview_query_selector_all(node, sel) {
 }
 var document = {
   body: __mdmdview_make_element('body'),
+  head: __mdmdview_make_element('head'),
   children: [],
   childNodes: [],
   createElement: function(tag) { return __mdmdview_make_element(tag, document); },
@@ -2427,35 +2646,93 @@ var document = {
     return node;
   },
   getElementById: function(id) { return __mdmdview_find_by_id(document, id); },
+  getElementsByTagName: function(tag) {
+    var raw = String(tag || '').trim().toLowerCase();
+    if (!raw) { return []; }
+    if (raw === 'head') { return document.head ? [document.head] : []; }
+    if (raw === 'body') { return document.body ? [document.body] : []; }
+    var matches = [];
+    __mdmdview_find_by_tag(document, raw, matches);
+    return matches;
+  },
   querySelector: function(sel) {
     var raw = String(sel || '').trim().toLowerCase();
-    var result = raw === 'body' ? document.body : __mdmdview_query_selector(document, sel);
-    return result;
+    var result = raw === 'head'
+      ? document.head
+      : (raw === 'body' ? document.body : __mdmdview_query_selector(document, sel));
+    return result || (document && document.body ? document.body : null);
   },
   querySelectorAll: function(sel) {
     var raw = String(sel || '').trim().toLowerCase();
-    var result = raw === 'body' ? [document.body] : __mdmdview_query_selector_all(document, sel);
-    return result;
+    var result = raw === 'head'
+      ? [document.head]
+      : (raw === 'body' ? [document.body] : __mdmdview_query_selector_all(document, sel));
+    if (result && result.length) { return result; }
+    return document && document.body ? [document.body] : [];
   },
-  appendChild: function(child) { return document.body.appendChild(child); },
-  insertBefore: function(child, before) { return document.body.insertBefore(child, before); },
-  removeChild: function(child) { return document.body.removeChild(child); },
-  hasChildNodes: function() { return document.body.hasChildNodes(); },
+  appendChild: function(child) {
+    return document.documentElement
+      ? document.documentElement.appendChild(child)
+      : document.body.appendChild(child);
+  },
+  insertBefore: function(child, before) {
+    return document.documentElement
+      ? document.documentElement.insertBefore(child, before)
+      : document.body.insertBefore(child, before);
+  },
+  removeChild: function(child) {
+    return document.documentElement
+      ? document.documentElement.removeChild(child)
+      : document.body.removeChild(child);
+  },
+  hasChildNodes: function() {
+    return document.documentElement
+      ? document.documentElement.hasChildNodes()
+      : document.body.hasChildNodes();
+  },
   addEventListener: function() {}
 };
 window.document = document;
 document.body.ownerDocument = document;
-document.body.parentNode = document;
-document.children = [document.body];
+document.head.ownerDocument = document;
+document.documentElement = __mdmdview_make_element('html');
+document.documentElement.ownerDocument = document;
+document.documentElement.appendChild(document.head);
+document.documentElement.appendChild(document.body);
+document.documentElement.parentNode = document;
+document.children = [document.documentElement];
 document.childNodes = document.children;
 document.defaultView = window;
 document.ownerDocument = document;
-document.documentElement = document.body;
 document.body.namespaceURI = 'http://www.w3.org/1999/xhtml';
+document.head.namespaceURI = 'http://www.w3.org/1999/xhtml';
 document.documentElement.namespaceURI = 'http://www.w3.org/1999/xhtml';
 document.namespaceURI = document.body.namespaceURI;
 window.ownerDocument = document;
 window.namespaceURI = document.body.namespaceURI;
+function __mdmdview_clear_node(node) {
+  if (!node) { return; }
+  if (node.children && node.children.length) {
+    for (var i = 0; i < node.children.length; i++) {
+      var child = node.children[i];
+      if (child && typeof child === 'object') { child.parentNode = null; }
+    }
+  }
+  node.children = [];
+  node.childNodes = node.children;
+  node.firstChild = null;
+  node.textContent = '';
+}
+function __mdmdview_reset_dom() {
+  __mdmdview_clear_node(document.head);
+  __mdmdview_clear_node(document.body);
+  document.documentElement.children = [document.head, document.body];
+  document.documentElement.childNodes = document.documentElement.children;
+  document.documentElement.firstChild = document.head || null;
+  document.head.parentNode = document.documentElement;
+  document.body.parentNode = document.documentElement;
+  __mdmdview_text_cache = {};
+}
 if (!Object.hasOwn) {
   Object.hasOwn = function(obj, prop) {
     return Object.prototype.hasOwnProperty.call(obj, prop);
@@ -2503,6 +2780,7 @@ if (!Object.prototype.hasOwnProperty('appendChild')) {
       if (this && !this.tagName && document && document.body && this !== document.body) {
         return document.body.appendChild(child);
       }
+      __mdmdview_detach(child);
       if (!this.children) { this.children = []; }
       this.children.push(child);
       this.childNodes = this.children;
@@ -2522,6 +2800,7 @@ if (!Object.prototype.hasOwnProperty('insertBefore')) {
       if (this && !this.tagName && document && document.body && this !== document.body) {
         return document.body.insertBefore(child, before);
       }
+      __mdmdview_detach(child);
       if (!this.children) { this.children = []; }
       var idx = this.children.indexOf(before);
       if (idx < 0) { this.children.push(child); }
@@ -2576,6 +2855,16 @@ window.getComputedStyle = function(el) {
 window.setTimeout = function(fn, ms) { fn(); return 1; };
 window.clearTimeout = function(id) {};
 window.requestAnimationFrame = function(fn) { fn(0); return 1; };
+window.cancelAnimationFrame = function(id) {};
+if (!window.devicePixelRatio) { window.devicePixelRatio = 1; }
+if (!window.Image) {
+  window.Image = function() {
+    this.complete = true;
+    this.addEventListener = function() {};
+    this.removeEventListener = function() {};
+    return this;
+  };
+}
 window.addEventListener = function() {};
 window.removeEventListener = function() {};
 window.structuredClone = function(value) {
@@ -2750,7 +3039,16 @@ if (window.mermaid && mermaid.mermaidAPI) {
 
 #[cfg(feature = "mermaid-quickjs")]
 const MERMAID_RENDER_WRAPPER: &str = r#"
-(function(id, code, siteConfigJson){
+(function(id, code, siteConfigJson, viewportWidth, viewportHeight){
+  if (typeof __mdmdview_reset_dom === 'function') {
+    __mdmdview_reset_dom();
+  }
+  if (typeof viewportWidth === 'number' && viewportWidth > 0) {
+    window.__mdmdview_viewport_width = viewportWidth;
+  }
+  if (typeof viewportHeight === 'number' && viewportHeight > 0) {
+    window.__mdmdview_viewport_height = viewportHeight;
+  }
   var siteConfig = {};
   if (typeof siteConfigJson === 'string' && siteConfigJson.length > 0) {
     try { siteConfig = JSON.parse(siteConfigJson); } catch (e) { siteConfig = {}; }

@@ -2415,6 +2415,7 @@ impl MarkdownRenderer {
 
     /// Render parsed markdown elements to egui UI
     pub fn render_to_ui(&self, ui: &mut egui::Ui, elements: &[MarkdownElement]) {
+        self.mermaid.begin_frame();
         // Clear header rects before rendering a new frame
         self.header_rects.borrow_mut().clear();
         // Reset per-frame link counter to ensure link IDs are stable across frames

@@ -132,6 +132,7 @@ struct ScreenshotState {
     requested: bool,
     done: bool,
     timed_out: bool,
+    pending_renders: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -141,6 +142,7 @@ struct ScreenshotSnapshot {
     pixels_per_point: f32,
     stable_frames: u32,
     timed_out: bool,
+    pending_renders: bool,
     last_scroll_offset: Option<f32>,
     started: Instant,
 }
@@ -162,6 +164,7 @@ impl ScreenshotState {
             requested: false,
             done: false,
             timed_out: false,
+            pending_renders: false,
         }
     }
 
@@ -225,6 +228,7 @@ impl From<&ScreenshotState> for ScreenshotSnapshot {
             pixels_per_point: state.pixels_per_point,
             stable_frames: state.stable_frames,
             timed_out: state.timed_out,
+            pending_renders: state.pending_renders,
             last_scroll_offset: state.last_scroll_offset,
             started: state.started,
         }
@@ -2374,6 +2378,7 @@ impl MarkdownViewerApp {
         state.update_stability(layout_signature, scroll_offset);
 
         let pending = self.renderer.has_pending_renders();
+        state.pending_renders = pending;
         let elapsed = state.started.elapsed();
         let timed_out = elapsed >= Duration::from_millis(state.config.wait_ms);
         let stable =
@@ -2466,7 +2471,7 @@ impl MarkdownViewerApp {
         let elapsed_ms = state.started.elapsed().as_millis();
 
         format!(
-            "{{\n  \"version\": \"{}\",\n  \"build_timestamp\": \"{}\",\n  \"output\": \"{}\",\n  \"theme\": \"{}\",\n  \"zoom\": {:.3},\n  \"content_only\": {},\n  \"scroll_ratio\": {},\n  \"scroll_offset\": {},\n  \"viewport_px\": {{\"width\": {}, \"height\": {}}},\n  \"content_px\": {{\"width\": {}, \"height\": {}}},\n  \"pixels_per_point\": {:.3},\n  \"wait_ms\": {},\n  \"settle_frames\": {},\n  \"stable_frames\": {},\n  \"timed_out\": {},\n  \"font_source\": {},\n  \"elapsed_ms\": {}\n}}\n",
+            "{{\n  \"version\": \"{}\",\n  \"build_timestamp\": \"{}\",\n  \"output\": \"{}\",\n  \"theme\": \"{}\",\n  \"zoom\": {:.3},\n  \"content_only\": {},\n  \"scroll_ratio\": {},\n  \"scroll_offset\": {},\n  \"viewport_px\": {{\"width\": {}, \"height\": {}}},\n  \"content_px\": {{\"width\": {}, \"height\": {}}},\n  \"pixels_per_point\": {:.3},\n  \"wait_ms\": {},\n  \"settle_frames\": {},\n  \"stable_frames\": {},\n  \"timed_out\": {},\n  \"pending_renders\": {},\n  \"font_source\": {},\n  \"elapsed_ms\": {}\n}}\n",
             BUILD_VERSION,
             BUILD_TIMESTAMP,
             output_path,
@@ -2484,6 +2489,7 @@ impl MarkdownViewerApp {
             state.config.settle_frames,
             state.stable_frames,
             state.timed_out,
+            state.pending_renders,
             font_source,
             elapsed_ms
         )
@@ -3557,6 +3563,7 @@ The end.
             pixels_per_point: 1.0,
             stable_frames: 3,
             timed_out: false,
+            pending_renders: false,
             last_scroll_offset: Some(12.0),
             started: Instant::now(),
         };
@@ -4648,6 +4655,7 @@ The end.
             pixels_per_point: 1.0,
             stable_frames: 0,
             timed_out: false,
+            pending_renders: false,
             last_scroll_offset: None,
             started: Instant::now(),
         };

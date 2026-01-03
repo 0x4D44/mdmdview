@@ -48,6 +48,12 @@ MERMAID_CONFIG = {
     },
 }
 
+CASE_SETTINGS = {
+    "mindmap": {
+        "wait_s": 12.0,
+    },
+}
+
 
 @dataclass
 class DiffResult:
@@ -586,6 +592,13 @@ def run_case(
     bg_rgb: Tuple[int, int, int],
 ) -> dict:
     case_id = md_path.stem
+    settings = CASE_SETTINGS.get(case_id, {})
+    if "wait_s" in settings:
+        wait_s = float(settings["wait_s"])
+    if "threshold_percent" in settings:
+        threshold_percent = float(settings["threshold_percent"])
+    if "threshold_pixels" in settings:
+        threshold_pixels = int(settings["threshold_pixels"])
     actual_dir = output_root / "actual" / case_id
     reference_dir = output_root / "reference" / case_id
     diff_dir = output_root / "diff" / case_id
