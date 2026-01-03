@@ -1,0 +1,20 @@
+error: Mermaid render error: not a function
+    at <anonymous> (eval_script:1742:7855)
+    at call (native)
+    at zLt (eval_script:6:23189)
+    at cWe (eval_script:1742:7813)
+    at apply (native)
+    at BLt (eval_script:6:22782)
+    at Jan (eval_script:1742:9099)
+    at eon (eval_script:1742:10577)
+    at kqt (eval_script:88:1438)
+
+
+---
+timeline
+    title Project Timeline
+    2024-01 : Kickoff
+    2024-02 : Prototype
+    2024-03 : Beta
+    2024-04 : Release
+
