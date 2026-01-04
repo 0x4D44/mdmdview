@@ -4,6 +4,7 @@
 /// for the markdown viewer application built with egui.
 use crate::{MarkdownElement, MarkdownRenderer, SampleFile, WindowState, SAMPLE_FILES};
 use anyhow::{bail, Result};
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use egui::text::LayoutJob;
 use egui::text::TextFormat;
 use egui::{menu, CentralPanel, Color32, Context, RichText, TopBottomPanel};
@@ -26,6 +27,7 @@ use unicode_normalization::UnicodeNormalization;
 pub const APP_TITLE_PREFIX: &str = "mdmdview";
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TIMESTAMP: &str = env!("MDMDVIEW_BUILD_TIMESTAMP");
+const ASYNC_LOAD_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024;
 
 #[cfg(test)]
 thread_local! {
@@ -120,6 +122,23 @@ struct ScrollSnapshot {
 struct WindowAdjustment {
     pos: Option<egui::Pos2>,
     size: Option<egui::Vec2>,
+}
+
+struct FileLoadRequest {
+    id: u64,
+    path: PathBuf,
+}
+
+struct FileLoadResult {
+    id: u64,
+    path: PathBuf,
+    content: Result<(String, bool), String>,
+}
+
+#[derive(Clone)]
+struct PendingFileLoad {
+    id: u64,
+    path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -289,6 +308,10 @@ pub struct MarkdownViewerApp {
     last_persisted_state: Option<WindowState>,
     /// Throttle saving window state
     last_persist_instant: std::time::Instant,
+    file_load_tx: Sender<FileLoadRequest>,
+    file_load_rx: Receiver<FileLoadResult>,
+    pending_file_load: Option<PendingFileLoad>,
+    next_file_load_id: u64,
     // Search state
     show_search: bool,
     search_query: String,
@@ -494,6 +517,7 @@ impl MarkdownViewerApp {
     }
     /// Create a new application instance
     pub fn new() -> Self {
+        let (file_load_tx, file_load_rx) = Self::spawn_file_loader();
         let mut app = Self {
             renderer: MarkdownRenderer::new(),
             current_file: None,
@@ -518,6 +542,10 @@ impl MarkdownViewerApp {
             last_window_maximized: false,
             last_persisted_state: None,
             last_persist_instant: std::time::Instant::now(),
+            file_load_tx,
+            file_load_rx,
+            pending_file_load: None,
+            next_file_load_id: 0,
             show_search: false,
             search_query: String::new(),
             last_query: String::new(),
@@ -697,6 +725,7 @@ impl MarkdownViewerApp {
 
     /// Load markdown content from a string
     pub fn load_content(&mut self, content: &str, title: Option<String>) {
+        self.pending_file_load = None;
         self.current_content = content.to_string();
         self.raw_buffer = self.current_content.clone();
         self.error_message = None;
@@ -729,6 +758,22 @@ impl MarkdownViewerApp {
         // Push current state to history before loading new file
         if record_history && !self.current_content.is_empty() {
             self.push_history();
+        }
+
+        let file_size = std::fs::metadata(&path).ok().map(|m| m.len());
+        let use_async = self.screenshot.is_none()
+            && file_size.is_some_and(|size| size >= ASYNC_LOAD_THRESHOLD_BYTES);
+        if use_async {
+            let load_id = self.next_file_load_id;
+            self.next_file_load_id = self.next_file_load_id.wrapping_add(1);
+            let request = FileLoadRequest {
+                id: load_id,
+                path: path.clone(),
+            };
+            if self.file_load_tx.send(request).is_ok() {
+                self.pending_file_load = Some(PendingFileLoad { id: load_id, path });
+                return Ok(());
+            }
         }
 
         let (content, lossy) = Self::read_file_lossy(&path)?;
@@ -769,6 +814,58 @@ impl MarkdownViewerApp {
                 Ok((Self::normalize_line_endings(&s), true))
             }
             Err(e) => Err(e.into()),
+        }
+    }
+
+    fn spawn_file_loader() -> (Sender<FileLoadRequest>, Receiver<FileLoadResult>) {
+        let (request_tx, request_rx) = unbounded();
+        let (result_tx, result_rx) = unbounded();
+        if let Err(err) = std::thread::Builder::new()
+            .name("mdmdview-file-loader".to_string())
+            .spawn(move || {
+                for request in request_rx.iter() {
+                    let content = MarkdownViewerApp::read_file_lossy(&request.path)
+                        .map_err(|err| err.to_string());
+                    let _ = result_tx.send(FileLoadResult {
+                        id: request.id,
+                        path: request.path,
+                        content,
+                    });
+                }
+            })
+        {
+            eprintln!("Failed to start file loader thread: {err}");
+        }
+        (request_tx, result_rx)
+    }
+
+    fn poll_file_loads(&mut self) {
+        while let Ok(result) = self.file_load_rx.try_recv() {
+            let pending = match &self.pending_file_load {
+                Some(pending) if pending.id == result.id => pending.clone(),
+                _ => continue,
+            };
+            self.pending_file_load = None;
+            match result.content {
+                Ok((content, lossy)) => {
+                    let filename = pending
+                        .path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("Unknown")
+                        .to_string();
+                    let base = pending.path.parent().map(|p| p.to_path_buf());
+                    self.renderer.set_base_dir(base.as_deref());
+                    self.current_file = Some(pending.path);
+                    self.load_content(&content, Some(filename));
+                    if lossy {
+                        eprintln!("Loaded file with invalid UTF-8; replaced invalid sequences.");
+                    }
+                }
+                Err(err) => {
+                    self.error_message = Some(format!("Failed to load file: {err}"));
+                }
+            }
         }
     }
 
@@ -1692,6 +1789,14 @@ impl MarkdownViewerApp {
                     ui.label("No file loaded");
                 }
 
+                if let Some(pending) = &self.pending_file_load {
+                    ui.separator();
+                    ui.label(
+                        RichText::new(format!("Loading {}", pending.path.display()))
+                            .color(Color32::from_rgb(120, 200, 255)),
+                    );
+                }
+
                 // Show pending file count if files are queued
                 if !self.pending_files.is_empty() {
                     ui.separator();
@@ -1834,6 +1939,7 @@ impl MarkdownViewerApp {
 
     fn update_impl(&mut self, ctx: &Context) {
         self.handle_screenshot_events(ctx);
+        self.poll_file_loads();
         if self.screenshot.as_ref().is_some_and(|state| state.done) {
             return;
         }

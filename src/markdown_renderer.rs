@@ -6,6 +6,7 @@ use crate::table_support::{
 };
 use crate::{emoji_assets, emoji_catalog};
 use anyhow::Result;
+use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use egui::{
     text::{Galley, LayoutJob, TextWrapping},
     Align, Color32, Context, FontSelection, Painter, RichText, Stroke, Vec2, Visuals,
@@ -13,12 +14,12 @@ use egui::{
 use egui_extras::{Column, TableBuilder};
 use pulldown_cmark::{Alignment, Event, LinkType, Options, Parser, Tag};
 use std::cell::{Cell, RefCell};
-use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
@@ -26,9 +27,6 @@ use syntect::util::LinesWithEndings;
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
-
-#[cfg(test)]
-use std::collections::HashSet;
 
 #[derive(Clone, Copy, Default)]
 struct InlineStyle {
@@ -151,6 +149,9 @@ struct LinkRange {
 const TABLE_LAYOUT_CACHE_CAPACITY: usize = 512;
 const COLUMN_STATS_SAMPLE_ROWS: usize = 128;
 const PIPE_SENTINEL: char = '\u{1F}';
+const IMAGE_TEXTURE_CACHE_CAPACITY: usize = 256;
+const IMAGE_MAX_PENDING: usize = 64;
+const IMAGE_FAILURE_BACKOFF: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct CellLayoutKey {
@@ -266,10 +267,91 @@ type TableParseResult = (Vec<Vec<InlineSpan>>, Vec<Vec<Vec<InlineSpan>>>, usize)
 /// Type alias for quote blocks (nested markdown elements)
 type QuoteBlocks = Vec<MarkdownElement>;
 
+#[derive(Clone)]
 struct ImageCacheEntry {
     texture: egui::TextureHandle,
     size: [u32; 2],
     modified: Option<SystemTime>,
+}
+
+struct ImageCache {
+    entries: HashMap<String, ImageCacheEntry>,
+    order: VecDeque<String>,
+    capacity: usize,
+}
+
+impl ImageCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    fn get(&mut self, key: &str) -> Option<ImageCacheEntry> {
+        let entry = self.entries.get(key).cloned();
+        if entry.is_some() {
+            self.touch(key);
+        }
+        entry
+    }
+
+    fn insert(&mut self, key: String, entry: ImageCacheEntry) {
+        if self.entries.contains_key(&key) {
+            self.entries.insert(key.clone(), entry);
+            self.touch(&key);
+            return;
+        }
+        while self.entries.len() >= self.capacity {
+            if let Some(old) = self.order.pop_front() {
+                self.entries.remove(&old);
+            } else {
+                break;
+            }
+        }
+        self.order.push_back(key.clone());
+        self.entries.insert(key, entry);
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.entries.remove(key);
+        self.order.retain(|entry| entry != key);
+    }
+
+    #[cfg(test)]
+    fn contains_key(&self, key: &str) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    fn touch(&mut self, key: &str) {
+        self.order.retain(|entry| entry != key);
+        self.order.push_back(key.to_string());
+    }
+}
+
+struct ImageFailure {
+    last_attempt: Instant,
+}
+
+enum ImageLoadSource {
+    Embedded(&'static [u8]),
+    File(PathBuf),
+}
+
+struct ImageLoadRequest {
+    key: String,
+    source: ImageLoadSource,
+}
+
+enum ImageLoadResult {
+    Loaded {
+        key: String,
+        image: egui::ColorImage,
+        size: [u32; 2],
+        modified: Option<SystemTime>,
+    },
+    Failed { key: String, error: String },
 }
 
 /// Markdown renderer with proper inline element handling
@@ -278,7 +360,11 @@ pub struct MarkdownRenderer {
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
     emoji_textures: RefCell<HashMap<String, egui::TextureHandle>>,
-    image_textures: RefCell<HashMap<String, ImageCacheEntry>>,
+    image_textures: RefCell<ImageCache>,
+    image_pending: RefCell<HashSet<String>>,
+    image_failures: RefCell<HashMap<String, ImageFailure>>,
+    image_job_tx: Sender<ImageLoadRequest>,
+    image_result_rx: Receiver<ImageLoadResult>,
     // Mapping of header id -> last rendered rect (for in-document navigation)
     header_rects: RefCell<HashMap<String, egui::Rect>>,
     // Last clicked internal anchor (e.g., "getting-started") for the app to consume
@@ -676,12 +762,19 @@ impl MarkdownRenderer {
     /// Create a new markdown renderer
     pub fn new() -> Self {
         let mermaid = MermaidRenderer::new();
+        let (image_job_tx, image_job_rx) = bounded(IMAGE_MAX_PENDING.max(1));
+        let (image_result_tx, image_result_rx) = bounded(IMAGE_MAX_PENDING.max(1) * 2);
+        Self::spawn_image_loader(image_job_rx, image_result_tx);
         Self {
             font_sizes: FontSizes::default(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
             emoji_textures: RefCell::new(HashMap::new()),
-            image_textures: RefCell::new(HashMap::new()),
+            image_textures: RefCell::new(ImageCache::new(IMAGE_TEXTURE_CACHE_CAPACITY)),
+            image_pending: RefCell::new(HashSet::new()),
+            image_failures: RefCell::new(HashMap::new()),
+            image_job_tx,
+            image_result_rx,
             header_rects: RefCell::new(HashMap::new()),
             pending_anchor: RefCell::new(None),
             link_counter: RefCell::new(0),
@@ -693,6 +786,66 @@ impl MarkdownRenderer {
             table_layout_cache: RefCell::new(CellLayoutCache::new(TABLE_LAYOUT_CACHE_CAPACITY)),
             table_metrics: RefCell::new(TableMetrics::default()),
             column_stats_cache: RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn spawn_image_loader(job_rx: Receiver<ImageLoadRequest>, result_tx: Sender<ImageLoadResult>) {
+        if let Err(err) = std::thread::Builder::new()
+            .name("mdmdview-image-loader".to_string())
+            .spawn(move || {
+                for request in job_rx.iter() {
+                    let result = match request.source {
+                        ImageLoadSource::Embedded(bytes) => {
+                            match image_decode::bytes_to_color_image_guess(bytes, None) {
+                                Some((image, w, h)) => ImageLoadResult::Loaded {
+                                    key: request.key,
+                                    image,
+                                    size: [w, h],
+                                    modified: None,
+                                },
+                                None => ImageLoadResult::Failed {
+                                    key: request.key,
+                                    error: "Image decode failed".to_string(),
+                                },
+                            }
+                        }
+                        ImageLoadSource::File(path) => {
+                            if !path.exists() {
+                                ImageLoadResult::Failed {
+                                    key: request.key,
+                                    error: "Image not found".to_string(),
+                                }
+                            } else {
+                                match std::fs::read(&path) {
+                                    Ok(bytes) => {
+                                        let modified = Self::disk_image_timestamp(&path);
+                                        match image_decode::bytes_to_color_image_guess(&bytes, None)
+                                        {
+                                            Some((image, w, h)) => ImageLoadResult::Loaded {
+                                                key: request.key,
+                                                image,
+                                                size: [w, h],
+                                                modified,
+                                            },
+                                            None => ImageLoadResult::Failed {
+                                                key: request.key,
+                                                error: "Image decode failed".to_string(),
+                                            },
+                                        }
+                                    }
+                                    Err(err) => ImageLoadResult::Failed {
+                                        key: request.key,
+                                        error: format!("Image read failed: {err}"),
+                                    },
+                                }
+                            }
+                        }
+                    };
+                    let _ = result_tx.send(result);
+                }
+            })
+        {
+            eprintln!("Failed to start image loader thread: {err}");
         }
     }
 
@@ -2415,6 +2568,7 @@ impl MarkdownRenderer {
 
     /// Render parsed markdown elements to egui UI
     pub fn render_to_ui(&self, ui: &mut egui::Ui, elements: &[MarkdownElement]) {
+        self.poll_image_results(ui.ctx());
         self.mermaid.begin_frame();
         // Clear header rects before rendering a new frame
         self.header_rects.borrow_mut().clear();
@@ -2653,7 +2807,12 @@ impl MarkdownRenderer {
                         .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
                         .inner_margin(8.0)
                         .show(ui, |ui| {
-                            let msg = if src.starts_with("http://") || src.starts_with("https://") {
+                            let pending = self.image_pending.borrow().contains(&resolved);
+                            let msg = if pending {
+                                "Loading image..."
+                            } else if src.starts_with("http://")
+                                || src.starts_with("https://")
+                            {
                                 "Remote images are disabled"
                             } else {
                                 "Image not found or unsupported"
@@ -2997,7 +3156,7 @@ impl MarkdownRenderer {
                         let cap = (ui.available_width() * 0.6).max(48.0);
                         let cached = self
                             .image_textures
-                            .borrow()
+                            .borrow_mut()
                             .get(src)
                             .map(|entry| entry.size[0] as f32 * self.ui_scale());
                         let approx = cached.unwrap_or(self.font_sizes.body * 12.0);
@@ -4748,7 +4907,7 @@ impl MarkdownRenderer {
     }
 
     pub fn has_pending_renders(&self) -> bool {
-        self.mermaid.has_pending()
+        self.mermaid.has_pending() || !self.image_pending.borrow().is_empty()
     }
 
     /// Set or clear the highlight phrase (case-insensitive)
@@ -4841,6 +5000,63 @@ impl MarkdownRenderer {
         }
     }
 
+    fn poll_image_results(&self, ctx: &egui::Context) -> bool {
+        let mut changed = false;
+        while let Ok(result) = self.image_result_rx.try_recv() {
+            match result {
+                ImageLoadResult::Loaded {
+                    key,
+                    image,
+                    size,
+                    modified,
+                } => {
+                    let tex =
+                        ctx.load_texture(format!("img:{key}"), image, egui::TextureOptions::LINEAR);
+                    self.store_image_texture(&key, tex.clone(), size, modified);
+                    self.image_failures.borrow_mut().remove(&key);
+                    self.image_pending.borrow_mut().remove(&key);
+                    changed = true;
+                }
+                ImageLoadResult::Failed { key, .. } => {
+                    self.image_pending.borrow_mut().remove(&key);
+                    self.note_image_failure(&key);
+                }
+            }
+        }
+        if changed {
+            ctx.request_repaint();
+        }
+        changed
+    }
+
+    fn enqueue_image_job(&self, request: ImageLoadRequest) -> Result<(), ()> {
+        match self.image_job_tx.try_send(request) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(()),
+            Err(TrySendError::Disconnected(_)) => Err(()),
+        }
+    }
+
+    fn should_retry_image(&self, key: &str) -> bool {
+        let mut failures = self.image_failures.borrow_mut();
+        if let Some(failure) = failures.get(key) {
+            if failure.last_attempt.elapsed() < IMAGE_FAILURE_BACKOFF {
+                return false;
+            }
+        }
+        failures.remove(key);
+        true
+    }
+
+    fn note_image_failure(&self, key: &str) {
+        self.image_failures.borrow_mut().insert(
+            key.to_string(),
+            ImageFailure {
+                last_attempt: Instant::now(),
+            },
+        );
+    }
+
     fn resolve_image_path(&self, src: &str) -> String {
         if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:") {
             // Keep as-is; we don't fetch remote or parse data URIs yet
@@ -4868,52 +5084,51 @@ impl MarkdownRenderer {
         }
 
         let path = Path::new(resolved_src);
+        let embedded = Self::embedded_image_bytes(resolved_src);
 
-        if let Some(entry) = self.image_textures.borrow().get(resolved_src) {
-            let stale = Self::image_source_stale(entry.modified, path);
-            if !stale {
-                return Some((entry.texture.clone(), entry.size[0], entry.size[1]));
+        {
+            let mut cache = self.image_textures.borrow_mut();
+            if let Some(entry) = cache.get(resolved_src) {
+                let stale = if embedded.is_some() {
+                    false
+                } else {
+                    Self::image_source_stale(entry.modified, path)
+                };
+                if !stale {
+                    return Some((entry.texture.clone(), entry.size[0], entry.size[1]));
+                }
+                cache.remove(resolved_src);
             }
         }
 
-        // Try embedded assets first
-        if let Some(bytes) = Self::embedded_image_bytes(resolved_src) {
-            if let Some((color_image, w, h)) = image_decode::bytes_to_color_image_guess(bytes, None)
-            {
-                let tex = ui.ctx().load_texture(
-                    format!("img:{}", resolved_src),
-                    color_image,
-                    egui::TextureOptions::LINEAR,
-                );
-                self.store_image_texture(resolved_src, tex.clone(), [w, h], None);
-                return Some((tex, w, h));
-            }
-        }
-
-        if !path.exists() {
+        if self.image_pending.borrow().contains(resolved_src) {
             return None;
         }
 
-        let bytes = std::fs::read(path).ok()?;
-        let (color_image, w, h) = if Self::is_svg_path(resolved_src) {
-            match image_decode::svg_bytes_to_color_image(&bytes) {
-                Some((ci, w, h)) => (ci, w, h),
-                None => return None,
-            }
+        if !self.should_retry_image(resolved_src) {
+            return None;
+        }
+
+        let source = if let Some(bytes) = embedded {
+            ImageLoadSource::Embedded(bytes)
         } else {
-            match image_decode::raster_bytes_to_color_image_with_bg(&bytes, None) {
-                Some((ci, w, h)) => (ci, w, h),
-                None => return None,
+            if !path.exists() {
+                self.note_image_failure(resolved_src);
+                return None;
             }
+            ImageLoadSource::File(path.to_path_buf())
         };
-        let tex = ui.ctx().load_texture(
-            format!("img:{}", resolved_src),
-            color_image,
-            egui::TextureOptions::LINEAR,
-        );
-        let modified = Self::disk_image_timestamp(path);
-        self.store_image_texture(resolved_src, tex.clone(), [w, h], modified);
-        Some((tex, w, h))
+
+        let request = ImageLoadRequest {
+            key: resolved_src.to_string(),
+            source,
+        };
+        if self.enqueue_image_job(request).is_ok() {
+            self.image_pending
+                .borrow_mut()
+                .insert(resolved_src.to_string());
+        }
+        None
     }
 
     fn disk_image_timestamp(path: &Path) -> Option<SystemTime> {
@@ -4962,13 +5177,6 @@ impl MarkdownRenderer {
             }
             _ => None,
         }
-    }
-
-    fn is_svg_path(p: &str) -> bool {
-        p.rsplit('.')
-            .next()
-            .map(|e| e.eq_ignore_ascii_case("svg"))
-            .unwrap_or(false)
     }
 
     /// Find syntax definition for a given language name
@@ -5077,6 +5285,7 @@ mod tests {
     use std::fs;
     use std::str::FromStr;
     use std::sync::Mutex;
+    use std::time::Duration;
     use syntect::highlighting::{Color, FontStyle, ScopeSelectors, StyleModifier, ThemeItem};
     use tempfile::tempdir;
 
@@ -5176,6 +5385,22 @@ mod tests {
             f(&ctx, ui);
         });
         let _ = ctx.end_frame();
+    }
+
+    fn wait_for_image(
+        renderer: &MarkdownRenderer,
+        ctx: &egui::Context,
+        ui: &egui::Ui,
+        path: &str,
+    ) -> Option<(egui::TextureHandle, u32, u32)> {
+        for _ in 0..10 {
+            if let Some(loaded) = renderer.get_or_load_image_texture(ui, path) {
+                return Some(loaded);
+            }
+            renderer.poll_image_results(ctx);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        renderer.get_or_load_image_texture(ui, path)
     }
 
     fn run_frame_with_input<F>(ctx: &egui::Context, input: egui::RawInput, f: F)
@@ -7669,8 +7894,9 @@ fn main() {}
     #[test]
     fn test_get_or_load_image_texture_embedded_and_remote() {
         let renderer = MarkdownRenderer::new();
-        with_test_ui(|_, ui| {
-            let embedded = renderer.get_or_load_image_texture(ui, "assets/emoji/1f600.png");
+        with_test_ui(|ctx, ui| {
+            let embedded =
+                wait_for_image(&renderer, ctx, ui, "assets/emoji/1f600.png");
             assert!(embedded.is_some());
             let remote = renderer.get_or_load_image_texture(ui, "https://example.com/img.png");
             assert!(remote.is_none());
@@ -8087,8 +8313,8 @@ fn main() {}
         let image_path = temp.path().join("image.png");
         std::fs::write(&image_path, tiny_png_bytes())?;
         let resolved = image_path.to_string_lossy().to_string();
-        with_test_ui(|_, ui| {
-            let first = renderer.get_or_load_image_texture(ui, &resolved);
+        with_test_ui(|ctx, ui| {
+            let first = wait_for_image(&renderer, ctx, ui, &resolved);
             assert!(first.is_some());
             let second = renderer.get_or_load_image_texture(ui, &resolved);
             assert!(second.is_some());
