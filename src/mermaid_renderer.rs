@@ -1044,7 +1044,7 @@ struct MermaidWorker {
 
 #[cfg(feature = "mermaid-quickjs")]
 impl MermaidWorker {
-    const MEMORY_LIMIT_BYTES: usize = 1024 * 1024 * 1024;
+    const MEMORY_LIMIT_BYTES: usize = 2 * 1024 * 1024 * 1024;
     const STACK_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
     // DOMPurify expects a real browser DOM; stub sanitize for the QuickJS shim.
@@ -1063,6 +1063,10 @@ impl MermaidWorker {
             "String(typeof u.text===\"function\"?u.text():(u.textContent||\"\"))",
             ".split(/(\\s+|<br>)/).reverse()"
         );
+        const MINDMAP_LAYOUT_TARGET: &str =
+            "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run()";
+        const MINDMAP_LAYOUT_PATCH: &str =
+            "p.layout({name:\"breadthfirst\",directed:!0,spacingFactor:1.4,animate:!1}).run()";
         let mut out = if js.contains(TARGET) {
             js.replacen(TARGET, PATCH, 1)
         } else {
@@ -1092,6 +1096,14 @@ impl MermaidWorker {
             }
         } else if debug {
             eprintln!("Mermaid patch: D3 text wrap not found");
+        }
+        if out.contains(MINDMAP_LAYOUT_TARGET) {
+            out = out.replacen(MINDMAP_LAYOUT_TARGET, MINDMAP_LAYOUT_PATCH, 1);
+            if debug {
+                eprintln!("Mermaid patch: mindmap layout applied");
+            }
+        } else if debug {
+            eprintln!("Mermaid patch: mindmap layout not found");
         }
         out
     }
@@ -1972,6 +1984,39 @@ function __mdmdview_bbox(el) {
       }
     }
   }
+  var font_size = __mdmdview_get_font_size(el);
+  var width_attr = el.getAttribute ? el.getAttribute('width') : null;
+  var height_attr = el.getAttribute ? el.getAttribute('height') : null;
+  var bw = __mdmdview_parse_length(width_attr, font_size);
+  var bh = __mdmdview_parse_length(height_attr, font_size);
+  if ((!bw || !bh) && el.style) {
+    if (!bw && el.style.width) { bw = __mdmdview_parse_length(el.style.width, font_size); }
+    if (!bh && el.style.height) { bh = __mdmdview_parse_length(el.style.height, font_size); }
+  }
+  if ((!bw || !bh) && el.getAttribute) {
+    var view_box = el.getAttribute('viewBox');
+    if (view_box) {
+      var parts = String(view_box).trim().split(/[\s,]+/).filter(function(p) { return p.length; });
+      if (parts.length >= 4) {
+        var vbw = __mdmdview_parse_num(parts[2]);
+        var vbh = __mdmdview_parse_num(parts[3]);
+        if (!bw && vbw) { bw = vbw; }
+        if (!bh && vbh) { bh = vbh; }
+      }
+    }
+  }
+  if (!bw && !bh) {
+    var html_tag = tag === 'div' || tag === 'body' || tag === 'html';
+    if (html_tag) {
+      bw = window.innerWidth || 0;
+      bh = window.innerHeight || 0;
+    }
+  }
+  if (bw || bh) {
+    var bx = __mdmdview_parse_num(el.getAttribute ? el.getAttribute('x') : 0);
+    var by = __mdmdview_parse_num(el.getAttribute ? el.getAttribute('y') : 0);
+    return __mdmdview_apply_transform(el, { x: bx, y: by, width: bw, height: bh });
+  }
   if (el.children && el.children.length) {
     var min_x = Infinity;
     var min_y = Infinity;
@@ -2161,6 +2206,7 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
   var doc = ownerDoc;
   if (!doc && typeof document !== 'undefined' && document) { doc = document; }
   var parent = null;
+  var parent_set = false;
   var node = {
     tagName: tag,
     namespaceURI: ns || null,
@@ -2221,6 +2267,7 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
         this.children.splice(idx, 1);
         this.childNodes = this.children;
       }
+      if (child && typeof child === 'object') { child.parentNode = null; }
       this.firstChild = this.children[0] || null;
       return child;
     },
@@ -2263,8 +2310,26 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
       }
       return copy;
     },
-    getBBox: function() { return __mdmdview_bbox(this); },
-    getBoundingClientRect: function() { return __mdmdview_bbox(this); },
+    getBBox: function() {
+      var box = __mdmdview_bbox(this);
+      if (box) {
+        box.w = box.width;
+        box.h = box.height;
+      }
+      return box;
+    },
+    getBoundingClientRect: function() {
+      var box = __mdmdview_bbox(this);
+      if (box) {
+        box.left = box.x;
+        box.top = box.y;
+        box.right = box.x + box.width;
+        box.bottom = box.y + box.height;
+        box.w = box.width;
+        box.h = box.height;
+      }
+      return box;
+    },
     getComputedTextLength: function() { return __mdmdview_bbox(this).width; },
     getTotalLength: function() { return __mdmdview_path_total_length(this); },
     getPointAtLength: function(len) { return __mdmdview_path_point_at_length(this, len); },
@@ -2321,6 +2386,12 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
   Object.defineProperty(node, 'innerHTML', {
     get: function() { return __mdmdview_serialize_children(this); },
     set: function(value) {
+      if (this.children && this.children.length) {
+        for (var i = 0; i < this.children.length; i++) {
+          var child = this.children[i];
+          if (child && typeof child === 'object') { child.parentNode = null; }
+        }
+      }
       this.children = [];
       this.childNodes = this.children;
       this.firstChild = null;
@@ -2351,11 +2422,11 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
   });
   Object.defineProperty(node, 'parentNode', {
     get: function() {
-      if (parent) { return parent; }
+      if (parent_set) { return parent || null; }
       if (typeof document !== 'undefined' && document && document.body) { return document.body; }
       return null;
     },
-    set: function(value) { parent = value; },
+    set: function(value) { parent = value; parent_set = true; },
     configurable: true
   });
   Object.defineProperty(node, 'nextSibling', {
@@ -2732,6 +2803,9 @@ function __mdmdview_reset_dom() {
   document.head.parentNode = document.documentElement;
   document.body.parentNode = document.documentElement;
   __mdmdview_text_cache = {};
+  window.__mdmdview_timer_queue = [];
+  window.__mdmdview_timer_map = {};
+  window.__mdmdview_now_base = 0;
 }
 if (!Object.hasOwn) {
   Object.hasOwn = function(obj, prop) {
@@ -2750,12 +2824,15 @@ if (!Object.prototype.hasOwnProperty('ownerDocument')) {
 if (!Object.prototype.hasOwnProperty('parentNode')) {
   Object.defineProperty(Object.prototype, 'parentNode', {
     get: function() {
-      if (this && this.__mdmdview_parent) { return this.__mdmdview_parent; }
+      if (this && this.__mdmdview_parent_set) {
+        return this.__mdmdview_parent || null;
+      }
       if (typeof document !== 'undefined' && document && document.body) { return document.body; }
       return null;
     },
     set: function(value) {
       this.__mdmdview_parent = value;
+      this.__mdmdview_parent_set = true;
     },
     configurable: true
   });
@@ -2852,10 +2929,38 @@ if (!Object.prototype.hasOwnProperty('previousSibling')) {
 window.getComputedStyle = function(el) {
   return (el && el.style) ? el.style : __mdmdview_make_style();
 };
-window.setTimeout = function(fn, ms) { fn(); return 1; };
-window.clearTimeout = function(id) {};
-window.requestAnimationFrame = function(fn) { fn(0); return 1; };
-window.cancelAnimationFrame = function(id) {};
+window.__mdmdview_timer_queue = [];
+window.__mdmdview_timer_map = {};
+window.__mdmdview_next_timer_id = 1;
+window.setTimeout = function(fn, ms) {
+  var id = window.__mdmdview_next_timer_id++;
+  window.__mdmdview_timer_map[id] = { fn: fn };
+  window.__mdmdview_timer_queue.push(id);
+  return id;
+};
+window.clearTimeout = function(id) {
+  if (window.__mdmdview_timer_map) {
+    delete window.__mdmdview_timer_map[id];
+  }
+};
+window.requestAnimationFrame = function(fn) {
+  return window.setTimeout(function() { fn(0); }, 16);
+};
+window.cancelAnimationFrame = function(id) { window.clearTimeout(id); };
+window.__mdmdview_run_timers = function(max_ticks) {
+  var ticks = 0;
+  var queue = window.__mdmdview_timer_queue || [];
+  var map = window.__mdmdview_timer_map || {};
+  var limit = typeof max_ticks === 'number' && max_ticks > 0 ? max_ticks : 1000;
+  while (queue.length && ticks < limit) {
+    var id = queue.shift();
+    var entry = map[id];
+    if (entry && typeof entry.fn === 'function') { entry.fn(); }
+    delete map[id];
+    ticks++;
+  }
+  return queue.length;
+};
 if (!window.devicePixelRatio) { window.devicePixelRatio = 1; }
 if (!window.Image) {
   window.Image = function() {
@@ -2879,7 +2984,12 @@ window.structuredClone = function(value) {
   }
   return out;
 };
-window.performance = { now: function(){ return 0; } };
+window.__mdmdview_now_base = 0;
+window.performance = { now: function(){
+  if (typeof Date !== 'undefined' && typeof Date.now === 'function') { return Date.now(); }
+  window.__mdmdview_now_base += 1;
+  return window.__mdmdview_now_base;
+} };
 window.console = {
   log: function(){},
   warn: function(){},
@@ -2891,6 +3001,11 @@ window.console = {
 window.fetch = function(){ throw new Error('fetch disabled'); };
 window.XMLHttpRequest = function(){ throw new Error('XMLHttpRequest disabled'); };
 window.DOMPurify = { sanitize: function(html){ return html; } };
+window.getComputedStyle = function() {
+  return {
+    getPropertyValue: function() { return '0px'; }
+  };
+};
 window.__mdmdview_viewport_width = 1200;
 window.__mdmdview_viewport_height = 900;
 Object.defineProperty(window, 'innerWidth', {
@@ -3061,6 +3176,16 @@ const MERMAID_RENDER_WRAPPER: &str = r#"
     if (!merged.flowchart) { merged.flowchart = {}; }
     merged.flowchart.htmlLabels = false;
   }
+  function __mdmdview_flush_timers() {
+    if (typeof __mdmdview_run_timers !== 'function') { return; }
+    var remaining = 0;
+    var cycles = 0;
+    do {
+      remaining = __mdmdview_run_timers(1000);
+      cycles++;
+    } while (remaining > 0 && cycles < 100);
+    if (remaining > 0) { throw new Error('Mermaid timer queue did not drain'); }
+  }
   mermaid.mermaidAPI.initialize(merged);
   var renderCode = extracted && extracted.code !== undefined ? extracted.code : code;
   var svgOut = null;
@@ -3070,11 +3195,13 @@ const MERMAID_RENDER_WRAPPER: &str = r#"
     if (!renderResult) {
       renderResult = mermaid.mermaidAPI.render(id, renderCode, function(svg){ svgOut = svg; });
     }
+    __mdmdview_flush_timers();
   } catch (err) {
     throw err;
   }
   if (renderResult && typeof renderResult.then === 'function') {
     return renderResult.then(function(out){
+      __mdmdview_flush_timers();
       if (typeof out === 'string') { return out; }
       if (out && out.svg) { return out.svg; }
       if (typeof svgOut === 'string' && svgOut.length > 0) { return svgOut; }

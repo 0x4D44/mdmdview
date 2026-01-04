@@ -116,6 +116,12 @@ struct ScrollSnapshot {
     offset_y: f32,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WindowAdjustment {
+    pos: Option<egui::Pos2>,
+    size: Option<egui::Vec2>,
+}
+
 #[derive(Debug)]
 struct ScreenshotState {
     config: ScreenshotConfig,
@@ -778,9 +784,11 @@ impl MarkdownViewerApp {
 
     fn compute_window_adjustment(
         outer_rect: Option<egui::Rect>,
+        inner_rect: Option<egui::Rect>,
         monitor_size: Option<egui::Vec2>,
-    ) -> Option<(egui::Pos2, egui::Vec2)> {
+    ) -> Option<WindowAdjustment> {
         let outer = outer_rect?;
+        let inner = inner_rect.unwrap_or(outer);
         let monitor = monitor_size?;
 
         if monitor.x <= 0.0 || monitor.y <= 0.0 {
@@ -792,61 +800,76 @@ impl MarkdownViewerApp {
         const OFFSCREEN_TOLERANCE: f32 = 32.0;
 
         let mut pos = outer.min;
-        let mut size = outer.size();
-        let mut adjusted = false;
+        let mut size = inner.size();
+        let mut pos_adjusted = false;
+        let mut size_adjusted = false;
 
         if !pos.x.is_finite() || !pos.y.is_finite() {
             pos = egui::pos2(0.0, 0.0);
-            adjusted = true;
+            pos_adjusted = true;
         }
         if !size.x.is_finite() || !size.y.is_finite() {
             size = egui::vec2(MIN_WIDTH, MIN_HEIGHT);
-            adjusted = true;
+            size_adjusted = true;
         }
 
-        let available_width = monitor.x.max(MIN_WIDTH);
-        let available_height = monitor.y.max(MIN_HEIGHT);
+        let outer_size = outer.size();
+        let inner_size = inner.size();
+        let frame = egui::vec2(
+            (outer_size.x - inner_size.x).max(0.0),
+            (outer_size.y - inner_size.y).max(0.0),
+        );
+
+        let available_width = (monitor.x - frame.x).max(MIN_WIDTH);
+        let available_height = (monitor.y - frame.y).max(MIN_HEIGHT);
 
         if size.x < MIN_WIDTH {
             size.x = MIN_WIDTH.min(available_width);
-            adjusted = true;
+            size_adjusted = true;
         }
         if size.y < MIN_HEIGHT {
             size.y = MIN_HEIGHT.min(available_height);
-            adjusted = true;
+            size_adjusted = true;
         }
         if size.x > available_width {
             size.x = available_width;
-            adjusted = true;
+            size_adjusted = true;
         }
         if size.y > available_height {
             size.y = available_height;
-            adjusted = true;
+            size_adjusted = true;
         }
 
-        let max_pos = egui::pos2((monitor.x - size.x).max(0.0), (monitor.y - size.y).max(0.0));
+        let outer_size_for_bounds = size + frame;
+        let max_pos = egui::pos2(
+            (monitor.x - outer_size_for_bounds.x).max(0.0),
+            (monitor.y - outer_size_for_bounds.y).max(0.0),
+        );
 
-        if pos.x <= -0.25 * size.x {
+        if pos.x <= -0.25 * outer_size_for_bounds.x {
             pos.x = 0.0;
-            adjusted = true;
+            pos_adjusted = true;
         }
-        if pos.y <= -0.25 * size.y {
+        if pos.y <= -0.25 * outer_size_for_bounds.y {
             pos.y = 0.0;
-            adjusted = true;
+            pos_adjusted = true;
         }
         if pos.x > max_pos.x + OFFSCREEN_TOLERANCE {
             pos.x = max_pos.x;
-            adjusted = true;
+            pos_adjusted = true;
         }
         if pos.y > max_pos.y + OFFSCREEN_TOLERANCE {
             pos.y = max_pos.y;
-            adjusted = true;
+            pos_adjusted = true;
         }
 
-        if adjusted {
+        if pos_adjusted || size_adjusted {
             size.x = size.x.max(MIN_WIDTH.min(available_width));
             size.y = size.y.max(MIN_HEIGHT.min(available_height));
-            Some((pos, size))
+            Some(WindowAdjustment {
+                pos: pos_adjusted.then_some(pos),
+                size: size_adjusted.then_some(size),
+            })
         } else {
             None
         }
@@ -1842,25 +1865,33 @@ impl MarkdownViewerApp {
             )
         });
 
-        let mut adjusted = false;
+        let mut pos_adjusted = false;
+        let mut size_adjusted = false;
         if !is_fullscreen {
-            if let Some((pos, size)) = Self::compute_window_adjustment(outer_rect, monitor_size) {
-                adjusted = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
-                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-                self.last_window_pos = Some([pos.x, pos.y]);
-                self.last_window_size = Some([size.x, size.y]);
+            if let Some(adjustment) =
+                Self::compute_window_adjustment(outer_rect, inner_rect, monitor_size)
+            {
+                if let Some(pos) = adjustment.pos {
+                    pos_adjusted = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
+                    self.last_window_pos = Some([pos.x, pos.y]);
+                }
+                if let Some(size) = adjustment.size {
+                    size_adjusted = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+                    self.last_window_size = Some([size.x, size.y]);
+                }
             }
         }
 
-        if !adjusted {
+        if !pos_adjusted {
             if let Some(outer) = outer_rect {
                 self.last_window_pos = Some([outer.left(), outer.top()]);
             }
-            if !is_fullscreen {
-                if let Some(inner) = inner_rect {
-                    self.last_window_size = Some([inner.width(), inner.height()]);
-                }
+        }
+        if !size_adjusted && !is_fullscreen {
+            if let Some(inner) = inner_rect {
+                self.last_window_size = Some([inner.width(), inner.height()]);
             }
         }
         self.last_window_maximized = is_maximized;
@@ -3162,18 +3193,31 @@ The end.
     fn test_compute_window_adjustment_clamps_offscreen_window() {
         let outer = egui::Rect::from_min_size(egui::pos2(1200.0, 900.0), egui::vec2(800.0, 600.0));
         let monitor = egui::vec2(1024.0, 768.0);
-        let (pos, size) = MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(monitor))
-            .expect("should adjust window geometry");
+        let adjustment = MarkdownViewerApp::compute_window_adjustment(
+            Some(outer),
+            Some(outer),
+            Some(monitor),
+        )
+        .expect("should adjust window geometry");
+        let pos = adjustment.pos.expect("expected position adjustment");
+        let size = adjustment.size.unwrap_or_else(|| outer.size());
         assert!(pos.x <= monitor.x - size.x + 1.0);
         assert!(pos.y <= monitor.y - size.y + 1.0);
+        assert!(adjustment.size.is_none());
     }
 
     #[test]
     fn test_compute_window_adjustment_respects_min_size() {
         let outer = egui::Rect::from_min_size(egui::pos2(-200.0, -100.0), egui::vec2(200.0, 100.0));
         let monitor = egui::vec2(1920.0, 1080.0);
-        let (pos, size) = MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(monitor))
-            .expect("should enforce minimum window size");
+        let adjustment = MarkdownViewerApp::compute_window_adjustment(
+            Some(outer),
+            Some(outer),
+            Some(monitor),
+        )
+        .expect("should enforce minimum window size");
+        let pos = adjustment.pos.unwrap_or(outer.min);
+        let size = adjustment.size.expect("expected size adjustment");
         assert!(size.x >= 600.0);
         assert!(size.y >= 400.0);
         assert!(pos.x >= 0.0);
@@ -4256,11 +4300,16 @@ The end.
     fn test_compute_window_adjustment_clamps() {
         let outer = egui::Rect::from_min_size(egui::pos2(-100.0, -100.0), egui::vec2(200.0, 100.0));
         let monitor = egui::vec2(800.0, 600.0);
-        let adjusted = MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(monitor));
+        let adjusted =
+            MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(outer), Some(monitor));
         assert!(adjusted.is_some());
 
         let outer_ok = egui::Rect::from_min_size(egui::pos2(10.0, 10.0), egui::vec2(800.0, 600.0));
-        let unchanged = MarkdownViewerApp::compute_window_adjustment(Some(outer_ok), Some(monitor));
+        let unchanged = MarkdownViewerApp::compute_window_adjustment(
+            Some(outer_ok),
+            Some(outer_ok),
+            Some(monitor),
+        );
         assert!(unchanged.is_none());
     }
 
@@ -4840,8 +4889,11 @@ The end.
     #[test]
     fn test_compute_window_adjustment_invalid_monitor_returns_none() {
         let outer = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0));
-        let adjusted =
-            MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(egui::vec2(0.0, 0.0)));
+        let adjusted = MarkdownViewerApp::compute_window_adjustment(
+            Some(outer),
+            Some(outer),
+            Some(egui::vec2(0.0, 0.0)),
+        );
         assert!(adjusted.is_none());
     }
 
@@ -4853,12 +4905,14 @@ The end.
         );
         let adjusted = MarkdownViewerApp::compute_window_adjustment(
             Some(outer),
+            Some(outer),
             Some(egui::vec2(800.0, 600.0)),
         );
         assert!(adjusted.is_some());
 
         let outer = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(5000.0, 4000.0));
         let adjusted = MarkdownViewerApp::compute_window_adjustment(
+            Some(outer),
             Some(outer),
             Some(egui::vec2(800.0, 600.0)),
         );
