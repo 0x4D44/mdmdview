@@ -818,8 +818,8 @@ impl MarkdownViewerApp {
     }
 
     fn spawn_file_loader() -> (Sender<FileLoadRequest>, Receiver<FileLoadResult>) {
-        let (request_tx, request_rx) = unbounded();
-        let (result_tx, result_rx) = unbounded();
+        let (request_tx, request_rx) = unbounded::<FileLoadRequest>();
+        let (result_tx, result_rx) = unbounded::<FileLoadResult>();
         if let Err(err) = std::thread::Builder::new()
             .name("mdmdview-file-loader".to_string())
             .spawn(move || {

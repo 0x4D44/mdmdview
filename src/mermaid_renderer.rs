@@ -374,9 +374,29 @@ impl MermaidRenderer {
                 return true;
             } else if preference == MermaidRenderPreference::Embedded {
                 let svg_key = Self::hash_str(code);
-                let width_bucket = Self::width_bucket(ui.available_width());
+                let mut available_width = ui.available_width();
+                let orig_available_width = available_width;
+                if available_width <= Self::MERMAID_WIDTH_BUCKET_STEP as f32 {
+                    let fallback = ui.ctx().available_rect().width();
+                    if fallback > available_width {
+                        available_width = fallback;
+                    }
+                }
+                if std::env::var("MDMDVIEW_MERMAID_LOG_WIDTH").is_ok() {
+                    eprintln!(
+                        "Mermaid width: avail={:.2} fallback={:.2}",
+                        orig_available_width, available_width
+                    );
+                }
+                let width_bucket = Self::width_bucket(available_width);
                 let scale_bucket = Self::scale_bucket(ui_scale);
-                let (viewport_width, viewport_height) = Self::viewport_px(ui.ctx());
+                let (mut viewport_width, mut viewport_height) = Self::viewport_px(ui.ctx());
+                if let Some(kind) = Self::mermaid_diagram_kind(code) {
+                    if kind == "timeline" {
+                        viewport_width = viewport_width.min(1000);
+                        viewport_height = viewport_height.min(700);
+                    }
+                }
                 let bg = Self::mermaid_bg_fill();
                 let texture_key = Self::texture_key(svg_key, width_bucket, scale_bucket, bg);
 
@@ -543,6 +563,22 @@ impl MermaidRenderer {
         (width, height)
     }
 
+    fn mermaid_diagram_kind(code: &str) -> Option<String> {
+        for line in code.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with("%%") {
+                continue;
+            }
+            if let Some(token) = trimmed.split_whitespace().next() {
+                return Some(token.to_ascii_lowercase());
+            }
+        }
+        None
+    }
+
     #[cfg(feature = "mermaid-quickjs")]
     fn scale_from_bucket(scale_bucket: u32) -> f32 {
         let scale = scale_bucket as f32 / Self::MERMAID_SCALE_BUCKET_FACTOR;
@@ -653,7 +689,7 @@ impl MermaidRenderer {
                 return value.max(100);
             }
         }
-        12_000
+        30_000
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -935,10 +971,15 @@ impl MermaidRenderer {
 struct TextMeasurer {
     fontdb: Arc<usvg::fontdb::Database>,
     face_id: Option<usvg::fontdb::ID>,
+    bold_face_id: Option<usvg::fontdb::ID>,
 }
 
 #[cfg(feature = "mermaid-quickjs")]
 impl TextMeasurer {
+    const BOLD_WIDTH_FALLBACK: f32 = 1.07;
+    const BOLD_WIDTH_SCALE: f32 = 1.03;
+    const LINE_HEIGHT_SCALE: f32 = 1.0;
+
     fn new(fontdb: Arc<usvg::fontdb::Database>) -> Self {
         let families = [
             usvg::fontdb::Family::Name("Trebuchet MS"),
@@ -951,23 +992,54 @@ impl TextMeasurer {
             ..Default::default()
         };
         let face_id = fontdb.query(&query);
-        Self { fontdb, face_id }
+        let bold_query = usvg::fontdb::Query {
+            families: &families,
+            weight: usvg::fontdb::Weight::BOLD,
+            ..Default::default()
+        };
+        let bold_face_id = fontdb.query(&bold_query).or(face_id);
+        Self {
+            fontdb,
+            face_id,
+            bold_face_id,
+        }
     }
 
-    fn measure_text(&self, text: &str, font_size: f32) -> (f32, f32) {
+    fn measure_text(&self, text: &str, font_size: f32, font_weight: Option<f32>) -> (f32, f32) {
+        if text.is_empty() {
+            return (0.0, 0.0);
+        }
         let size = if font_size.is_finite() && font_size > 0.0 {
             font_size
         } else {
             16.0
         };
-        if let Some(result) = self.measure_with_face(text, size) {
-            return result;
+        let use_bold = font_weight.unwrap_or(400.0) >= 600.0;
+        let face_id = if use_bold {
+            self.bold_face_id.or(self.face_id)
+        } else {
+            self.face_id
+        };
+        if let Some((width, height)) = self.measure_with_face(face_id, text, size) {
+            if use_bold {
+                let mut adjusted = width * Self::BOLD_WIDTH_SCALE;
+                if self.bold_face_id == self.face_id {
+                    adjusted *= Self::BOLD_WIDTH_FALLBACK;
+                }
+                return (adjusted, height);
+            }
+            return (width, height);
         }
         Self::fallback_measure(text, size)
     }
 
-    fn measure_with_face(&self, text: &str, font_size: f32) -> Option<(f32, f32)> {
-        let face_id = self.face_id?;
+    fn measure_with_face(
+        &self,
+        face_id: Option<usvg::fontdb::ID>,
+        text: &str,
+        font_size: f32,
+    ) -> Option<(f32, f32)> {
+        let face_id = face_id?;
         self.fontdb
             .with_face_data(face_id, |data, index| {
                 let face = ttf_parser::Face::parse(data, index).ok()?;
@@ -1003,8 +1075,16 @@ impl TextMeasurer {
                     line_count = 1;
                 }
 
+                let ascender = face.ascender() as f32;
+                let descender = face.descender() as f32;
+                let line_gap = face.line_gap() as f32;
+                let mut line_height_units = ascender - descender + line_gap;
+                if !line_height_units.is_finite() || line_height_units <= 0.0 {
+                    line_height_units = units_per_em;
+                }
+                let line_height = line_height_units * scale * Self::LINE_HEIGHT_SCALE;
                 let width = max_width_units * scale;
-                let height = font_size * 0.72 * line_count as f32;
+                let height = line_height * line_count as f32;
                 if width.is_finite() && height.is_finite() {
                     Some((width, height))
                 } else {
@@ -1028,7 +1108,7 @@ impl TextMeasurer {
             lines = 1;
         }
         let width = max_len as f32 * font_size * 0.5;
-        let height = lines as f32 * font_size * 0.72;
+        let height = lines as f32 * font_size * 1.2;
         (width, height)
     }
 }
@@ -1067,6 +1147,21 @@ impl MermaidWorker {
             "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run()";
         const MINDMAP_LAYOUT_PATCH: &str =
             "p.layout({name:\"breadthfirst\",directed:!0,spacingFactor:1.4,animate:!1}).run()";
+        const MINDMAP_READY_TARGET: &str =
+            "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run(),p.ready(v=>{Xe.info(\"Ready\",v),u(p)})";
+        const MINDMAP_READY_PATCH: &str =
+            "p.layout({name:\"breadthfirst\",directed:!0,spacingFactor:1.4,animate:!1}).run(),u(p)";
+        const MINDMAP_CYTO_TARGET: &str =
+            "p=fWe({container:document.getElementById(\"cy\"),style:[{selector:\"edge\",style:{\"curve-style\":\"bezier\"}}]});";
+        const MINDMAP_CYTO_PATCH: &str =
+            "p=__mdmdview_cytoscape_stub({container:document.getElementById(\"cy\")});";
+        const TIMELINE_BOUNDS_TARGET: &str = "const se=_.node().getBBox();";
+        const TIMELINE_BOUNDS_PATCH: &str = concat!(
+            "const se=_.node().getBBox();",
+            "if(se&&typeof se.width===\"number\"&&typeof v===\"number\"){",
+            "se.width=Math.max(0,se.width-2*v);",
+            "}"
+        );
         let mut out = if js.contains(TARGET) {
             js.replacen(TARGET, PATCH, 1)
         } else {
@@ -1097,13 +1192,38 @@ impl MermaidWorker {
         } else if debug {
             eprintln!("Mermaid patch: D3 text wrap not found");
         }
-        if out.contains(MINDMAP_LAYOUT_TARGET) {
+        let mut mindmap_layout_patched = false;
+        if out.contains(MINDMAP_CYTO_TARGET) {
+            out = out.replacen(MINDMAP_CYTO_TARGET, MINDMAP_CYTO_PATCH, 1);
+            if debug {
+                eprintln!("Mermaid patch: mindmap cytoscape stub applied");
+            }
+        } else if debug {
+            eprintln!("Mermaid patch: mindmap cytoscape stub not found");
+        }
+        if out.contains(MINDMAP_READY_TARGET) {
+            out = out.replacen(MINDMAP_READY_TARGET, MINDMAP_READY_PATCH, 1);
+            mindmap_layout_patched = true;
+            if debug {
+                eprintln!("Mermaid patch: mindmap ready patch applied");
+            }
+        } else if out.contains(MINDMAP_LAYOUT_TARGET) {
             out = out.replacen(MINDMAP_LAYOUT_TARGET, MINDMAP_LAYOUT_PATCH, 1);
+            mindmap_layout_patched = true;
             if debug {
                 eprintln!("Mermaid patch: mindmap layout applied");
             }
-        } else if debug {
+        }
+        if !mindmap_layout_patched && debug {
             eprintln!("Mermaid patch: mindmap layout not found");
+        }
+        if out.contains(TIMELINE_BOUNDS_TARGET) {
+            out = out.replacen(TIMELINE_BOUNDS_TARGET, TIMELINE_BOUNDS_PATCH, 1);
+            if debug {
+                eprintln!("Mermaid patch: timeline bounds applied");
+            }
+        } else if debug {
+            eprintln!("Mermaid patch: timeline bounds not found");
         }
         out
     }
@@ -1176,10 +1296,14 @@ impl MermaidWorker {
         let js = Self::patch_mermaid_js(js);
         let init_result: Result<(), String> = engine.ctx.with(|ctx| {
             let measurer = Arc::clone(&text_measurer);
-            let measure_fn = Function::new(ctx.clone(), move |text: String, font_size: f64| {
-                let (width, height) = measurer.measure_text(&text, font_size as f32);
-                vec![width as f64, height as f64]
-            })
+            let measure_fn = Function::new(
+                ctx.clone(),
+                move |text: String, font_size: f64, font_weight: Option<f64>| {
+                    let weight = font_weight.map(|value| value as f32);
+                    let (width, height) = measurer.measure_text(&text, font_size as f32, weight);
+                    vec![width as f64, height as f64]
+                },
+            )
             .map_err(|err| {
                 format!(
                     "Mermaid text measure init error: {}",
@@ -1383,9 +1507,6 @@ impl MermaidWorker {
                 Self::insert_svg_attr(&new_tag, "height", &value)
             };
         }
-        if Self::find_svg_attr(&new_tag, "overflow").is_none() {
-            new_tag = Self::insert_svg_attr(&new_tag, "overflow", "hidden");
-        }
         if new_tag == tag {
             return svg.to_string();
         }
@@ -1418,6 +1539,42 @@ impl MermaidWorker {
         out.push_str(value);
         out.push_str(&tag[end..]);
         out
+    }
+
+    fn remove_svg_attr(tag: &str, name: &str) -> String {
+        let needle = format!("{name}=\"");
+        let start = match tag.find(&needle) {
+            Some(idx) => idx,
+            None => return tag.to_string(),
+        };
+        let value_start = start + needle.len();
+        let end = match tag[value_start..].find('"') {
+            Some(idx) => value_start + idx + 1,
+            None => return tag.to_string(),
+        };
+        let mut out = String::with_capacity(tag.len());
+        out.push_str(&tag[..start]);
+        let rest = &tag[end..];
+        if out.ends_with(' ') && rest.starts_with(' ') {
+            out.pop();
+        }
+        out.push_str(rest);
+        out
+    }
+
+    fn strip_svg_attr(svg: &str, name: &str) -> Option<String> {
+        let start = svg.find("<svg")?;
+        let end = svg[start..].find('>')? + start;
+        let tag = &svg[start..=end];
+        let new_tag = Self::remove_svg_attr(tag, name);
+        if new_tag == tag {
+            return None;
+        }
+        let mut out = String::with_capacity(svg.len());
+        out.push_str(&svg[..start]);
+        out.push_str(&new_tag);
+        out.push_str(&svg[end + 1..]);
+        Some(out)
     }
 
     fn insert_svg_attr(tag: &str, name: &str, value: &str) -> String {
@@ -1544,8 +1701,81 @@ impl MermaidWorker {
         };
 
         let tree = usvg::Tree::from_data(svg.as_bytes(), &opt).map_err(|e| format!("{}", e))?;
+        let mut tree = tree;
         let sz = tree.size().to_int_size();
         let (mut w, mut h) = (sz.width(), sz.height());
+        let viewbox_dims = Self::find_svg_attr(svg, "viewBox")
+            .and_then(|value| Self::parse_viewbox_dims(&value))
+            .filter(|(vw, vh)| vw.is_finite() && vh.is_finite() && *vw > 0.5 && *vh > 0.5);
+        if let Some((vw, vh)) = viewbox_dims {
+            w = vw.ceil() as u32;
+            h = vh.ceil() as u32;
+        }
+        let mut translate_x = 0.0_f32;
+        let mut translate_y = 0.0_f32;
+
+        let mut bbox = tree.root().abs_stroke_bounding_box();
+        let mut bbox_w = bbox.width();
+        let mut bbox_h = bbox.height();
+        let mut bbox_valid = bbox_w.is_finite()
+            && bbox_h.is_finite()
+            && bbox_w > 0.5
+            && bbox_h > 0.5
+            && bbox.x().is_finite()
+            && bbox.y().is_finite();
+        let mut force_bbox_resize = false;
+
+        let oversize_cap = 6.0_f32;
+        if let Some(raw_svg) = Self::strip_svg_attr(svg, "viewBox") {
+            if let Ok(raw_tree) = usvg::Tree::from_data(raw_svg.as_bytes(), &opt) {
+                let raw_bbox = raw_tree.root().abs_stroke_bounding_box();
+                let raw_w = raw_bbox.width();
+                let raw_h = raw_bbox.height();
+                let raw_valid = raw_w.is_finite()
+                    && raw_h.is_finite()
+                    && raw_w > 0.5
+                    && raw_h > 0.5
+                    && raw_bbox.x().is_finite()
+                    && raw_bbox.y().is_finite();
+                let size_w = w as f32;
+                let size_h = h as f32;
+                let oversize_ok = raw_w <= size_w * oversize_cap && raw_h <= size_h * oversize_cap;
+                let oversized = raw_valid
+                    && oversize_ok
+                    && (size_w == 0.0
+                        || size_h == 0.0
+                        || raw_w > size_w * 1.2
+                        || raw_h > size_h * 1.2);
+                if oversized {
+                    tree = raw_tree;
+                    bbox = raw_bbox;
+                    bbox_w = raw_w;
+                    bbox_h = raw_h;
+                    bbox_valid = raw_valid;
+                    force_bbox_resize = true;
+                }
+            }
+        }
+        if bbox_valid {
+            let w_f = w as f32;
+            let h_f = h as f32;
+            let oversize_ok =
+                bbox_w <= w_f * oversize_cap && bbox_h <= h_f * oversize_cap;
+            let oversize = (force_bbox_resize && oversize_ok)
+                || w == 0
+                || h == 0
+                || (oversize_ok && (bbox_w > w_f * 1.2 || bbox_h > h_f * 1.2));
+            if oversize {
+                let padding = 4.0_f32;
+                let padded_w = (bbox_w + padding * 2.0).max(1.0);
+                let padded_h = (bbox_h + padding * 2.0).max(1.0);
+                w = padded_w.ceil() as u32;
+                h = padded_h.ceil() as u32;
+                translate_x = -bbox.x() + padding;
+                translate_y = -bbox.y() + padding;
+            }
+        }
+
         if w == 0 || h == 0 {
             w = 256;
             h = 256;
@@ -1568,6 +1798,22 @@ impl MermaidWorker {
             target_h = 1;
         }
 
+        if std::env::var("MDMDVIEW_MERMAID_LOG_RASTER").is_ok() {
+            eprintln!(
+                "Mermaid raster: svg={}x{} target={}x{} scale={:.3} bbox_valid={} bbox=({:.2},{:.2},{:.2},{:.2})",
+                w,
+                h,
+                target_w,
+                target_h,
+                scale,
+                bbox_valid,
+                bbox.x(),
+                bbox.y(),
+                bbox_w,
+                bbox_h
+            );
+        }
+
         let max_side = MermaidRenderer::MERMAID_MAX_RENDER_SIDE;
         if target_w > max_side || target_h > max_side {
             let clamp_scale =
@@ -1585,7 +1831,10 @@ impl MermaidWorker {
         }
 
         let mut pmut = pixmap.as_mut();
-        let transform = tiny_skia::Transform::from_scale(scale, scale);
+        let mut transform = tiny_skia::Transform::from_scale(scale, scale);
+        if translate_x != 0.0 || translate_y != 0.0 {
+            transform = transform.pre_translate(translate_x, translate_y);
+        }
         resvg::render(&tree, transform, &mut pmut);
         let data = pixmap.data().to_vec();
         Ok((data, target_w, target_h))
@@ -1612,15 +1861,23 @@ impl MermaidWorker {
 const MERMAID_DOM_SHIM: &str = r#"
 var window = globalThis;
 var __mdmdview_text_cache = {};
-function __mdmdview_measure_text(text, fontSize) {
+window.__mdmdview_bbox_rev = 0;
+function __mdmdview_bump_bbox_rev() {
+  window.__mdmdview_bbox_rev = (window.__mdmdview_bbox_rev || 0) + 1;
+}
+function __mdmdview_measure_text(text, fontSize, fontWeight) {
   var size = fontSize || 16;
   var raw = text ? String(text) : '';
-  var key = size + '|' + raw;
+  if (!raw.length) {
+    return { width: 0, height: 0 };
+  }
+  var weight = (typeof fontWeight === 'number' && !isNaN(fontWeight)) ? fontWeight : null;
+  var key = size + '|' + (weight || 0) + '|' + raw;
   var hit = __mdmdview_text_cache[key];
   if (hit) { return hit; }
   if (typeof __mdmdview_measure_text_native === 'function') {
     try {
-      var native = __mdmdview_measure_text_native(raw, size);
+      var native = __mdmdview_measure_text_native(raw, size, weight);
       if (native && typeof native.width === 'number' && typeof native.height === 'number') {
         __mdmdview_text_cache[key] = native;
         return native;
@@ -1642,25 +1899,314 @@ function __mdmdview_measure_text(text, fontSize) {
     if (lines[i].length > maxLen) { maxLen = lines[i].length; }
   }
   var width = maxLen * size * 0.5;
-  var height = lines.length * size * 0.72;
+  var height = lines.length * size * 1.2;
   var res = { width: width, height: height };
   __mdmdview_text_cache[key] = res;
   return res;
 }
+function __mdmdview_parse_font_size(value, baseSize) {
+  if (value === null || value === undefined) { return baseSize; }
+  var raw = String(value).trim();
+  if (!raw) { return baseSize; }
+  var num = parseFloat(raw);
+  if (isNaN(num)) { return baseSize; }
+  if (raw.indexOf('em') >= 0) {
+    var base = baseSize || 16;
+    return num * base;
+  }
+  if (raw.indexOf('ex') >= 0) {
+    var baseEx = baseSize || 16;
+    return num * baseEx * 0.5;
+  }
+  return num;
+}
+function __mdmdview_parse_font_weight_value(value) {
+  if (value === null || value === undefined) { return null; }
+  var raw = String(value).trim().toLowerCase();
+  if (!raw) { return null; }
+  if (raw === 'normal') { return 400; }
+  if (raw === 'bold' || raw === 'bolder') { return 700; }
+  if (raw === 'lighter') { return 300; }
+  var num = parseFloat(raw);
+  if (isNaN(num)) { return null; }
+  return num;
+}
+function __mdmdview_parse_css_font_sizes(cssText, cache) {
+  if (!cssText || !cache) { return; }
+  var chunks = String(cssText).split('}');
+  for (var i = 0; i < chunks.length; i++) {
+    var rule = chunks[i];
+    var parts = rule.split('{');
+    if (parts.length < 2) { continue; }
+    var selector = parts[0];
+    var body = parts.slice(1).join('{');
+    if (!selector || !body) { continue; }
+    var sizeMatch = body.match(/font-size\s*:\s*([^;]+)/i);
+    if (!sizeMatch) { continue; }
+    var sizeValue = sizeMatch[1];
+    var size = __mdmdview_parse_font_size(sizeValue, 16);
+    if (!size || isNaN(size)) { continue; }
+    var selectors = selector.split(',');
+    for (var s = 0; s < selectors.length; s++) {
+      var sel = selectors[s].trim();
+      if (!sel) { continue; }
+      if (sel.indexOf(':') >= 0) { continue; }
+      var classMatches = sel.match(/\\.([A-Za-z0-9_-]+)/g);
+      if (!classMatches || classMatches.length !== 1) { continue; }
+      var cls = classMatches[0].slice(1);
+      if (!cls) { continue; }
+      if (!cache[cls] || cache[cls] < size) {
+        cache[cls] = size;
+      }
+    }
+  }
+}
+function __mdmdview_parse_css_font_weights(cssText, cache) {
+  if (!cssText || !cache) { return; }
+  var chunks = String(cssText).split('}');
+  for (var i = 0; i < chunks.length; i++) {
+    var rule = chunks[i];
+    var parts = rule.split('{');
+    if (parts.length < 2) { continue; }
+    var selector = parts[0];
+    var body = parts.slice(1).join('{');
+    if (!selector || !body) { continue; }
+    var weightMatch = body.match(/font-weight\s*:\s*([^;]+)/i);
+    if (!weightMatch) { continue; }
+    var weightValue = weightMatch[1];
+    var weight = __mdmdview_parse_font_weight_value(weightValue);
+    if (!weight || isNaN(weight)) { continue; }
+    var selectors = selector.split(',');
+    for (var s = 0; s < selectors.length; s++) {
+      var sel = selectors[s].trim();
+      if (!sel) { continue; }
+      if (sel.indexOf(':') >= 0) { continue; }
+      var classMatches = sel.match(/\\.([A-Za-z0-9_-]+)/g);
+      if (!classMatches || classMatches.length !== 1) { continue; }
+      var cls = classMatches[0].slice(1);
+      if (!cls) { continue; }
+      if (!cache[cls] || cache[cls] < weight) {
+        cache[cls] = weight;
+      }
+    }
+  }
+}
+function __mdmdview_collect_style_texts(node, out) {
+  if (!node || !out) { return; }
+  var name = (node.tagName || '').toLowerCase();
+  if (name === 'style') {
+    var text = __mdmdview_collect_text(node);
+    if (text) { out.push(text); }
+  }
+  if (!node.children) { return; }
+  for (var i = 0; i < node.children.length; i++) {
+    __mdmdview_collect_style_texts(node.children[i], out);
+  }
+}
+function __mdmdview_find_root_node(node) {
+  if (!node) { return null; }
+  var current = node;
+  var last = node;
+  var depth = 0;
+  while (current && depth < 120) {
+    last = current;
+    if (!current.__mdmdview_parent_set) { break; }
+    current = current.parentNode;
+    depth += 1;
+  }
+  return last;
+}
+function __mdmdview_style_cache() {
+  var rev = window.__mdmdview_bbox_rev || 0;
+  if (window.__mdmdview_font_cache && window.__mdmdview_font_cache_rev === rev) {
+    return window.__mdmdview_font_cache;
+  }
+  var cache = {};
+  if (typeof document !== 'undefined' && document && document.getElementsByTagName) {
+    var styles = document.getElementsByTagName('style') || [];
+    for (var i = 0; i < styles.length; i++) {
+      var text = styles[i] ? __mdmdview_collect_text(styles[i]) : '';
+      __mdmdview_parse_css_font_sizes(text, cache);
+    }
+  }
+  window.__mdmdview_font_cache = cache;
+  window.__mdmdview_font_cache_rev = rev;
+  window.__mdmdview_font_cache_root = null;
+  window.__mdmdview_font_cache_root_rev = rev;
+  return cache;
+}
+function __mdmdview_style_cache_for_node(node) {
+  var cache = __mdmdview_style_cache();
+  if (!node) { return cache; }
+  var rev = window.__mdmdview_bbox_rev || 0;
+  var root = __mdmdview_find_root_node(node);
+  if (!root) { return cache; }
+  if (window.__mdmdview_font_cache_root === root && window.__mdmdview_font_cache_root_rev === rev) {
+    return cache;
+  }
+  var texts = [];
+  __mdmdview_collect_style_texts(root, texts);
+  for (var i = 0; i < texts.length; i++) {
+    __mdmdview_parse_css_font_sizes(texts[i], cache);
+  }
+  window.__mdmdview_font_cache_root = root;
+  window.__mdmdview_font_cache_root_rev = rev;
+  return cache;
+}
+function __mdmdview_style_weight_cache() {
+  var rev = window.__mdmdview_bbox_rev || 0;
+  if (window.__mdmdview_font_weight_cache && window.__mdmdview_font_weight_cache_rev === rev) {
+    return window.__mdmdview_font_weight_cache;
+  }
+  var cache = {};
+  if (typeof document !== 'undefined' && document && document.getElementsByTagName) {
+    var styles = document.getElementsByTagName('style') || [];
+    for (var i = 0; i < styles.length; i++) {
+      var text = styles[i] ? __mdmdview_collect_text(styles[i]) : '';
+      __mdmdview_parse_css_font_weights(text, cache);
+    }
+  }
+  window.__mdmdview_font_weight_cache = cache;
+  window.__mdmdview_font_weight_cache_rev = rev;
+  window.__mdmdview_font_weight_cache_root = null;
+  window.__mdmdview_font_weight_cache_root_rev = rev;
+  return cache;
+}
+function __mdmdview_style_weight_cache_for_node(node) {
+  var cache = __mdmdview_style_weight_cache();
+  if (!node) { return cache; }
+  var rev = window.__mdmdview_bbox_rev || 0;
+  var root = __mdmdview_find_root_node(node);
+  if (!root) { return cache; }
+  if (window.__mdmdview_font_weight_cache_root === root && window.__mdmdview_font_weight_cache_root_rev === rev) {
+    return cache;
+  }
+  var texts = [];
+  __mdmdview_collect_style_texts(root, texts);
+  for (var i = 0; i < texts.length; i++) {
+    __mdmdview_parse_css_font_weights(texts[i], cache);
+  }
+  window.__mdmdview_font_weight_cache_root = root;
+  window.__mdmdview_font_weight_cache_root_rev = rev;
+  return cache;
+}
+function __mdmdview_class_font_size(el) {
+  if (!el) { return null; }
+  var cache = __mdmdview_style_cache_for_node(el);
+  if (!cache) { return null; }
+  var list = __mdmdview_get_class_list(el);
+  for (var i = 0; i < list.length; i++) {
+    var size = cache[list[i]];
+    if (size && !isNaN(size)) { return size; }
+  }
+  return null;
+}
+function __mdmdview_class_font_weight(el) {
+  if (!el) { return null; }
+  var cache = __mdmdview_style_weight_cache_for_node(el);
+  if (!cache) { return null; }
+  var list = __mdmdview_get_class_list(el);
+  for (var i = 0; i < list.length; i++) {
+    var weight = cache[list[i]];
+    if (weight && !isNaN(weight)) { return weight; }
+  }
+  return null;
+}
 function __mdmdview_get_font_size(el) {
   var size = 16;
   if (el && el.style && el.style.fontSize) {
-    var s = parseFloat(el.style.fontSize);
-    if (!isNaN(s)) { size = s; }
+    size = __mdmdview_parse_font_size(el.style.fontSize, size);
+    if (!isNaN(size)) { return size; }
+  }
+  if (el && el.style && el.style['font-size']) {
+    size = __mdmdview_parse_font_size(el.style['font-size'], size);
+    if (!isNaN(size)) { return size; }
   }
   if (el && el.getAttribute) {
     var attr = el.getAttribute('font-size');
     if (attr) {
-      var a = parseFloat(attr);
+      var a = __mdmdview_parse_font_size(attr, size);
       if (!isNaN(a)) { size = a; }
     }
   }
+  var classSize = __mdmdview_class_font_size(el);
+  if (classSize && !isNaN(classSize)) { return classSize; }
+  var classList = __mdmdview_get_class_list(el);
+  for (var c = 0; c < classList.length; c++) {
+    var cls = classList[c];
+    if (cls === 'commit-label' || cls === 'commit-label-bkg' || cls === 'tag-label' || cls === 'tag-label-bkg') {
+      return 10;
+    }
+    if (cls === 'gitTitleText') {
+      return 18;
+    }
+  }
+  var ancestor = el;
+  var steps = 0;
+  while (ancestor && steps < 6) {
+    if (__mdmdview_has_class(ancestor, 'commit-labels') || __mdmdview_has_class(ancestor, 'tag-labels')) {
+      return 10;
+    }
+    ancestor = ancestor.parentNode;
+    steps += 1;
+  }
+  var current = el;
+  var depth = 0;
+  while (current && depth < 4) {
+    current = current.parentNode;
+    if (!current) { break; }
+    var parentSize = __mdmdview_class_font_size(current);
+    if (parentSize && !isNaN(parentSize)) { return parentSize; }
+    depth += 1;
+  }
+  var tag = (el && el.tagName) ? String(el.tagName).toLowerCase() : '';
+  if (tag === 'text' || tag === 'tspan') {
+    return size;
+  }
   return size;
+}
+function __mdmdview_get_font_weight_raw(el) {
+  if (el && el.style) {
+    if (el.style.fontWeight) {
+      var sw = __mdmdview_parse_font_weight_value(el.style.fontWeight);
+      if (sw && !isNaN(sw)) { return sw; }
+    }
+    if (el.style['font-weight']) {
+      var sw2 = __mdmdview_parse_font_weight_value(el.style['font-weight']);
+      if (sw2 && !isNaN(sw2)) { return sw2; }
+    }
+  }
+  if (el && el.getAttribute) {
+    var attr = el.getAttribute('font-weight');
+    if (attr) {
+      var aw = __mdmdview_parse_font_weight_value(attr);
+      if (aw && !isNaN(aw)) { return aw; }
+    }
+  }
+  var classWeight = __mdmdview_class_font_weight(el);
+  if (classWeight && !isNaN(classWeight)) { return classWeight; }
+  var classList = __mdmdview_get_class_list(el);
+  for (var i = 0; i < classList.length; i++) {
+    var cls = classList[i];
+    if (cls === 'classTitle' || cls === 'classTitleText' || cls === 'title') {
+      return 700;
+    }
+  }
+  return null;
+}
+function __mdmdview_get_font_weight(el) {
+  var direct = __mdmdview_get_font_weight_raw(el);
+  if (direct && !isNaN(direct)) { return direct; }
+  var current = el;
+  var depth = 0;
+  while (current && depth < 4) {
+    current = current.parentNode;
+    if (!current) { break; }
+    var parentWeight = __mdmdview_get_font_weight_raw(current);
+    if (parentWeight && !isNaN(parentWeight)) { return parentWeight; }
+    depth += 1;
+  }
+  return 400;
 }
 function __mdmdview_parse_num(value) {
   var num = parseFloat(value);
@@ -1674,6 +2220,9 @@ function __mdmdview_parse_length(value, fontSize) {
   if (isNaN(num)) { return 0; }
   if (raw.indexOf('em') >= 0) {
     return num * (fontSize || 16);
+  }
+  if (raw.indexOf('ex') >= 0) {
+    return num * (fontSize || 16) * 0.5;
   }
   return num;
 }
@@ -1727,9 +2276,10 @@ function __mdmdview_path_point_at_length(el, length) {
 }
 function __mdmdview_text_metrics(el) {
   var size = __mdmdview_get_font_size(el);
+  var weight = __mdmdview_get_font_weight(el);
   if (!el || !el.children || !el.children.length) {
     var raw = el ? __mdmdview_collect_text(el) : '';
-    return __mdmdview_measure_text(raw, size);
+    return __mdmdview_measure_text(raw, size, weight);
   }
   var max_w = 0;
   var max_h = 0;
@@ -1739,14 +2289,16 @@ function __mdmdview_text_metrics(el) {
     var tag = (child.tagName || '').toLowerCase();
     if (tag !== 'tspan') { continue; }
     var text = __mdmdview_collect_text(child);
-    var m = __mdmdview_measure_text(text, size);
+    if (!text || !String(text).trim()) { continue; }
+    var child_weight = __mdmdview_get_font_weight(child);
+    var m = __mdmdview_measure_text(text, size, child_weight);
     if (m.width > max_w) { max_w = m.width; }
     if (m.height > max_h) { max_h = m.height; }
     lines += 1;
   }
   if (!lines) {
     var fallback = __mdmdview_collect_text(el);
-    return __mdmdview_measure_text(fallback, size);
+    return __mdmdview_measure_text(fallback, size, weight);
   }
   var line_height = max_h > 0 ? max_h : size * 1.2;
   return { width: max_w, height: lines * line_height };
@@ -1837,8 +2389,39 @@ function __mdmdview_apply_transform(el, bbox) {
   }
   return current;
 }
+function __mdmdview_children_bounds(el) {
+  if (!el || !el.children || !el.children.length) { return null; }
+  var min_x = Infinity;
+  var min_y = Infinity;
+  var max_x = -Infinity;
+  var max_y = -Infinity;
+  for (var i = 0; i < el.children.length; i++) {
+    var child_box = __mdmdview_bbox(el.children[i]);
+    if (!child_box) { continue; }
+    if (!isFinite(child_box.width) || !isFinite(child_box.height)) { continue; }
+    if (child_box.width <= 0 && child_box.height <= 0) { continue; }
+    if (child_box.x < min_x) { min_x = child_box.x; }
+    if (child_box.y < min_y) { min_y = child_box.y; }
+    if (child_box.x + child_box.width > max_x) { max_x = child_box.x + child_box.width; }
+    if (child_box.y + child_box.height > max_y) { max_y = child_box.y + child_box.height; }
+  }
+  if (isFinite(min_x) && isFinite(min_y) && isFinite(max_x) && isFinite(max_y)) {
+    return { x: min_x, y: min_y, width: max_x - min_x, height: max_y - min_y };
+  }
+  return null;
+}
+function __mdmdview_cache_bbox(el, box) {
+  if (el && box) {
+    el.__mdmdview_bbox_cache = box;
+    el.__mdmdview_bbox_rev = window.__mdmdview_bbox_rev || 0;
+  }
+  return box;
+}
 function __mdmdview_bbox(el) {
   if (!el) { return { x: 0, y: 0, width: 0, height: 0 }; }
+  if (el.__mdmdview_bbox_cache && el.__mdmdview_bbox_rev === (window.__mdmdview_bbox_rev || 0)) {
+    return el.__mdmdview_bbox_cache;
+  }
   var tag = (el.tagName || '').toLowerCase();
   if (
     tag === 'style'
@@ -1860,8 +2443,20 @@ function __mdmdview_bbox(el) {
   if (tag === '#text') {
     var text = el.textContent || '';
     var size = __mdmdview_get_font_size(el);
-    var m = __mdmdview_measure_text(text, size);
-    return __mdmdview_apply_transform(el, { x: 0, y: 0, width: m.width, height: m.height });
+    var weight = __mdmdview_get_font_weight(el);
+    var m = __mdmdview_measure_text(text, size, weight);
+    return __mdmdview_cache_bbox(
+      el,
+      __mdmdview_apply_transform(el, { x: 0, y: 0, width: m.width, height: m.height })
+    );
+  }
+  if (tag === 'svg') {
+    if (el.children && el.children.length) {
+      var svg_bounds = __mdmdview_children_bounds(el);
+      if (svg_bounds) {
+        return __mdmdview_cache_bbox(el, __mdmdview_apply_transform(el, svg_bounds));
+      }
+    }
   }
   if (tag === 'text' || tag === 'tspan') {
     var metrics = __mdmdview_text_metrics(el);
@@ -1895,32 +2490,44 @@ function __mdmdview_bbox(el) {
     } else if (baseline === 'hanging') {
       y = ty;
     }
-    return __mdmdview_apply_transform(el, {
-      x: tx,
-      y: y,
-      width: metrics.width,
-      height: metrics.height
-    });
+    return __mdmdview_cache_bbox(
+      el,
+      __mdmdview_apply_transform(el, {
+        x: tx,
+        y: y,
+        width: metrics.width,
+        height: metrics.height
+      })
+    );
   }
   if (tag === 'rect') {
     var rx = __mdmdview_parse_num(el.getAttribute('x'));
     var ry = __mdmdview_parse_num(el.getAttribute('y'));
     var rw = __mdmdview_parse_num(el.getAttribute('width'));
     var rh = __mdmdview_parse_num(el.getAttribute('height'));
-    return __mdmdview_apply_transform(el, { x: rx, y: ry, width: rw, height: rh });
+    return __mdmdview_cache_bbox(
+      el,
+      __mdmdview_apply_transform(el, { x: rx, y: ry, width: rw, height: rh })
+    );
   }
   if (tag === 'circle') {
     var cx = __mdmdview_parse_num(el.getAttribute('cx'));
     var cy = __mdmdview_parse_num(el.getAttribute('cy'));
     var r = __mdmdview_parse_num(el.getAttribute('r'));
-    return __mdmdview_apply_transform(el, { x: cx - r, y: cy - r, width: r * 2, height: r * 2 });
+    return __mdmdview_cache_bbox(
+      el,
+      __mdmdview_apply_transform(el, { x: cx - r, y: cy - r, width: r * 2, height: r * 2 })
+    );
   }
   if (tag === 'ellipse') {
     var ecx = __mdmdview_parse_num(el.getAttribute('cx'));
     var ecy = __mdmdview_parse_num(el.getAttribute('cy'));
     var erx = __mdmdview_parse_num(el.getAttribute('rx'));
     var ery = __mdmdview_parse_num(el.getAttribute('ry'));
-    return __mdmdview_apply_transform(el, { x: ecx - erx, y: ecy - ery, width: erx * 2, height: ery * 2 });
+    return __mdmdview_cache_bbox(
+      el,
+      __mdmdview_apply_transform(el, { x: ecx - erx, y: ecy - ery, width: erx * 2, height: ery * 2 })
+    );
   }
   if (tag === 'line') {
     var x1 = __mdmdview_parse_num(el.getAttribute('x1'));
@@ -1931,7 +2538,10 @@ function __mdmdview_bbox(el) {
     var min_y = Math.min(y1, y2);
     var max_x = Math.max(x1, x2);
     var max_y = Math.max(y1, y2);
-    return __mdmdview_apply_transform(el, { x: min_x, y: min_y, width: max_x - min_x, height: max_y - min_y });
+    return __mdmdview_cache_bbox(
+      el,
+      __mdmdview_apply_transform(el, { x: min_x, y: min_y, width: max_x - min_x, height: max_y - min_y })
+    );
   }
   if (tag === 'polygon' || tag === 'polyline') {
     var points = el.getAttribute('points');
@@ -1951,12 +2561,15 @@ function __mdmdview_bbox(el) {
           if (py > max_py) { max_py = py; }
         }
         if (isFinite(min_px) && isFinite(min_py) && isFinite(max_px) && isFinite(max_py)) {
-          return __mdmdview_apply_transform(el, {
-            x: min_px,
-            y: min_py,
-            width: max_px - min_px,
-            height: max_py - min_py
-          });
+          return __mdmdview_cache_bbox(
+            el,
+            __mdmdview_apply_transform(el, {
+              x: min_px,
+              y: min_py,
+              width: max_px - min_px,
+              height: max_py - min_py
+            })
+          );
         }
       }
     }
@@ -1979,7 +2592,10 @@ function __mdmdview_bbox(el) {
           if (py > max_py) { max_py = py; }
         }
         if (isFinite(min_px) && isFinite(min_py) && isFinite(max_px) && isFinite(max_py)) {
-          return __mdmdview_apply_transform(el, { x: min_px, y: min_py, width: max_px - min_px, height: max_py - min_py });
+          return __mdmdview_cache_bbox(
+            el,
+            __mdmdview_apply_transform(el, { x: min_px, y: min_py, width: max_px - min_px, height: max_py - min_py })
+          );
         }
       }
     }
@@ -2015,29 +2631,25 @@ function __mdmdview_bbox(el) {
   if (bw || bh) {
     var bx = __mdmdview_parse_num(el.getAttribute ? el.getAttribute('x') : 0);
     var by = __mdmdview_parse_num(el.getAttribute ? el.getAttribute('y') : 0);
-    return __mdmdview_apply_transform(el, { x: bx, y: by, width: bw, height: bh });
+    return __mdmdview_cache_bbox(
+      el,
+      __mdmdview_apply_transform(el, { x: bx, y: by, width: bw, height: bh })
+    );
   }
   if (el.children && el.children.length) {
-    var min_x = Infinity;
-    var min_y = Infinity;
-    var max_x = -Infinity;
-    var max_y = -Infinity;
-    for (var i = 0; i < el.children.length; i++) {
-      var child_box = __mdmdview_bbox(el.children[i]);
-      if (!child_box) { continue; }
-      if (child_box.x < min_x) { min_x = child_box.x; }
-      if (child_box.y < min_y) { min_y = child_box.y; }
-      if (child_box.x + child_box.width > max_x) { max_x = child_box.x + child_box.width; }
-      if (child_box.y + child_box.height > max_y) { max_y = child_box.y + child_box.height; }
-    }
-    if (isFinite(min_x) && isFinite(min_y) && isFinite(max_x) && isFinite(max_y)) {
-      return __mdmdview_apply_transform(el, { x: min_x, y: min_y, width: max_x - min_x, height: max_y - min_y });
+    var child_bounds = __mdmdview_children_bounds(el);
+    if (child_bounds) {
+      return __mdmdview_cache_bbox(el, __mdmdview_apply_transform(el, child_bounds));
     }
   }
   var fallback_text = el.textContent || '';
   var fallback_size = __mdmdview_get_font_size(el);
-  var fallback = __mdmdview_measure_text(fallback_text, fallback_size);
-  return __mdmdview_apply_transform(el, { x: 0, y: 0, width: fallback.width, height: fallback.height });
+  var fallback_weight = __mdmdview_get_font_weight(el);
+  var fallback = __mdmdview_measure_text(fallback_text, fallback_size, fallback_weight);
+  return __mdmdview_cache_bbox(
+    el,
+    __mdmdview_apply_transform(el, { x: 0, y: 0, width: fallback.width, height: fallback.height })
+  );
 }
 function __mdmdview_escape_text(text) {
   return String(text)
@@ -2078,6 +2690,73 @@ function __mdmdview_style_text(style) {
   }
   return parts.join(';');
 }
+function __mdmdview_is_shape_tag(tag) {
+  var t = String(tag || '').toLowerCase();
+  return t === 'rect'
+    || t === 'path'
+    || t === 'polygon'
+    || t === 'circle'
+    || t === 'ellipse'
+    || t === 'line'
+    || t === 'image';
+}
+function __mdmdview_group_has_text(node) {
+  if (!node || !node.children || !node.children.length) { return false; }
+  for (var i = 0; i < node.children.length; i++) {
+    var child = node.children[i];
+    if (!child) { continue; }
+    var tag = String(child.tagName || '').toLowerCase();
+    if (tag === 'text' || tag === 'foreignobject') { return true; }
+    if (child.children && child.children.length && __mdmdview_group_has_text(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+function __mdmdview_group_has_shape(node) {
+  if (!node || !node.children || !node.children.length) { return false; }
+  for (var i = 0; i < node.children.length; i++) {
+    var child = node.children[i];
+    if (!child) { continue; }
+    if (__mdmdview_is_shape_tag(child.tagName)) { return true; }
+    if (child.children && child.children.length && __mdmdview_group_has_shape(child)) {
+      return true;
+    }
+  }
+  return false;
+}
+function __mdmdview_is_labelish(node) {
+  if (!node || !node.tagName) { return false; }
+  var tag = String(node.tagName || '').toLowerCase();
+  if (tag === 'text' || tag === 'foreignobject') { return true; }
+  if (tag === 'g') {
+    if (__mdmdview_has_class(node, 'label')) { return true; }
+    return __mdmdview_group_has_text(node);
+  }
+  return false;
+}
+function __mdmdview_order_children(node) {
+  if (!node || !node.children || !node.children.length) {
+    return node && node.children ? node.children : [];
+  }
+  var tag = String(node.tagName || '').toLowerCase();
+  if (tag !== 'g') { return node.children; }
+  if (!__mdmdview_group_has_shape(node)) { return node.children; }
+  var has_label = false;
+  for (var i = 0; i < node.children.length; i++) {
+    if (__mdmdview_is_labelish(node.children[i])) { has_label = true; break; }
+  }
+  if (!has_label) { return node.children; }
+  var before = [];
+  var after = [];
+  for (var j = 0; j < node.children.length; j++) {
+    var child = node.children[j];
+    if (__mdmdview_is_labelish(child)) { after.push(child); }
+    else { before.push(child); }
+  }
+  if (!before.length || !after.length) { return node.children; }
+  return before.concat(after);
+}
 function __mdmdview_serialize_attrs(node) {
   var out = '';
   if (!node || !node.attributes) { return out; }
@@ -2110,8 +2789,9 @@ function __mdmdview_serialize(node) {
     if (lower === 'style' || lower === 'script') {
       content = __mdmdview_collect_text(node);
     } else {
-      for (var i = 0; i < node.children.length; i++) {
-        content += __mdmdview_serialize(node.children[i]);
+      var ordered = __mdmdview_order_children(node);
+      for (var i = 0; i < ordered.length; i++) {
+        content += __mdmdview_serialize(ordered[i]);
       }
     }
   } else if (node.textContent) {
@@ -2126,8 +2806,9 @@ function __mdmdview_serialize(node) {
 function __mdmdview_serialize_children(node) {
   if (!node || !node.children) { return ''; }
   var content = '';
-  for (var i = 0; i < node.children.length; i++) {
-    content += __mdmdview_serialize(node.children[i]);
+  var ordered = __mdmdview_order_children(node);
+  for (var i = 0; i < ordered.length; i++) {
+    content += __mdmdview_serialize(ordered[i]);
   }
   return content;
 }
@@ -2161,6 +2842,12 @@ function __mdmdview_parse_font_px(font) {
   }
   return 16;
 }
+function __mdmdview_parse_font_weight(font) {
+  if (!font) { return null; }
+  var raw = String(font).toLowerCase();
+  if (raw.indexOf('bold') >= 0) { return 700; }
+  return null;
+}
 function __mdmdview_make_canvas_context(canvas) {
   var ctx = {
     canvas: canvas,
@@ -2191,7 +2878,8 @@ function __mdmdview_make_canvas_context(canvas) {
     setLineDash: function() {},
     measureText: function(text) {
       var size = __mdmdview_parse_font_px(ctx.font);
-      var measured = __mdmdview_measure_text(text || '', size);
+      var weight = __mdmdview_parse_font_weight(ctx.font);
+      var measured = __mdmdview_measure_text(text || '', size, weight);
       return { width: measured.width || 0 };
     },
     fillText: function() {},
@@ -2201,6 +2889,340 @@ function __mdmdview_make_canvas_context(canvas) {
     createPattern: function() { return null; }
   };
   return ctx;
+}
+function __mdmdview_mindmap_get_size(node) {
+  var data = node && typeof node.data === 'function' ? node.data() : null;
+  var w = data && data.width !== undefined ? Number(data.width) : 80;
+  var h = data && data.height !== undefined ? Number(data.height) : 40;
+  if (!isFinite(w) || w <= 0) { w = 80; }
+  if (!isFinite(h) || h <= 0) { h = 40; }
+  return { w: w, h: h };
+}
+function __mdmdview_mindmap_collect(nodes, edges) {
+  var node_map = {};
+  var parents = {};
+  var children = {};
+  var root = null;
+  var root_id = null;
+  for (var i = 0; i < nodes.length; i++) {
+    var node = nodes[i];
+    if (!node || typeof node.data !== 'function') { continue; }
+    var data = node.data();
+    if (!data) { continue; }
+    var id = data.id !== undefined ? String(data.id) : null;
+    if (id === null) { continue; }
+    node_map[id] = node;
+  }
+  for (var j = 0; j < edges.length; j++) {
+    var edge = edges[j];
+    if (!edge || typeof edge.data !== 'function') { continue; }
+    var ed = edge.data();
+    if (!ed) { continue; }
+    var source = ed.source !== undefined ? String(ed.source) : null;
+    var target = ed.target !== undefined ? String(ed.target) : null;
+    if (!source || !target) { continue; }
+    if (!children[source]) { children[source] = []; }
+    children[source].push(target);
+    parents[target] = source;
+  }
+  for (var key in node_map) {
+    if (!Object.prototype.hasOwnProperty.call(node_map, key)) { continue; }
+    if (!Object.prototype.hasOwnProperty.call(parents, key)) {
+      root = node_map[key];
+      root_id = key;
+      break;
+    }
+  }
+  if (!root && nodes.length) {
+    root = nodes[0];
+    if (root && typeof root.data === 'function') {
+      var rd = root.data();
+      if (rd && rd.id !== undefined) { root_id = String(rd.id); }
+    }
+  }
+  return { node_map: node_map, children: children, parents: parents, root: root, root_id: root_id };
+}
+function __mdmdview_mindmap_sorted_children(node_id, tree) {
+  var kids = tree.children[node_id] || [];
+  return kids.slice();
+}
+function __mdmdview_mindmap_assign_sides(tree) {
+  var sides = {};
+  var root_id = tree.root_id;
+  if (!root_id) { return sides; }
+  sides[root_id] = 0;
+  function assign(node_id) {
+    var kids = __mdmdview_mindmap_sorted_children(node_id, tree);
+    for (var i = 0; i < kids.length; i++) {
+      var child_id = kids[i];
+      var child_node = tree.node_map[child_id];
+      var side = sides[node_id];
+      if (node_id === root_id) {
+        var data = child_node && typeof child_node.data === 'function' ? child_node.data() : null;
+        var section = data && data.section !== undefined ? Number(data.section) : i;
+        if (!isFinite(section)) { section = i; }
+        side = (section % 2 === 0) ? -1 : 1;
+      }
+      sides[child_id] = side;
+      assign(child_id);
+    }
+  }
+  assign(root_id);
+  return sides;
+}
+function __mdmdview_mindmap_subtree_height(node_id, tree, sizes, gap, heights) {
+  var kids = __mdmdview_mindmap_sorted_children(node_id, tree);
+  if (!kids.length) {
+    heights[node_id] = sizes[node_id].h;
+    return heights[node_id];
+  }
+  var total = 0;
+  for (var i = 0; i < kids.length; i++) {
+    total += __mdmdview_mindmap_subtree_height(kids[i], tree, sizes, gap, heights);
+  }
+  total += gap * Math.max(0, kids.length - 1);
+  var base = sizes[node_id].h;
+  heights[node_id] = total > base ? total : base;
+  return heights[node_id];
+}
+function __mdmdview_mindmap_layout(nodes, edges) {
+  var tree = __mdmdview_mindmap_collect(nodes, edges);
+  if (!tree.root || !tree.root_id) { return; }
+  var sizes = {};
+  for (var key in tree.node_map) {
+    if (!Object.prototype.hasOwnProperty.call(tree.node_map, key)) { continue; }
+    sizes[key] = __mdmdview_mindmap_get_size(tree.node_map[key]);
+  }
+  var sides = __mdmdview_mindmap_assign_sides(tree);
+  var pad = 10;
+  var root_data = tree.root && typeof tree.root.data === 'function' ? tree.root.data() : null;
+  if (root_data && root_data.padding !== undefined) {
+    var p = Number(root_data.padding);
+    if (isFinite(p) && p > 0) { pad = p; }
+  }
+  var gap_x = Math.max(24, pad * 2.2);
+  var positions = {};
+  positions[tree.root_id] = { x: 0, y: 0 };
+  var angles = {};
+  angles[tree.root_id] = 0;
+  var deg = Math.PI / 180;
+  var left_start = 245 * deg;
+  var left_end = 122 * deg;
+  var right_start = 345 * deg;
+  var right_end = 353 * deg;
+  function assign_even(children, start, end) {
+    if (!children.length) { return; }
+    if (children.length === 1) {
+      angles[children[0]] = (start + end) / 2;
+      return;
+    }
+    var span = end - start;
+    var step = span / (children.length - 1);
+    for (var i = 0; i < children.length; i++) {
+      angles[children[i]] = start + step * i;
+    }
+  }
+  var root_kids = __mdmdview_mindmap_sorted_children(tree.root_id, tree);
+  var left = [];
+  var right = [];
+  for (var rk = 0; rk < root_kids.length; rk++) {
+    var kid = root_kids[rk];
+    var side = sides[kid] || 1;
+    if (side < 0) { left.push(kid); } else { right.push(kid); }
+  }
+  assign_even(left, left_start, left_end);
+  assign_even(right, right_start, right_end);
+  function spread_for_depth(depth, parent_angle) {
+    var base = 38 * deg;
+    var cos = Math.cos(parent_angle || 0);
+    var bias = cos < 0 ? 1.4 : 1.0;
+    var depth_factor = 1 + Math.max(0, depth - 1) * 0.2;
+    return (base * bias) / depth_factor;
+  }
+  function assign_child_angles(node_id, depth) {
+    var kids = __mdmdview_mindmap_sorted_children(node_id, tree);
+    if (!kids.length) { return; }
+    var parent_angle = angles[node_id] || 0;
+    if (kids.length === 1) {
+      var sin = Math.sin(parent_angle);
+      var cos = Math.cos(parent_angle);
+      var offset = 0;
+      if (cos < -0.1 && sin < -0.1) { offset = 20 * deg; }
+      angles[kids[0]] = parent_angle + offset;
+      assign_child_angles(kids[0], depth + 1);
+      return;
+    }
+    var spread = spread_for_depth(depth, parent_angle);
+    var upper = 1.3;
+    var lower = 0.9;
+    var start = parent_angle - spread * upper;
+    var end = parent_angle + spread * lower;
+    assign_even(kids, start, end);
+    for (var i = 0; i < kids.length; i++) {
+      assign_child_angles(kids[i], depth + 1);
+    }
+  }
+  for (var a = 0; a < root_kids.length; a++) {
+    assign_child_angles(root_kids[a], 1);
+  }
+  function place_node(node_id, depth) {
+    var kids = __mdmdview_mindmap_sorted_children(node_id, tree);
+    if (!kids.length) { return; }
+    var parent_pos = positions[node_id];
+    var parent_size = sizes[node_id];
+    var parent_radius = Math.max(parent_size.w, parent_size.h) / 2;
+    var parent_angle = angles[node_id] || 0;
+    for (var i = 0; i < kids.length; i++) {
+      var child = kids[i];
+      var angle = angles[child];
+      if (angle === undefined) { angle = angles[node_id] || 0; }
+      var child_size = sizes[child];
+      var child_radius = Math.max(child_size.w, child_size.h) / 2;
+      var dist = parent_radius + child_radius + gap_x;
+      if (depth > 0) {
+        dist *= 1.15;
+      }
+      var factor = 1;
+      if (depth === 0) {
+        var cos = Math.cos(angle);
+        var sin = Math.sin(angle);
+        factor *= 1.1 * (1 + 0.2 * cos + 0.1 * sin);
+      } else {
+        var diff = angle - parent_angle;
+        while (diff > Math.PI) { diff -= Math.PI * 2; }
+        while (diff < -Math.PI) { diff += Math.PI * 2; }
+        var norm = diff / (Math.PI / 6);
+        if (norm > 1) { norm = 1; }
+        if (norm < -1) { norm = -1; }
+        factor *= 1 + 0.12 * norm;
+        factor *= 0.98 + depth * 0.04;
+      }
+      if (depth > 0) {
+        var sin = Math.sin(angle);
+        var cos = Math.cos(angle);
+        if (sin >= 0) {
+          factor *= 1 + 0.15 * sin;
+        } else if (cos > 0) {
+          factor *= 1 + 0.05 * sin;
+        } else {
+          factor *= 1 + 0.25 * sin;
+        }
+        if (sin < -0.2 && cos < 0) {
+          factor *= 0.9;
+        }
+      }
+      if (kids.length === 1) {
+        factor *= 0.95;
+      }
+      dist = dist * factor;
+      var cx = parent_pos.x + Math.cos(angle) * dist;
+      var cy = parent_pos.y + Math.sin(angle) * dist;
+      positions[child] = { x: cx, y: cy };
+      place_node(child, depth + 1);
+    }
+  }
+  place_node(tree.root_id, 0);
+  var min_x = Infinity;
+  var min_y = Infinity;
+  for (var id in positions) {
+    if (!Object.prototype.hasOwnProperty.call(positions, id)) { continue; }
+    var pos = positions[id];
+    var size = sizes[id];
+    var lx = pos.x - size.w / 2;
+    var ly = pos.y - size.h / 2;
+    if (lx < min_x) { min_x = lx; }
+    if (ly < min_y) { min_y = ly; }
+  }
+  if (!isFinite(min_x)) { min_x = 0; }
+  if (!isFinite(min_y)) { min_y = 0; }
+  var dx = pad - min_x;
+  var dy = pad - min_y;
+  for (var nid in positions) {
+    if (!Object.prototype.hasOwnProperty.call(positions, nid)) { continue; }
+    positions[nid].x += dx;
+    positions[nid].y += dy;
+  }
+  for (var n = 0; n < nodes.length; n++) {
+    var node = nodes[n];
+    if (!node || typeof node.data !== 'function') { continue; }
+    var data = node.data();
+    var id = data && data.id !== undefined ? String(data.id) : null;
+    if (!id || !positions[id]) { continue; }
+    node._position = { x: positions[id].x, y: positions[id].y };
+    node.position = function() { return this._position; };
+    data.x = positions[id].x;
+    data.y = positions[id].y;
+  }
+  for (var e = 0; e < edges.length; e++) {
+    var edge = edges[e];
+    if (!edge || typeof edge.data !== 'function') { continue; }
+    var ed = edge.data();
+    var source = ed && ed.source !== undefined ? String(ed.source) : null;
+    var target = ed && ed.target !== undefined ? String(ed.target) : null;
+    if (!source || !target) { continue; }
+    var s_pos = positions[source];
+    var t_pos = positions[target];
+    if (!s_pos || !t_pos) { continue; }
+    var s_size = sizes[source];
+    var t_size = sizes[target];
+    var s_radius = Math.max(s_size.w, s_size.h) / 2;
+    var t_radius = Math.max(t_size.w, t_size.h) / 2;
+    var dx = t_pos.x - s_pos.x;
+    var dy = t_pos.y - s_pos.y;
+    var len = Math.sqrt(dx * dx + dy * dy);
+    if (!isFinite(len) || len <= 0.001) { len = 1; }
+    var ux = dx / len;
+    var uy = dy / len;
+    var sx = s_pos.x + ux * s_radius;
+    var sy = s_pos.y + uy * s_radius;
+    var ex = t_pos.x - ux * t_radius;
+    var ey = t_pos.y - uy * t_radius;
+    var mx = (sx + ex) / 2;
+    var my = (sy + ey) / 2;
+    edge[0] = edge[0] || {};
+    edge[0]._private = {
+      bodyBounds: true,
+      rscratch: {
+        startX: sx,
+        startY: sy,
+        midX: mx,
+        midY: my,
+        endX: ex,
+        endY: ey
+      }
+    };
+  }
+}
+function __mdmdview_cytoscape_stub(options) {
+  var nodes = [];
+  var edges = [];
+  function add(entry) {
+    if (!entry || !entry.group) { return; }
+    if (entry.group === 'nodes') {
+      var node = {
+        _data: entry.data || {},
+        _position: entry.position || { x: 0, y: 0 },
+        data: function() { return this._data; },
+        position: function() { return this._position; }
+      };
+      nodes.push(node);
+    } else if (entry.group === 'edges') {
+      var edge = {
+        _data: entry.data || {},
+        data: function() { return this._data; }
+      };
+      edge[0] = { _private: { bodyBounds: false, rscratch: {} } };
+      edges.push(edge);
+    }
+  }
+  return {
+    add: add,
+    nodes: function() { return nodes; },
+    edges: function() { return edges; },
+    layout: function() {
+      return { run: function() { __mdmdview_mindmap_layout(nodes, edges); return this; } };
+    }
+  };
 }
 function __mdmdview_make_element(tag, ownerDoc, ns) {
   var doc = ownerDoc;
@@ -2220,11 +3242,13 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
       var v = String(value);
       this.attributes[key] = v;
       if (key === 'id') { this.id = v; }
+      __mdmdview_bump_bbox_rev();
     },
     setAttributeNS: function(ns, key, value) {
       var v = String(value);
       this.attributes[key] = v;
       if (key === 'id') { this.id = v; }
+      __mdmdview_bump_bbox_rev();
     },
     attr: function(key, value) {
       if (value === undefined) { return this.getAttribute(key); }
@@ -2241,6 +3265,7 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
     text: function(value) {
       if (value === undefined) { return this.textContent || ''; }
       this.textContent = value === null ? '' : String(value);
+      __mdmdview_bump_bbox_rev();
       return this;
     },
     append: function(tag) {
@@ -2248,8 +3273,8 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
       this.appendChild(child);
       return child;
     },
-    removeAttribute: function(key) { delete this.attributes[key]; },
-    removeAttributeNS: function(ns, key) { delete this.attributes[key]; },
+    removeAttribute: function(key) { delete this.attributes[key]; __mdmdview_bump_bbox_rev(); },
+    removeAttributeNS: function(ns, key) { delete this.attributes[key]; __mdmdview_bump_bbox_rev(); },
     appendChild: function(child) {
       __mdmdview_detach(child);
       this.children.push(child);
@@ -2259,6 +3284,7 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
         child.parentNode = this;
         if (!child.ownerDocument && this.ownerDocument) { child.ownerDocument = this.ownerDocument; }
       }
+      __mdmdview_bump_bbox_rev();
       return child;
     },
     removeChild: function(child) {
@@ -2269,6 +3295,7 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
       }
       if (child && typeof child === 'object') { child.parentNode = null; }
       this.firstChild = this.children[0] || null;
+      __mdmdview_bump_bbox_rev();
       return child;
     },
     hasChildNodes: function() { return this.children.length > 0; },
@@ -2283,6 +3310,7 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
         child.parentNode = this;
         if (!child.ownerDocument && this.ownerDocument) { child.ownerDocument = this.ownerDocument; }
       }
+      __mdmdview_bump_bbox_rev();
       return child;
     },
     remove: function() { return null; },
@@ -2396,6 +3424,7 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
       this.childNodes = this.children;
       this.firstChild = null;
       this.textContent = value ? String(value) : '';
+      __mdmdview_bump_bbox_rev();
     },
     configurable: true
   });
@@ -2806,6 +3835,7 @@ function __mdmdview_reset_dom() {
   window.__mdmdview_timer_queue = [];
   window.__mdmdview_timer_map = {};
   window.__mdmdview_now_base = 0;
+  window.__mdmdview_bbox_rev = 0;
 }
 if (!Object.hasOwn) {
   Object.hasOwn = function(obj, prop) {
@@ -2934,7 +3964,7 @@ window.__mdmdview_timer_map = {};
 window.__mdmdview_next_timer_id = 1;
 window.setTimeout = function(fn, ms) {
   var id = window.__mdmdview_next_timer_id++;
-  window.__mdmdview_timer_map[id] = { fn: fn };
+  window.__mdmdview_timer_map[id] = { fn: fn, interval: false };
   window.__mdmdview_timer_queue.push(id);
   return id;
 };
@@ -2943,6 +3973,13 @@ window.clearTimeout = function(id) {
     delete window.__mdmdview_timer_map[id];
   }
 };
+window.setInterval = function(fn, ms) {
+  var id = window.__mdmdview_next_timer_id++;
+  window.__mdmdview_timer_map[id] = { fn: fn, interval: true };
+  window.__mdmdview_timer_queue.push(id);
+  return id;
+};
+window.clearInterval = function(id) { window.clearTimeout(id); };
 window.requestAnimationFrame = function(fn) {
   return window.setTimeout(function() { fn(0); }, 16);
 };
@@ -2956,7 +3993,11 @@ window.__mdmdview_run_timers = function(max_ticks) {
     var id = queue.shift();
     var entry = map[id];
     if (entry && typeof entry.fn === 'function') { entry.fn(); }
-    delete map[id];
+    if (entry && entry.interval) {
+      queue.push(id);
+    } else {
+      delete map[id];
+    }
     ticks++;
   }
   return queue.length;
@@ -3001,10 +4042,47 @@ window.console = {
 window.fetch = function(){ throw new Error('fetch disabled'); };
 window.XMLHttpRequest = function(){ throw new Error('XMLHttpRequest disabled'); };
 window.DOMPurify = { sanitize: function(html){ return html; } };
-window.getComputedStyle = function() {
-  return {
-    getPropertyValue: function() { return '0px'; }
+window.getComputedStyle = function(el) {
+  var style = (el && el.style) ? el.style : __mdmdview_make_style();
+  if (!style.fontSize) { style.fontSize = '16px'; }
+  if (!style['font-size']) { style['font-size'] = style.fontSize; }
+  if (!style.fontFamily) { style.fontFamily = 'sans-serif'; }
+  if (!style['font-family']) { style['font-family'] = style.fontFamily; }
+  if (!style.fontWeight) { style.fontWeight = 'normal'; }
+  if (!style['font-weight']) { style['font-weight'] = style.fontWeight; }
+  if (!style.fontStyle) { style.fontStyle = 'normal'; }
+  if (!style['font-style']) { style['font-style'] = style.fontStyle; }
+  if (el && el.getAttribute) {
+    var attrSize = el.getAttribute('font-size');
+    if (attrSize) {
+      style.fontSize = String(attrSize);
+      style['font-size'] = style.fontSize;
+    }
+    var attrFamily = el.getAttribute('font-family');
+    if (attrFamily) {
+      style.fontFamily = String(attrFamily);
+      style['font-family'] = style.fontFamily;
+    }
+    var attrWeight = el.getAttribute('font-weight');
+    if (attrWeight) {
+      style.fontWeight = String(attrWeight);
+      style['font-weight'] = style.fontWeight;
+    }
+    var attrStyle = el.getAttribute('font-style');
+    if (attrStyle) {
+      style.fontStyle = String(attrStyle);
+      style['font-style'] = style.fontStyle;
+    }
+  }
+  style.getPropertyValue = function(key) {
+    if (Object.prototype.hasOwnProperty.call(style, key)) { return style[key]; }
+    if (key === 'font-size') { return style.fontSize; }
+    if (key === 'font-family') { return style.fontFamily; }
+    if (key === 'font-weight') { return style.fontWeight; }
+    if (key === 'font-style') { return style.fontStyle; }
+    return '';
   };
+  return style;
 };
 window.__mdmdview_viewport_width = 1200;
 window.__mdmdview_viewport_height = 900;
@@ -3186,22 +4264,39 @@ const MERMAID_RENDER_WRAPPER: &str = r#"
     } while (remaining > 0 && cycles < 100);
     if (remaining > 0) { throw new Error('Mermaid timer queue did not drain'); }
   }
+  function __mdmdview_pump_timers(max_cycles) {
+    var cycles = 0;
+    function step() {
+      if (typeof __mdmdview_run_timers !== 'function') {
+        return Promise.resolve();
+      }
+      var remaining = __mdmdview_run_timers(1000);
+      cycles++;
+      if (remaining > 0 && cycles < max_cycles) {
+        return Promise.resolve().then(step);
+      }
+      if (remaining > 0) {
+        return Promise.reject(new Error('Mermaid timer queue did not drain'));
+      }
+      return Promise.resolve();
+    }
+    return step();
+  }
   mermaid.mermaidAPI.initialize(merged);
   var renderCode = extracted && extracted.code !== undefined ? extracted.code : code;
   var svgOut = null;
   var renderResult = null;
   try {
-    renderResult = mermaid.mermaidAPI.render(id, renderCode);
-    if (!renderResult) {
-      renderResult = mermaid.mermaidAPI.render(id, renderCode, function(svg){ svgOut = svg; });
-    }
+    renderResult = mermaid.mermaidAPI.render(id, renderCode, function(svg){ svgOut = svg; });
     __mdmdview_flush_timers();
   } catch (err) {
     throw err;
   }
   if (renderResult && typeof renderResult.then === 'function') {
-    return renderResult.then(function(out){
+    var pump = __mdmdview_pump_timers(400);
+    return Promise.all([renderResult, pump]).then(function(values){
       __mdmdview_flush_timers();
+      var out = values && values.length ? values[0] : null;
       if (typeof out === 'string') { return out; }
       if (out && out.svg) { return out.svg; }
       if (typeof svgOut === 'string' && svgOut.length > 0) { return svgOut; }
