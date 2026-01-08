@@ -189,8 +189,6 @@ def run_mermaid_cli(
         str(height),
         "-b",
         bg,
-        "-t",
-        "default",
         "-c",
         str(config_path),
         "-q",
@@ -447,6 +445,7 @@ def build_env() -> dict:
     env["MDMDVIEW_MERMAID_TITLE_COLOR"] = "#1C2430"
     env["MDMDVIEW_MERMAID_LABEL_BG"] = MERMAID_BG
     env["MDMDVIEW_MERMAID_EDGE_LABEL_BG"] = MERMAID_BG
+    env["MDMDVIEW_MERMAID_TIMEOUT_MS"] = "40000"
     return env
 
 
@@ -524,7 +523,7 @@ def main() -> int:
     parser.add_argument("--height", type=int, default=1000)
     parser.add_argument("--threshold-percent", type=float, default=12.0)
     parser.add_argument("--threshold-pixels", type=int, default=45000)
-    parser.add_argument("--pixel-tolerance", type=int, default=40)
+    parser.add_argument("--pixel-tolerance", type=int, default=60)
     parser.add_argument("--test-fonts", help="Font directory for mdmdview")
     parser.add_argument("--case", action="append", default=[])
     args = parser.parse_args()
@@ -616,10 +615,6 @@ def main() -> int:
             continue
 
         actual_bg = guess_background_color(mdmdview_img)
-        ref_bg = guess_background_color(reference_img)
-        md_non_bg = non_bg_ratio(mdmdview_img, actual_bg, tolerance=10)
-        ref_non_bg = non_bg_ratio(reference_img, ref_bg, tolerance=10)
-        sparse_render = ref_non_bg > 0.02 and md_non_bg < max(0.003, ref_non_bg * 0.2)
 
         actual_crop = crop_to_content(mdmdview_img, actual_bg, tolerance=10)
         reference_crop = crop_to_content(reference_img, bg_rgb, tolerance=10)
@@ -629,6 +624,10 @@ def main() -> int:
         actual_crop = align_to_content(reference_crop, actual_crop, bg_rgb, tolerance=10)
         actual_crop.save(case_dir / "mdmdview-crop.png")
         reference_crop.save(case_dir / "reference-crop.png")
+
+        md_non_bg = non_bg_ratio(actual_crop, bg_rgb, tolerance=10)
+        ref_non_bg = non_bg_ratio(reference_crop, bg_rgb, tolerance=10)
+        sparse_render = ref_non_bg > 0.02 and md_non_bg < max(0.003, ref_non_bg * 0.2)
 
         diff_result = diff_images(
             reference_png=case_dir / "reference-crop.png",

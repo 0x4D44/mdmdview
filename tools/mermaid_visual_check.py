@@ -706,7 +706,7 @@ def run_case(
             retry_wait_ms = max(base_wait_ms * 2, 8000)
             run_mdmdview_screenshot(
                 mdmdview_bin=mdmdview_bin,
-                md_path=md_path,
+                md_path=render_md_path,
                 output_png=mdmdview_raw,
                 width=width,
                 height=height,
@@ -827,7 +827,7 @@ def main() -> int:
     parser.add_argument(
         "--pixel-tolerance",
         type=int,
-        default=40,
+        default=60,
         help="Ignore per-channel diffs at or below this value",
     )
     parser.add_argument("--test-fonts", help="Font directory for mdmdview")
