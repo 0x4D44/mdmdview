@@ -390,7 +390,12 @@ impl MermaidRenderer {
                 }
                 let width_bucket = Self::width_bucket(available_width);
                 let scale_bucket = Self::scale_bucket(ui_scale);
-                let (mut viewport_width, mut viewport_height) = Self::viewport_px(ui.ctx());
+                let mut viewport_width = available_width.round().max(1.0) as u32;
+                let mut viewport_height = ui
+                    .ctx()
+                    .input(|i| i.screen_rect().height())
+                    .round()
+                    .max(1.0) as u32;
                 if let Some(kind) = Self::mermaid_diagram_kind(code) {
                     if kind == "timeline" {
                         viewport_width = viewport_width.min(1000);
@@ -552,15 +557,6 @@ impl MermaidRenderer {
     fn scale_bucket(ui_scale: f32) -> u32 {
         let clamped = ui_scale.clamp(0.5, 4.0);
         (clamped * Self::MERMAID_SCALE_BUCKET_FACTOR).round() as u32
-    }
-
-    #[cfg(feature = "mermaid-quickjs")]
-    fn viewport_px(ctx: &egui::Context) -> (u32, u32) {
-        let screen_rect = ctx.input(|i| i.screen_rect());
-        let pixels_per_point = ctx.input(|i| i.pixels_per_point).max(0.1);
-        let width = (screen_rect.width() * pixels_per_point).round().max(1.0) as u32;
-        let height = (screen_rect.height() * pixels_per_point).round().max(1.0) as u32;
-        (width, height)
     }
 
     fn mermaid_diagram_kind(code: &str) -> Option<String> {
@@ -1049,21 +1045,48 @@ impl TextMeasurer {
                 }
                 let scale = font_size / units_per_em;
                 let fallback_advance = units_per_em * 0.5;
+                let kern_subtables: Vec<_> = face
+                    .tables()
+                    .kern
+                    .map(|kern| {
+                        kern.subtables
+                            .into_iter()
+                            .filter(|table| {
+                                table.horizontal
+                                    && !table.has_cross_stream
+                                    && !table.variable
+                                    && !table.has_state_machine
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let mut max_width_units = 0.0_f32;
                 let mut line_count = 0u32;
 
                 for line in text.split('\n') {
                     line_count += 1;
                     let mut width_units = 0.0_f32;
+                    let mut prev = None;
                     for ch in line.chars() {
                         if let Some(glyph) = face.glyph_index(ch) {
+                            if let Some(prev_glyph) = prev {
+                                let mut kern = 0.0_f32;
+                                for table in &kern_subtables {
+                                    if let Some(value) = table.glyphs_kerning(prev_glyph, glyph) {
+                                        kern += value as f32;
+                                    }
+                                }
+                                width_units += kern;
+                            }
                             if let Some(adv) = face.glyph_hor_advance(glyph) {
                                 width_units += adv as f32;
                             } else {
                                 width_units += fallback_advance;
                             }
+                            prev = Some(glyph);
                         } else {
                             width_units += fallback_advance;
+                            prev = None;
                         }
                     }
                     if width_units > max_width_units {
@@ -1775,6 +1798,41 @@ impl MermaidWorker {
         if changed { Some(out) } else { None }
     }
 
+    fn fix_er_attribute_fills(svg: &str) -> Option<String> {
+        if !svg.contains("attributeBoxOdd") && !svg.contains("attributeBoxEven") {
+            return None;
+        }
+        let mut out = String::with_capacity(svg.len() + 32);
+        let mut remaining = svg;
+        let mut changed = false;
+        while let Some(idx) = remaining.find("<rect") {
+            let (before, after) = remaining.split_at(idx);
+            out.push_str(before);
+            let end = match after.find('>') {
+                Some(pos) => pos + 1,
+                None => {
+                    out.push_str(after);
+                    remaining = "";
+                    break;
+                }
+            };
+            let (tag, rest) = after.split_at(end);
+            let mut updated = tag.to_string();
+            if tag.contains("attributeBoxOdd") {
+                updated = Self::upsert_attr(&updated, "fill", "#ffffff");
+            } else if tag.contains("attributeBoxEven") {
+                updated = Self::upsert_attr(&updated, "fill", "#f2f2f2");
+            }
+            if updated != tag {
+                changed = true;
+            }
+            out.push_str(&updated);
+            remaining = rest;
+        }
+        out.push_str(remaining);
+        if changed { Some(out) } else { None }
+    }
+
     fn find_svg_attr(tag: &str, name: &str) -> Option<String> {
         let needle = format!("{name}=\"");
         let start = tag.find(&needle)? + needle.len();
@@ -1917,6 +1975,9 @@ impl MermaidWorker {
                 if let Some(updated) = Self::fix_state_end_circles(&svg) {
                     svg = updated;
                 }
+                if let Some(updated) = Self::fix_er_attribute_fills(&svg) {
+                    svg = updated;
+                }
                 Self::maybe_dump_svg(svg_key, code_ref, &svg);
                 match self.rasterize_svg(&svg, width_bucket, scale_bucket, bg) {
                     Ok((rgba, w, h)) => MermaidResult {
@@ -2057,6 +2118,10 @@ impl MermaidWorker {
             }
         }
         scale = scale.clamp(0.01, 4.0);
+        let adjustment = Self::scale_adjustment_for_svg(svg);
+        if adjustment.is_finite() && adjustment > 0.0 {
+            scale = (scale * adjustment).clamp(0.01, 4.0);
+        }
 
         let mut target_w = (w as f32 * scale).round() as u32;
         let mut target_h = (h as f32 * scale).round() as u32;
@@ -2113,6 +2178,16 @@ impl MermaidWorker {
         usvg::ImageHrefResolver {
             resolve_data,
             resolve_string,
+        }
+    }
+
+    fn scale_adjustment_for_svg(svg: &str) -> f32 {
+        if svg.contains("aria-roledescription=\"er\"")
+            || svg.contains("aria-roledescription='er'")
+        {
+            0.94
+        } else {
+            1.0
         }
     }
 
@@ -4593,7 +4668,7 @@ const MERMAID_RENDER_WRAPPER: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -4987,5 +5062,73 @@ mod tests {
     #[test]
     fn test_mermaid_dom_shim_clusters_not_labelish() {
         assert!(MERMAID_DOM_SHIM.contains("has_class(node, 'clusters')"));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_fix_er_attribute_fills_inlines_colors() {
+        let input = r#"<svg><rect class="er attributeBoxOdd"></rect><rect class="er attributeBoxEven"></rect></svg>"#;
+        let output =
+            MermaidWorker::fix_er_attribute_fills(input).expect("er fills updated");
+        assert!(output.contains("attributeBoxOdd\" fill=\"#ffffff\""));
+        assert!(output.contains("attributeBoxEven\" fill=\"#f2f2f2\""));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_text_measurer_kerning_adjusts_width_when_available() {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        let fontdb = Arc::new(fontdb);
+        let measurer = TextMeasurer::new(Arc::clone(&fontdb));
+        let face_id = match measurer.face_id {
+            Some(id) => id,
+            None => return,
+        };
+        let has_kern = fontdb
+            .with_face_data(face_id, |data, index| {
+                let face = ttf_parser::Face::parse(data, index).ok()?;
+                let kern = face.tables().kern?;
+                let left = face.glyph_index('A')?;
+                let right = face.glyph_index('V')?;
+                for table in kern.subtables.into_iter() {
+                    if !table.horizontal
+                        || table.has_cross_stream
+                        || table.variable
+                        || table.has_state_machine
+                    {
+                        continue;
+                    }
+                    if let Some(value) = table.glyphs_kerning(left, right) {
+                        if value != 0 {
+                            return Some(true);
+                        }
+                    }
+                }
+                Some(false)
+            })
+            .flatten()
+            .unwrap_or(false);
+        if !has_kern {
+            return;
+        }
+        let (w_av, _) = measurer.measure_text("AV", 16.0, None);
+        let (w_a, _) = measurer.measure_text("A", 16.0, None);
+        let (w_v, _) = measurer.measure_text("V", 16.0, None);
+        assert!(w_av < w_a + w_v);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_scale_adjustment_for_svg_defaults() {
+        assert_eq!(MermaidWorker::scale_adjustment_for_svg("<svg></svg>"), 1.0);
+        assert_eq!(
+            MermaidWorker::scale_adjustment_for_svg("<svg aria-roledescription=\"er\"></svg>"),
+            0.94
+        );
+        assert_eq!(
+            MermaidWorker::scale_adjustment_for_svg("<svg aria-roledescription='er'></svg>"),
+            0.94
+        );
     }
 }

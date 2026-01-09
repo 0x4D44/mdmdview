@@ -125,6 +125,26 @@ fn parse_theme(value: &str) -> Result<ThemeChoice, String> {
     }
 }
 
+fn parse_hex_color32(value: &str) -> Option<egui::Color32> {
+    let hex = value.trim().trim_start_matches('#');
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(egui::Color32::from_rgb(r, g, b))
+}
+
+fn screenshot_background_color() -> egui::Color32 {
+    if let Ok(hex) = std::env::var("MDMDVIEW_MERMAID_MAIN_BKG") {
+        if let Some(color) = parse_hex_color32(&hex) {
+            return color;
+        }
+    }
+    egui::Color32::from_rgb(255, 248, 219)
+}
+
 fn parse_f32(flag: &str, value: &str) -> Result<f32, String> {
     value
         .parse::<f32>()
@@ -314,10 +334,17 @@ fn main() -> Result<(), eframe::Error> {
         native_options,
         Box::new(move |cc| {
             if let Some(theme) = resolved_theme {
-                let visuals = match theme {
+                let mut visuals = match theme {
                     ThemeChoice::Light => egui::Visuals::light(),
                     ThemeChoice::Dark => egui::Visuals::dark(),
                 };
+                if screenshot_enabled {
+                    let bg = screenshot_background_color();
+                    visuals.panel_fill = bg;
+                    visuals.window_fill = bg;
+                    visuals.extreme_bg_color = bg;
+                    visuals.faint_bg_color = bg;
+                }
                 cc.egui_ctx.set_visuals(visuals);
             }
 
@@ -647,6 +674,21 @@ mod tests {
         let args = vec!["doc.md".to_string(), "extra.md".to_string()];
         let opts = parse_cli_from(args).expect("parse");
         assert_eq!(opts.initial_file, Some(PathBuf::from("doc.md")));
+    }
+
+    #[test]
+    fn test_parse_hex_color32() {
+        let color = parse_hex_color32("#FFF8DB").expect("color");
+        assert_eq!(color, egui::Color32::from_rgb(255, 248, 219));
+        assert!(parse_hex_color32("#XYZ").is_none());
+    }
+
+    #[test]
+    fn test_screenshot_background_color_env() {
+        std::env::set_var("MDMDVIEW_MERMAID_MAIN_BKG", "#112233");
+        let color = screenshot_background_color();
+        assert_eq!(color, egui::Color32::from_rgb(17, 34, 51));
+        std::env::remove_var("MDMDVIEW_MERMAID_MAIN_BKG");
     }
 
     #[test]

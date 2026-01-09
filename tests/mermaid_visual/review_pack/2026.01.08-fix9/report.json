@@ -1,0 +1,90 @@
+[
+  {
+    "case": "er",
+    "ok": false,
+    "message": "diff_exceeds_threshold",
+    "diff_pixels": 5253,
+    "percent": 12.11652903999631,
+    "max_delta": 227,
+    "size_ref": [
+      106,
+      409
+    ],
+    "size_actual": [
+      106,
+      409
+    ],
+    "meta": {
+      "version": "1.0.2",
+      "build_timestamp": "2026-01-03T04:57:55.8833518+00:00",
+      "output": "C:\\language\\mdmdview\\tests\\mermaid_visual\\review_pack\\2026.01.08-fix9\\er\\mdmdview.png",
+      "theme": "light",
+      "zoom": 1.0,
+      "content_only": true,
+      "scroll_ratio": null,
+      "scroll_offset": 0.0,
+      "viewport_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "content_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "pixels_per_point": 1.0,
+      "wait_ms": 12000,
+      "settle_frames": 3,
+      "stable_frames": 4,
+      "timed_out": false,
+      "pending_renders": false,
+      "font_source": null,
+      "elapsed_ms": 2088
+    },
+    "md_non_bg": 0.4050606633759284,
+    "ref_non_bg": 0.3571988743829866
+  },
+  {
+    "case": "gantt",
+    "ok": true,
+    "message": "ok",
+    "diff_pixels": 5241,
+    "percent": 2.6990004274318555,
+    "max_delta": 227,
+    "size_ref": [
+      1529,
+      127
+    ],
+    "size_actual": [
+      1529,
+      127
+    ],
+    "meta": {
+      "version": "1.0.2",
+      "build_timestamp": "2026-01-03T04:57:55.8833518+00:00",
+      "output": "C:\\language\\mdmdview\\tests\\mermaid_visual\\review_pack\\2026.01.08-fix9\\gantt\\mdmdview.png",
+      "theme": "light",
+      "zoom": 1.0,
+      "content_only": true,
+      "scroll_ratio": null,
+      "scroll_offset": 0.0,
+      "viewport_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "content_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "pixels_per_point": 1.0,
+      "wait_ms": 12000,
+      "settle_frames": 3,
+      "stable_frames": 4,
+      "timed_out": false,
+      "pending_renders": false,
+      "font_source": null,
+      "elapsed_ms": 2062
+    },
+    "md_non_bg": 0.23394426906577817,
+    "ref_non_bg": 0.24492360299305294
+  }
+]
