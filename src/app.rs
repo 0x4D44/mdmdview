@@ -32,10 +32,10 @@ const ASYNC_LOAD_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024;
 #[cfg(test)]
 thread_local! {
     static FORCED_APP_ACTIONS: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
-    static FORCED_OPEN_PATH: RefCell<Option<PathBuf>> = RefCell::new(None);
-    static FORCED_SAVE_PATH: RefCell<Option<PathBuf>> = RefCell::new(None);
-    static FORCED_LOAD_ERROR: RefCell<bool> = RefCell::new(false);
-    static FORCED_SCAN_ERROR: RefCell<bool> = RefCell::new(false);
+    static FORCED_OPEN_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static FORCED_SAVE_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    static FORCED_LOAD_ERROR: RefCell<bool> = const { RefCell::new(false) };
+    static FORCED_SCAN_ERROR: RefCell<bool> = const { RefCell::new(false) };
 }
 
 #[cfg(test)]
@@ -131,7 +131,6 @@ struct FileLoadRequest {
 
 struct FileLoadResult {
     id: u64,
-    path: PathBuf,
     content: Result<(String, bool), String>,
 }
 
@@ -828,7 +827,6 @@ impl MarkdownViewerApp {
                         .map_err(|err| err.to_string());
                     let _ = result_tx.send(FileLoadResult {
                         id: request.id,
-                        path: request.path,
                         content,
                     });
                 }
@@ -3299,12 +3297,9 @@ The end.
     fn test_compute_window_adjustment_clamps_offscreen_window() {
         let outer = egui::Rect::from_min_size(egui::pos2(1200.0, 900.0), egui::vec2(800.0, 600.0));
         let monitor = egui::vec2(1024.0, 768.0);
-        let adjustment = MarkdownViewerApp::compute_window_adjustment(
-            Some(outer),
-            Some(outer),
-            Some(monitor),
-        )
-        .expect("should adjust window geometry");
+        let adjustment =
+            MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(outer), Some(monitor))
+                .expect("should adjust window geometry");
         let pos = adjustment.pos.expect("expected position adjustment");
         let size = adjustment.size.unwrap_or_else(|| outer.size());
         assert!(pos.x <= monitor.x - size.x + 1.0);
@@ -3316,12 +3311,9 @@ The end.
     fn test_compute_window_adjustment_respects_min_size() {
         let outer = egui::Rect::from_min_size(egui::pos2(-200.0, -100.0), egui::vec2(200.0, 100.0));
         let monitor = egui::vec2(1920.0, 1080.0);
-        let adjustment = MarkdownViewerApp::compute_window_adjustment(
-            Some(outer),
-            Some(outer),
-            Some(monitor),
-        )
-        .expect("should enforce minimum window size");
+        let adjustment =
+            MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(outer), Some(monitor))
+                .expect("should enforce minimum window size");
         let pos = adjustment.pos.unwrap_or(outer.min);
         let size = adjustment.size.expect("expected size adjustment");
         assert!(size.x >= 600.0);

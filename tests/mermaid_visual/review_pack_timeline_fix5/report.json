@@ -1,0 +1,46 @@
+[
+  {
+    "case": "timeline",
+    "ok": true,
+    "message": "ok",
+    "diff_pixels": 21710,
+    "percent": 3.8941983440239927,
+    "max_delta": 255,
+    "size_ref": [
+      1044,
+      534
+    ],
+    "size_actual": [
+      1044,
+      534
+    ],
+    "meta": {
+      "version": "1.0.2",
+      "build_timestamp": "2026-01-04T15:58:18.3974654+00:00",
+      "output": "C:\\language\\mdmdview\\tests\\mermaid_visual\\review_pack_timeline_fix5\\timeline\\mdmdview.png",
+      "theme": "light",
+      "zoom": 1.0,
+      "content_only": true,
+      "scroll_ratio": null,
+      "scroll_offset": 0.0,
+      "viewport_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "content_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "pixels_per_point": 1.0,
+      "wait_ms": 12000,
+      "settle_frames": 3,
+      "stable_frames": 4,
+      "timed_out": false,
+      "pending_renders": false,
+      "font_source": null,
+      "elapsed_ms": 4838
+    },
+    "md_non_bg": 0.1811134070917101,
+    "ref_non_bg": 0.17816271327507283
+  }
+]

@@ -173,9 +173,9 @@ fn save_window_state_registry(state: &WindowState) -> std::io::Result<()> {
 #[cfg(all(windows, test))]
 thread_local! {
     static FORCED_REGISTRY_LOAD: std::cell::RefCell<Option<WindowState>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
     static FORCED_REGISTRY_SAVE_ERROR: std::cell::RefCell<bool> =
-        std::cell::RefCell::new(false);
+        const { std::cell::RefCell::new(false) };
 }
 
 #[cfg(all(windows, test))]
@@ -210,10 +210,7 @@ fn load_window_state_registry() -> Option<WindowState> {
 #[cfg(all(windows, test))]
 fn save_window_state_registry(_state: &WindowState) -> std::io::Result<()> {
     if take_forced_registry_save_error() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "forced registry error",
-        ));
+        return Err(std::io::Error::other("forced registry error"));
     }
     Ok(())
 }

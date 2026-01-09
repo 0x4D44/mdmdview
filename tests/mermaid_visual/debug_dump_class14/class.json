@@ -1,0 +1,20 @@
+{
+  "version": "1.0.2",
+  "build_timestamp": "2026-01-04T15:58:18.3974654+00:00",
+  "output": "tests\\mermaid_visual\\debug_dump_class14\\class.png",
+  "theme": "light",
+  "zoom": 1.000,
+  "content_only": true,
+  "scroll_ratio": null,
+  "scroll_offset": 0.000,
+  "viewport_px": {"width": 1600, "height": 1000},
+  "content_px": {"width": 1600, "height": 1000},
+  "pixels_per_point": 1.000,
+  "wait_ms": 12000,
+  "settle_frames": 3,
+  "stable_frames": 7,
+  "timed_out": false,
+  "pending_renders": false,
+  "font_source": null,
+  "elapsed_ms": 6124
+}

@@ -1,0 +1,46 @@
+[
+  {
+    "case": "class",
+    "ok": false,
+    "message": "diff_exceeds_threshold",
+    "diff_pixels": 4966,
+    "percent": 18.174498609281216,
+    "max_delta": 227,
+    "size_ref": [
+      108,
+      253
+    ],
+    "size_actual": [
+      108,
+      253
+    ],
+    "meta": {
+      "version": "1.0.2",
+      "build_timestamp": "2026-01-04T15:58:18.3974654+00:00",
+      "output": "C:\\language\\mdmdview\\tests\\mermaid_visual\\review_pack\\2026.01.05-round10-class\\class\\mdmdview.png",
+      "theme": "light",
+      "zoom": 1.0,
+      "content_only": true,
+      "scroll_ratio": null,
+      "scroll_offset": 0.0,
+      "viewport_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "content_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "pixels_per_point": 1.0,
+      "wait_ms": 12000,
+      "settle_frames": 3,
+      "stable_frames": 12,
+      "timed_out": false,
+      "pending_renders": false,
+      "font_source": null,
+      "elapsed_ms": 6521
+    },
+    "md_non_bg": 0.12494510320597277,
+    "ref_non_bg": 0.1282389108476065
+  }
+]

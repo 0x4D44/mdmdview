@@ -1,0 +1,8 @@
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Running: start
+    Running --> Idle: stop
+    Running --> Error: fail
+    Error --> Idle: reset
+```

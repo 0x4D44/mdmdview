@@ -5,7 +5,7 @@ use std::io::Cursor;
 
 #[cfg(test)]
 thread_local! {
-    static FORCED_ZERO_SVG_DIMENSIONS: RefCell<bool> = RefCell::new(false);
+    static FORCED_ZERO_SVG_DIMENSIONS: RefCell<bool> = const { RefCell::new(false) };
 }
 
 #[cfg(test)]
@@ -17,6 +17,7 @@ const MAX_IMAGE_SIDE: u32 = 4096;
 const MAX_IMAGE_PIXELS: u64 = MAX_IMAGE_SIDE as u64 * MAX_IMAGE_SIDE as u64;
 const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
+#[cfg(test)]
 pub(crate) fn svg_bytes_to_color_image(bytes: &[u8]) -> Option<(ColorImage, u32, u32)> {
     svg_bytes_to_color_image_with_bg(bytes, None)
 }

@@ -1,0 +1,46 @@
+[
+  {
+    "case": "flowchart",
+    "ok": true,
+    "message": "ok",
+    "diff_pixels": 3856,
+    "percent": 4.43131801831826,
+    "max_delta": 227,
+    "size_ref": [
+      217,
+      401
+    ],
+    "size_actual": [
+      217,
+      401
+    ],
+    "meta": {
+      "version": "1.0.2",
+      "build_timestamp": "2026-01-04T15:58:18.3974654+00:00",
+      "output": "C:\\language\\mdmdview\\tests\\mermaid_visual\\review_pack_flowchart_fix1\\flowchart\\mdmdview.png",
+      "theme": "light",
+      "zoom": 1.0,
+      "content_only": true,
+      "scroll_ratio": null,
+      "scroll_offset": 0.0,
+      "viewport_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "content_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "pixels_per_point": 1.0,
+      "wait_ms": 12000,
+      "settle_frames": 3,
+      "stable_frames": 4,
+      "timed_out": false,
+      "pending_renders": false,
+      "font_source": null,
+      "elapsed_ms": 5021
+    },
+    "md_non_bg": 0.03795810014135169,
+    "ref_non_bg": 0.05179447694128733
+  }
+]

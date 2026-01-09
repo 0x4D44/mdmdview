@@ -39,8 +39,8 @@ struct InlineStyle {
 #[cfg(test)]
 thread_local! {
     static FORCED_RENDER_ACTIONS: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
-    static FORCED_TABLE_POLICIES: RefCell<Option<Vec<ColumnPolicy>>> = RefCell::new(None);
-    static FORCED_PARSE_ERROR: RefCell<bool> = RefCell::new(false);
+    static FORCED_TABLE_POLICIES: RefCell<Option<Vec<ColumnPolicy>>> = const { RefCell::new(None) };
+    static FORCED_PARSE_ERROR: RefCell<bool> = const { RefCell::new(false) };
 }
 
 #[cfg(test)]
@@ -351,7 +351,9 @@ enum ImageLoadResult {
         size: [u32; 2],
         modified: Option<SystemTime>,
     },
-    Failed { key: String, error: String },
+    Failed {
+        key: String,
+    },
 }
 
 /// Markdown renderer with proper inline element handling
@@ -794,27 +796,22 @@ impl MarkdownRenderer {
             .name("mdmdview-image-loader".to_string())
             .spawn(move || {
                 for request in job_rx.iter() {
-                    let result = match request.source {
+                    let ImageLoadRequest { key, source } = request;
+                    let result = match source {
                         ImageLoadSource::Embedded(bytes) => {
                             match image_decode::bytes_to_color_image_guess(bytes, None) {
                                 Some((image, w, h)) => ImageLoadResult::Loaded {
-                                    key: request.key,
+                                    key,
                                     image,
                                     size: [w, h],
                                     modified: None,
                                 },
-                                None => ImageLoadResult::Failed {
-                                    key: request.key,
-                                    error: "Image decode failed".to_string(),
-                                },
+                                None => ImageLoadResult::Failed { key },
                             }
                         }
                         ImageLoadSource::File(path) => {
                             if !path.exists() {
-                                ImageLoadResult::Failed {
-                                    key: request.key,
-                                    error: "Image not found".to_string(),
-                                }
+                                ImageLoadResult::Failed { key }
                             } else {
                                 match std::fs::read(&path) {
                                     Ok(bytes) => {
@@ -822,21 +819,15 @@ impl MarkdownRenderer {
                                         match image_decode::bytes_to_color_image_guess(&bytes, None)
                                         {
                                             Some((image, w, h)) => ImageLoadResult::Loaded {
-                                                key: request.key,
+                                                key,
                                                 image,
                                                 size: [w, h],
                                                 modified,
                                             },
-                                            None => ImageLoadResult::Failed {
-                                                key: request.key,
-                                                error: "Image decode failed".to_string(),
-                                            },
+                                            None => ImageLoadResult::Failed { key },
                                         }
                                     }
-                                    Err(err) => ImageLoadResult::Failed {
-                                        key: request.key,
-                                        error: format!("Image read failed: {err}"),
-                                    },
+                                    Err(_) => ImageLoadResult::Failed { key },
                                 }
                             }
                         }
@@ -2810,9 +2801,7 @@ impl MarkdownRenderer {
                             let pending = self.image_pending.borrow().contains(&resolved);
                             let msg = if pending {
                                 "Loading image..."
-                            } else if src.starts_with("http://")
-                                || src.starts_with("https://")
-                            {
+                            } else if src.starts_with("http://") || src.starts_with("https://") {
                                 "Remote images are disabled"
                             } else {
                                 "Image not found or unsupported"
@@ -5017,7 +5006,7 @@ impl MarkdownRenderer {
                     self.image_pending.borrow_mut().remove(&key);
                     changed = true;
                 }
-                ImageLoadResult::Failed { key, .. } => {
+                ImageLoadResult::Failed { key } => {
                     self.image_pending.borrow_mut().remove(&key);
                     self.note_image_failure(&key);
                 }
@@ -5075,7 +5064,7 @@ impl MarkdownRenderer {
 
     fn get_or_load_image_texture(
         &self,
-        ui: &egui::Ui,
+        _ui: &egui::Ui,
         resolved_src: &str,
     ) -> Option<(egui::TextureHandle, u32, u32)> {
         // Reject remote for now
@@ -7895,8 +7884,7 @@ fn main() {}
     fn test_get_or_load_image_texture_embedded_and_remote() {
         let renderer = MarkdownRenderer::new();
         with_test_ui(|ctx, ui| {
-            let embedded =
-                wait_for_image(&renderer, ctx, ui, "assets/emoji/1f600.png");
+            let embedded = wait_for_image(&renderer, ctx, ui, "assets/emoji/1f600.png");
             assert!(embedded.is_some());
             let remote = renderer.get_or_load_image_texture(ui, "https://example.com/img.png");
             assert!(remote.is_none());
