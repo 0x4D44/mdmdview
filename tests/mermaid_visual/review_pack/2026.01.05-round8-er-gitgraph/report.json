@@ -1,0 +1,90 @@
+[
+  {
+    "case": "er",
+    "ok": true,
+    "message": "ok",
+    "diff_pixels": 8386,
+    "percent": 8.254343225552438,
+    "max_delta": 227,
+    "size_ref": [
+      195,
+      521
+    ],
+    "size_actual": [
+      195,
+      521
+    ],
+    "meta": {
+      "version": "1.0.2",
+      "build_timestamp": "2026-01-04T15:58:18.3974654+00:00",
+      "output": "C:\\language\\mdmdview\\tests\\mermaid_visual\\review_pack\\2026.01.05-round8-er-gitgraph\\er\\mdmdview.png",
+      "theme": "light",
+      "zoom": 1.0,
+      "content_only": true,
+      "scroll_ratio": null,
+      "scroll_offset": 0.0,
+      "viewport_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "content_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "pixels_per_point": 1.0,
+      "wait_ms": 12000,
+      "settle_frames": 3,
+      "stable_frames": 4,
+      "timed_out": false,
+      "pending_renders": false,
+      "font_source": null,
+      "elapsed_ms": 7602
+    },
+    "md_non_bg": 0.07569270141247109,
+    "ref_non_bg": 0.15242876125793592
+  },
+  {
+    "case": "gitgraph",
+    "ok": true,
+    "message": "ok",
+    "diff_pixels": 1764,
+    "percent": 2.9459901800327333,
+    "max_delta": 237,
+    "size_ref": [
+      329,
+      182
+    ],
+    "size_actual": [
+      329,
+      182
+    ],
+    "meta": {
+      "version": "1.0.2",
+      "build_timestamp": "2026-01-04T15:58:18.3974654+00:00",
+      "output": "C:\\language\\mdmdview\\tests\\mermaid_visual\\review_pack\\2026.01.05-round8-er-gitgraph\\gitgraph\\mdmdview.png",
+      "theme": "light",
+      "zoom": 1.0,
+      "content_only": true,
+      "scroll_ratio": null,
+      "scroll_offset": 0.0,
+      "viewport_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "content_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "pixels_per_point": 1.0,
+      "wait_ms": 12000,
+      "settle_frames": 3,
+      "stable_frames": 4,
+      "timed_out": false,
+      "pending_renders": false,
+      "font_source": null,
+      "elapsed_ms": 6024
+    },
+    "md_non_bg": 0.14601356090717793,
+    "ref_non_bg": 0.14382577908413774
+  }
+]

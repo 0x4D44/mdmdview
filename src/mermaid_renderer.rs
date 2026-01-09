@@ -509,9 +509,9 @@ impl MermaidRenderer {
                         }
                     }
 
-                let inflight = self.mermaid_pending.borrow().len();
-                self.mermaid_frame_pending.set(true);
-                egui::Frame::none()
+                    let inflight = self.mermaid_pending.borrow().len();
+                    self.mermaid_frame_pending.set(true);
+                    egui::Frame::none()
                         .fill(Color32::from_rgb(25, 25, 25))
                         .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
                         .inner_margin(8.0)
@@ -1372,7 +1372,13 @@ impl MermaidWorker {
             let id = format!("m{:016x}", key);
             let site_config = MermaidRenderer::mermaid_site_config_json(key);
             let maybe: MaybePromise = func
-                .call((id.as_str(), code, site_config.as_str(), viewport_width, viewport_height))
+                .call((
+                    id.as_str(),
+                    code,
+                    site_config.as_str(),
+                    viewport_width,
+                    viewport_height,
+                ))
                 .map_err(|err| MermaidWorker::format_js_error(&ctx, err))?;
             maybe
                 .finish::<String>()
@@ -1517,6 +1523,258 @@ impl MermaidWorker {
         out
     }
 
+    fn replace_attr(tag: &str, name: &str, value: &str) -> String {
+        let needle = format!("{name}=\"");
+        let start = match tag.find(&needle) {
+            Some(idx) => idx + needle.len(),
+            None => return tag.to_string(),
+        };
+        let end = match tag[start..].find('"') {
+            Some(idx) => start + idx,
+            None => return tag.to_string(),
+        };
+        let mut out = String::with_capacity(tag.len() + value.len());
+        out.push_str(&tag[..start]);
+        out.push_str(value);
+        out.push_str(&tag[end..]);
+        out
+    }
+
+    fn upsert_attr(tag: &str, name: &str, value: &str) -> String {
+        let needle = format!("{name}=\"");
+        if tag.contains(&needle) {
+            return Self::replace_attr(tag, name, value);
+        }
+        let insert_at = match tag.rfind('>') {
+            Some(pos) => pos,
+            None => return tag.to_string(),
+        };
+        let mut out = String::with_capacity(tag.len() + name.len() + value.len() + 4);
+        out.push_str(&tag[..insert_at]);
+        out.push(' ');
+        out.push_str(name);
+        out.push_str("=\"");
+        out.push_str(value);
+        out.push('"');
+        out.push_str(&tag[insert_at..]);
+        out
+    }
+
+    fn flatten_svg_switches(svg: &str) -> Option<String> {
+        if !svg.contains("<switch") {
+            return None;
+        }
+        let mut out = String::with_capacity(svg.len());
+        let mut remaining = svg;
+        let mut changed = false;
+        while let Some(start) = remaining.find("<switch") {
+            let (before, after) = remaining.split_at(start);
+            out.push_str(before);
+            let open_end = match after.find('>') {
+                Some(pos) => pos + 1,
+                None => {
+                    out.push_str(after);
+                    remaining = "";
+                    break;
+                }
+            };
+            let after_open = &after[open_end..];
+            let close_rel = match after_open.find("</switch>") {
+                Some(pos) => pos,
+                None => {
+                    out.push_str(after);
+                    remaining = "";
+                    break;
+                }
+            };
+            let inner = &after_open[..close_rel];
+            let mut inner_out = String::with_capacity(inner.len());
+            let mut inner_remaining = inner;
+            while let Some(fo_start) = inner_remaining.find("<foreignObject") {
+                let (inner_before, inner_after) = inner_remaining.split_at(fo_start);
+                inner_out.push_str(inner_before);
+                if let Some(fo_end_rel) = inner_after.find("</foreignObject>") {
+                    inner_remaining =
+                        &inner_after[fo_end_rel + "</foreignObject>".len()..];
+                } else {
+                    inner_remaining = "";
+                    break;
+                }
+            }
+            inner_out.push_str(inner_remaining);
+            out.push_str(&inner_out);
+            changed = true;
+            remaining = &after_open[close_rel + "</switch>".len()..];
+        }
+        out.push_str(remaining);
+        if changed { Some(out) } else { None }
+    }
+
+    fn fix_journey_section_text(svg: &str, fill: &str) -> Option<String> {
+        if !svg.contains("journey-section") {
+            return None;
+        }
+        let mut out = String::with_capacity(svg.len() + 64);
+        let mut remaining = svg;
+        let mut changed = false;
+        while let Some(idx) = remaining.find("<text") {
+            let (before, after) = remaining.split_at(idx);
+            out.push_str(before);
+            let end = match after.find('>') {
+                Some(pos) => pos + 1,
+                None => {
+                    out.push_str(after);
+                    remaining = "";
+                    break;
+                }
+            };
+            let (tag, rest) = after.split_at(end);
+            if tag.contains("journey-section") {
+                let mut updated = tag.to_string();
+                if let Some(style_start) = updated.find(" style=\"") {
+                    let value_start = style_start + " style=\"".len();
+                    if let Some(style_end) = updated[value_start..].find('"') {
+                        let style_end = value_start + style_end;
+                        let mut style = updated[value_start..style_end].to_string();
+                        let parts: Vec<&str> = style.split(';').collect();
+                        let mut rebuilt: Vec<String> = Vec::new();
+                        for part in parts {
+                            let trimmed = part.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            if trimmed.starts_with("fill:") {
+                                continue;
+                            }
+                            rebuilt.push(trimmed.to_string());
+                        }
+                        rebuilt.push(format!("fill:{}", fill));
+                        style = rebuilt.join(";");
+                        updated.replace_range(value_start..style_end, &style);
+                        out.push_str(&updated);
+                        changed = true;
+                    } else {
+                        out.push_str(tag);
+                    }
+                } else {
+                    let insert_at = updated.len().saturating_sub(1);
+                    updated.insert_str(insert_at, &format!(" style=\"fill:{};\"", fill));
+                    out.push_str(&updated);
+                    changed = true;
+                }
+            } else {
+                out.push_str(tag);
+            }
+            remaining = rest;
+        }
+        out.push_str(remaining);
+        if changed { Some(out) } else { None }
+    }
+
+    fn find_circle_tag(body: &str, class_name: &str) -> Option<(usize, usize, String)> {
+        let needle = format!("class=\"{class_name}\"");
+        let class_idx = body.find(&needle)?;
+        let start = body[..class_idx].rfind("<circle")?;
+        let end = body[class_idx..].find('>')? + class_idx + 1;
+        Some((start, end, body[start..end].to_string()))
+    }
+
+    fn read_r_value(tag: &str) -> Option<String> {
+        let needle = "r=\"";
+        let start = tag.find(needle)? + needle.len();
+        let end = tag[start..].find('"')? + start;
+        Some(tag[start..end].to_string())
+    }
+
+    fn fix_state_end_circles(svg: &str) -> Option<String> {
+        if !svg.contains("state-end") {
+            return None;
+        }
+        let mut out = String::with_capacity(svg.len());
+        let mut cursor = 0;
+        let mut changed = false;
+        while let Some(g_pos_rel) = svg[cursor..].find("<g") {
+            let g_pos = cursor + g_pos_rel;
+            out.push_str(&svg[cursor..g_pos]);
+            let g_end = match svg[g_pos..].find('>') {
+                Some(pos) => g_pos + pos + 1,
+                None => {
+                    out.push_str(&svg[g_pos..]);
+                    cursor = svg.len();
+                    break;
+                }
+            };
+            let g_tag = &svg[g_pos..g_end];
+            let is_end_group = g_tag.contains("root_end") || g_tag.contains("state-end");
+            if !is_end_group {
+                out.push_str(g_tag);
+                cursor = g_end;
+                continue;
+            }
+            let close_rel = match svg[g_end..].find("</g>") {
+                Some(pos) => pos,
+                None => {
+                    out.push_str(&svg[g_pos..]);
+                    cursor = svg.len();
+                    break;
+                }
+            };
+            let body_end = g_end + close_rel;
+            let body = &svg[g_end..body_end];
+            let mut body_out = body.to_string();
+            if let (Some((s_start, s_end, state_end_tag)), Some((t_start, t_end, state_start_tag))) =
+                (Self::find_circle_tag(body, "state-end"), Self::find_circle_tag(body, "state-start"))
+            {
+                if let (Some(end_r), Some(start_r)) =
+                    (Self::read_r_value(&state_end_tag), Self::read_r_value(&state_start_tag))
+                {
+                    let end_val = end_r.parse::<f32>().ok();
+                    let start_val = start_r.parse::<f32>().ok();
+                    if let (Some(end_val), Some(start_val)) = (end_val, start_val) {
+                        if end_val < start_val {
+                            let end_dim = Self::format_dim(start_val * 2.0);
+                            let start_dim = Self::format_dim(end_val * 2.0);
+                            let mut new_end_tag =
+                                Self::replace_attr(&state_end_tag, "r", &start_r);
+                            let mut new_start_tag =
+                                Self::replace_attr(&state_start_tag, "r", &end_r);
+                            new_end_tag = Self::upsert_attr(&new_end_tag, "width", &end_dim);
+                            new_end_tag = Self::upsert_attr(&new_end_tag, "height", &end_dim);
+                            new_start_tag =
+                                Self::upsert_attr(&new_start_tag, "width", &start_dim);
+                            new_start_tag =
+                                Self::upsert_attr(&new_start_tag, "height", &start_dim);
+                            if new_start_tag.contains("state-start") {
+                                new_start_tag =
+                                    new_start_tag.replace("state-start", "end-state-inner");
+                            }
+                            let mut rebuilt = String::with_capacity(body.len() + 16);
+                            let (first_start, first_end, first_tag, second_start, second_end, second_tag) =
+                                if s_start <= t_start {
+                                    (s_start, s_end, new_end_tag, t_start, t_end, new_start_tag)
+                                } else {
+                                    (t_start, t_end, new_start_tag, s_start, s_end, new_end_tag)
+                                };
+                            rebuilt.push_str(&body[..first_start]);
+                            rebuilt.push_str(&first_tag);
+                            rebuilt.push_str(&body[first_end..second_start]);
+                            rebuilt.push_str(&second_tag);
+                            rebuilt.push_str(&body[second_end..]);
+                            body_out = rebuilt;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            out.push_str(g_tag);
+            out.push_str(&body_out);
+            out.push_str("</g>");
+            cursor = body_end + 4;
+        }
+        out.push_str(&svg[cursor..]);
+        if changed { Some(out) } else { None }
+    }
+
     fn find_svg_attr(tag: &str, name: &str) -> Option<String> {
         let needle = format!("{name}=\"");
         let start = tag.find(&needle)? + needle.len();
@@ -1648,7 +1906,17 @@ impl MermaidWorker {
 
         match svg_result {
             Ok(svg) => {
-                let svg = Self::normalize_svg_size(&svg);
+                let mut svg = Self::normalize_svg_size(&svg);
+                if let Some(updated) = Self::flatten_svg_switches(&svg) {
+                    svg = updated;
+                }
+                let theme = MermaidRenderer::mermaid_theme_values();
+                if let Some(updated) = Self::fix_journey_section_text(&svg, &theme.text) {
+                    svg = updated;
+                }
+                if let Some(updated) = Self::fix_state_end_circles(&svg) {
+                    svg = updated;
+                }
                 Self::maybe_dump_svg(svg_key, code_ref, &svg);
                 match self.rasterize_svg(&svg, width_bucket, scale_bucket, bg) {
                     Ok((rgba, w, h)) => MermaidResult {
@@ -1759,8 +2027,7 @@ impl MermaidWorker {
         if bbox_valid {
             let w_f = w as f32;
             let h_f = h as f32;
-            let oversize_ok =
-                bbox_w <= w_f * oversize_cap && bbox_h <= h_f * oversize_cap;
+            let oversize_ok = bbox_w <= w_f * oversize_cap && bbox_h <= h_f * oversize_cap;
             let oversize = (force_bbox_resize && oversize_ok)
                 || w == 0
                 || h == 0
@@ -2730,6 +2997,7 @@ function __mdmdview_is_labelish(node) {
   var tag = String(node.tagName || '').toLowerCase();
   if (tag === 'text' || tag === 'foreignobject') { return true; }
   if (tag === 'g') {
+    if (__mdmdview_has_class(node, 'clusters')) { return false; }
     if (__mdmdview_has_class(node, 'label')) { return true; }
     return __mdmdview_group_has_text(node);
   }
@@ -2897,6 +3165,15 @@ function __mdmdview_mindmap_get_size(node) {
   if (!isFinite(w) || w <= 0) { w = 80; }
   if (!isFinite(h) || h <= 0) { h = 40; }
   return { w: w, h: h };
+}
+function __mdmdview_rect_intersection(hw, hh, ux, uy) {
+  var ax = Math.abs(ux);
+  var ay = Math.abs(uy);
+  var dx = ax > 1e-6 ? hw / ax : Infinity;
+  var dy = ay > 1e-6 ? hh / ay : Infinity;
+  var dist = Math.min(dx, dy);
+  if (!isFinite(dist) || dist <= 0) { dist = Math.max(hw, hh); }
+  return dist;
 }
 function __mdmdview_mindmap_collect(nodes, edges) {
   var node_map = {};
@@ -3165,14 +3442,17 @@ function __mdmdview_mindmap_layout(nodes, edges) {
     if (!s_pos || !t_pos) { continue; }
     var s_size = sizes[source];
     var t_size = sizes[target];
-    var s_radius = Math.max(s_size.w, s_size.h) / 2;
-    var t_radius = Math.max(t_size.w, t_size.h) / 2;
     var dx = t_pos.x - s_pos.x;
     var dy = t_pos.y - s_pos.y;
     var len = Math.sqrt(dx * dx + dy * dy);
     if (!isFinite(len) || len <= 0.001) { len = 1; }
     var ux = dx / len;
     var uy = dy / len;
+    var s_radius = __mdmdview_rect_intersection(s_size.w / 2, s_size.h / 2, ux, uy);
+    var t_radius = __mdmdview_rect_intersection(t_size.w / 2, t_size.h / 2, ux, uy);
+    var trim = 0.5;
+    if (s_radius > trim) { s_radius -= trim; }
+    if (t_radius > trim) { t_radius -= trim; }
     var sx = s_pos.x + ux * s_radius;
     var sy = s_pos.y + uy * s_radius;
     var ex = t_pos.x - ux * t_radius;
@@ -4436,21 +4716,48 @@ mod tests {
         let class = "classDiagram\nClass01 <|-- Class02\nClass01 : +int id\nClass02 : +String name";
         let er = "erDiagram\nCUSTOMER ||--o{ ORDER : places\nORDER ||--|{ LINE_ITEM : contains\nCUSTOMER {\n  int id\n  string name\n}\nORDER {\n  int id\n  date created\n}\nLINE_ITEM {\n  int id\n  int qty\n}\n";
         let gantt = "gantt\ntitle Sample Gantt\ndateFormat  YYYY-MM-DD\nsection A\nTask 1 :a1, 2024-01-01, 5d\nTask 2 :after a1, 3d\nsection B\nTask 3 :b1, 2024-01-06, 4d\n";
+        let viewport_width = 1200;
+        let viewport_height = 900;
 
         let flow_svg = worker
-            .render_svg(MermaidRenderer::hash_str(flow), flow)
+            .render_svg(
+                MermaidRenderer::hash_str(flow),
+                flow,
+                viewport_width,
+                viewport_height,
+            )
             .expect("flowchart render");
         let seq_svg = worker
-            .render_svg(MermaidRenderer::hash_str(seq), seq)
+            .render_svg(
+                MermaidRenderer::hash_str(seq),
+                seq,
+                viewport_width,
+                viewport_height,
+            )
             .expect("sequence render");
         let class_svg = worker
-            .render_svg(MermaidRenderer::hash_str(class), class)
+            .render_svg(
+                MermaidRenderer::hash_str(class),
+                class,
+                viewport_width,
+                viewport_height,
+            )
             .expect("class render");
         let er_svg = worker
-            .render_svg(MermaidRenderer::hash_str(er), er)
+            .render_svg(
+                MermaidRenderer::hash_str(er),
+                er,
+                viewport_width,
+                viewport_height,
+            )
             .expect("er render");
         let gantt_svg = worker
-            .render_svg(MermaidRenderer::hash_str(gantt), gantt)
+            .render_svg(
+                MermaidRenderer::hash_str(gantt),
+                gantt,
+                viewport_width,
+                viewport_height,
+            )
             .expect("gantt render");
 
         assert!(flow_svg.contains("<svg"));
@@ -4629,5 +4936,56 @@ mod tests {
     fn test_mermaid_has_pending_default_false() {
         let renderer = MermaidRenderer::new();
         assert!(!renderer.has_pending());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_fix_journey_section_text_fill_adds_fill() {
+        let input = r#"<svg><text class="journey-section section-type-0" x="0">Plan</text></svg>"#;
+        let output = MermaidWorker::fix_journey_section_text(input, "#112233")
+            .expect("journey text updated");
+        assert!(output.contains("class=\"journey-section section-type-0\""));
+        assert!(output.contains("fill:#112233"));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_fix_state_end_circles_swaps_radii() {
+        let input = r#"<svg><g id="state-root_end-0"><circle class="state-end" r="5" width="10" height="10"></circle><circle class="state-start" r="7" width="14" height="14"></circle></g></svg>"#;
+        let output =
+            MermaidWorker::fix_state_end_circles(input).expect("state end circles updated");
+        assert!(output.contains("class=\"state-end\" r=\"7\""));
+        assert!(output.contains("class=\"end-state-inner\" r=\"5\""));
+        assert!(output.contains("class=\"state-end\" r=\"7\" width=\"14\" height=\"14\""));
+        assert!(output.contains("class=\"end-state-inner\" r=\"5\" width=\"10\" height=\"10\""));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mindmap_edge_trim_uses_min_radius() {
+        let dx_idx = MERMAID_DOM_SHIM
+            .find("var dx = t_pos.x - s_pos.x")
+            .expect("mindmap dx computed");
+        let radius_idx = MERMAID_DOM_SHIM
+            .find("var s_radius = __mdmdview_rect_intersection")
+            .expect("mindmap radius computed");
+        assert!(dx_idx < radius_idx);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_flatten_svg_switches_removes_foreignobject() {
+        let input = r#"<svg><switch><foreignObject><div>Plan</div></foreignObject><text>Plan</text></switch></svg>"#;
+        let output =
+            MermaidWorker::flatten_svg_switches(input).expect("switch flattened");
+        assert!(!output.contains("<switch"));
+        assert!(!output.contains("foreignObject"));
+        assert!(output.contains("<text>Plan</text>"));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_dom_shim_clusters_not_labelish() {
+        assert!(MERMAID_DOM_SHIM.contains("has_class(node, 'clusters')"));
     }
 }

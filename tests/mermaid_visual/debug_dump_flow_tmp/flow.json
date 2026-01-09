@@ -1,0 +1,20 @@
+{
+  "version": "1.0.2",
+  "build_timestamp": "2026-01-03T04:57:55.8833518+00:00",
+  "output": "tests/mermaid_visual/debug_dump_flow_tmp/flow.png",
+  "theme": "light",
+  "zoom": 1.000,
+  "content_only": true,
+  "scroll_ratio": null,
+  "scroll_offset": 0.000,
+  "viewport_px": {"width": 600, "height": 400},
+  "content_px": {"width": 600, "height": 400},
+  "pixels_per_point": 1.000,
+  "wait_ms": 5000,
+  "settle_frames": 2,
+  "stable_frames": 3,
+  "timed_out": false,
+  "pending_renders": false,
+  "font_source": null,
+  "elapsed_ms": 2532
+}

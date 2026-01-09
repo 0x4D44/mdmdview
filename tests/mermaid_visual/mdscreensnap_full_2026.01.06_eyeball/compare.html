@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mermaid Comparison</title>
+  <style>
+    :root {
+      --bg: #f5f3ea;
+      --panel: #ffffff;
+      --border: #d0c8b8;
+      --text: #1f1f1f;
+      --muted: #6b6b6b;
+    }
+    body { margin: 0; font-family: "Segoe UI", Tahoma, Arial, sans-serif; background: var(--bg); color: var(--text); }
+    header { padding: 16px 20px; border-bottom: 1px solid var(--border); background: #faf8f2; position: sticky; top: 0; z-index: 10; }
+    header h1 { margin: 0 0 4px 0; font-size: 20px; }
+    header p { margin: 0; color: var(--muted); font-size: 13px; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 16px; padding: 16px; }
+    .case { border: 1px solid var(--border); background: var(--panel); border-radius: 8px; overflow: hidden; }
+    .case h2 { margin: 0; padding: 10px 12px; font-size: 16px; background: #f3efe3; border-bottom: 1px solid var(--border); }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 12px; align-items: start; }
+    .panel { border: 1px solid var(--border); border-radius: 6px; background: #fffdf7; padding: 8px; }
+    .panel h3 { margin: 0 0 6px 0; font-size: 13px; color: var(--muted); }
+    img { width: 100%; height: auto; display: block; background: #fff; border: 1px solid #eee6d6; }
+    .links { padding: 0 12px 12px 12px; font-size: 12px; color: var(--muted); }
+    .links a { color: #2f5c8f; text-decoration: none; margin-right: 12px; }
+    .links a:hover { text-decoration: underline; }
+    @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Mermaid Comparison</h1>
+    <p>Left: mermaid-cli reference. Right: mdmdview render. Click any image for full size.</p>
+  </header>
+  <div class="grid">
+    <section class="case" id="class">
+      <h2>class</h2>
+      <div class="row">
+        <div class="panel">
+          <h3>Reference (mermaid-cli)</h3>
+          <a href="reference/class/mermaid-crop.png"><img src="reference/class/mermaid-crop.png" alt="class reference"></a>
+        </div>
+        <div class="panel">
+          <h3>mdmdview</h3>
+          <a href="actual/class/mdmdview-crop.png"><img src="actual/class/mdmdview-crop.png" alt="class mdmdview"></a>
+        </div>
+      </div>
+      <div class="links">
+        <a href="diff/class/diff.png">diff</a>
+      </div>
+    </section>
+    <section class="case" id="class_complex">
+      <h2>class_complex</h2>
+      <div class="row">
+        <div class="panel">
+          <h3>Reference (mermaid-cli)</h3>
+          <a href="reference/class_complex/mermaid-crop.png"><img src="reference/class_complex/mermaid-crop.png" alt="class_complex reference"></a>
+        </div>
+        <div class="panel">
+          <h3>mdmdview</h3>
+          <a href="actual/class_complex/mdmdview-crop.png"><img src="actual/class_complex/mdmdview-crop.png" alt="class_complex mdmdview"></a>
+        </div>
+      </div>
+      <div class="links">
+        <a href="diff/class_complex/diff.png">diff</a>
+      </div>
+    </section>
+    <section class="case" id="er">
+      <h2>er</h2>
+      <div class="row">
+        <div class="panel">
+          <h3>Reference (mermaid-cli)</h3>
+          <a href="reference/er/mermaid-crop.png"><img src="reference/er/mermaid-crop.png" alt="er reference"></a>
+        </div>
+        <div class="panel">
+          <h3>mdmdview</h3>
+          <a href="actual/er/mdmdview-crop.png"><img src="actual/er/mdmdview-crop.png" alt="er mdmdview"></a>
+        </div>
+      </div>
+      <div class="links">
+        <a href="diff/er/diff.png">diff</a>
+      </div>
+    </section>
+    <section class="case" id="flowchart">
+      <h2>flowchart</h2>
+      <div class="row">
+        <div class="panel">
+          <h3>Reference (mermaid-cli)</h3>
+          <a href="reference/flowchart/mermaid-crop.png"><img src="reference/flowchart/mermaid-crop.png" alt="flowchart reference"></a>
+        </div>
+        <div class="panel">
+          <h3>mdmdview</h3>
+          <a href="actual/flowchart/mdmdview-crop.png"><img src="actual/flowchart/mdmdview-crop.png" alt="flowchart mdmdview"></a>
+        </div>
+      </div>
+      <div class="links">
+        <a href="diff/flowchart/diff.png">diff</a>
+      </div>
+    </section>
+    <section class="case" id="flowchart_subgraph">
+      <h2>flowchart_subgraph</h2>
+      <div class="row">
+        <div class="panel">
+          <h3>Reference (mermaid-cli)</h3>
+          <a href="reference/flowchart_subgraph/mermaid-crop.png"><img src="reference/flowchart_subgraph/mermaid-crop.png" alt="flowchart_subgraph reference"></a>
+        </div>
+        <div class="panel">
+          <h3>mdmdview</h3>
+          <a href="actual/flowchart_subgraph/mdmdview-crop.png"><img src="actual/flowchart_subgraph/mdmdview-crop.png" alt="flowchart_subgraph mdmdview"></a>
+        </div>
+      </div>
+      <div class="links">
+        <a href="diff/flowchart_subgraph/diff.png">diff</a>
+      </div>
+    </section>
+    <section class="case" id="gantt">
+      <h2>gantt</h2>
+      <div class="row">
+        <div class="panel">
+          <h3>Reference (mermaid-cli)</h3>
+          <a href="reference/gantt/mermaid-crop.png"><img src="reference/gantt/mermaid-crop.png" alt="gantt reference"></a>
+        </div>
+        <div class="panel">
+          <h3>mdmdview</h3>
+          <a href="actual/gantt/mdmdview-crop.png"><img src="actual/gantt/mdmdview-crop.png" alt="gantt mdmdview"></a>
+        </div>
+      </div>
+      <div class="links">
+        <a href="diff/gantt/diff.png">diff</a>
+      </div>
+    </section>
+    <section class="case" id="gitgraph">
+      <h2>gitgraph</h2>
+      <div class="row">
+        <div class="panel">
+          <h3>Reference (mermaid-cli)</h3>
+          <a href="reference/gitgraph/mermaid-crop.png"><img src="reference/gitgraph/mermaid-crop.png" alt="gitgraph reference"></a>
+        </div>
+        <div class="panel">
+          <h3>mdmdview</h3>
+          <a href="actual/gitgraph/mdmdview-crop.png"><img src="actual/gitgraph/mdmdview-crop.png" alt="gitgraph mdmdview"></a>
+        </div>
+      </div>
+      <div class="links">
+        <a href="diff/gitgraph/diff.png">diff</a>
+      </div>
+    </section>
+    <section class="case" id="journey">
+      <h2>journey</h2>
+      <div class="row">
+        <div class="panel">
+          <h3>Reference (mermaid-cli)</h3>
+          <a href="reference/journey/mermaid-crop.png"><img src="reference/journey/mermaid-crop.png" alt="journey reference"></a>
+        </div>
+        <div class="panel">
+          <h3>mdmdview</h3>
+          <a href="actual/journey/mdmdview-crop.png"><img src="actual/journey/mdmdview-crop.png" alt="journey mdmdview"></a>
+        </div>
+      </div>
+      <div class="links">
+        <a href="diff/journey/diff.png">diff</a>
+      </div>
+    </section>
+    <section class="case" id="mindmap">
+      <h2>mindmap</h2>
+      <div class="row">
+        <div class="panel">
+          <h3>Reference (mermaid-cli)</h3>
+          <a href="reference/mindmap/mermaid-crop.png"><img src="reference/mindmap/mermaid-crop.png" alt="mindmap reference"></a>
+        </div>
+        <div class="panel">
+          <h3>mdmdview</h3>
+          <a href="actual/mindmap/mdmdview-crop.png"><img src="actual/mindmap/mdmdview-crop.png" alt="mindmap mdmdview"></a>
+        </div>
+      </div>
+      <div class="links">
+        <a href="diff/mindmap/diff.png">diff</a>
+      </div>
+    </section>
+    <section class="case" id="pie">
+      <h2>pie</h2>
+      <div class="row">
+        <div class="panel">
+          <h3>Reference (mermaid-cli)</h3>
+          <a href="reference/pie/mermaid-crop.png"><img src="reference/pie/mermaid-crop.png" alt="pie reference"></a>
+        </div>
+        <div class="panel">
+          <h3>mdmdview</h3>
+          <a href="actual/pie/mdmdview-crop.png"><img src="actual/pie/mdmdview-crop.png" alt="pie mdmdview"></a>
+        </div>
+      </div>
+      <div class="links">
+        <a href="diff/pie/diff.png">diff</a>
+      </div>
+    </section>
+    <section class="case" id="sequence">
+      <h2>sequence</h2>
+      <div class="row">
+        <div class="panel">
+          <h3>Reference (mermaid-cli)</h3>
+          <a href="reference/sequence/mermaid-crop.png"><img src="reference/sequence/mermaid-crop.png" alt="sequence reference"></a>
+        </div>
+        <div class="panel">
+          <h3>mdmdview</h3>
+          <a href="actual/sequence/mdmdview-crop.png"><img src="actual/sequence/mdmdview-crop.png" alt="sequence mdmdview"></a>
+        </div>
+      </div>
+      <div class="links">
+        <a href="diff/sequence/diff.png">diff</a>
+      </div>
+    </section>
+    <section class="case" id="sequence_alt_loop">
+      <h2>sequence_alt_loop</h2>
+      <div class="row">
+        <div class="panel">
+          <h3>Reference (mermaid-cli)</h3>
+          <a href="reference/sequence_alt_loop/mermaid-crop.png"><img src="reference/sequence_alt_loop/mermaid-crop.png" alt="sequence_alt_loop reference"></a>
+        </div>
+        <div class="panel">
+          <h3>mdmdview</h3>
+          <a href="actual/sequence_alt_loop/mdmdview-crop.png"><img src="actual/sequence_alt_loop/mdmdview-crop.png" alt="sequence_alt_loop mdmdview"></a>
+        </div>
+      </div>
+      <div class="links">
+        <a href="diff/sequence_alt_loop/diff.png">diff</a>
+      </div>
+    </section>
+    <section class="case" id="state">
+      <h2>state</h2>
+      <div class="row">
+        <div class="panel">
+          <h3>Reference (mermaid-cli)</h3>
+          <a href="reference/state/mermaid-crop.png"><img src="reference/state/mermaid-crop.png" alt="state reference"></a>
+        </div>
+        <div class="panel">
+          <h3>mdmdview</h3>
+          <a href="actual/state/mdmdview-crop.png"><img src="actual/state/mdmdview-crop.png" alt="state mdmdview"></a>
+        </div>
+      </div>
+      <div class="links">
+        <a href="diff/state/diff.png">diff</a>
+      </div>
+    </section>
+    <section class="case" id="state_nested">
+      <h2>state_nested</h2>
+      <div class="row">
+        <div class="panel">
+          <h3>Reference (mermaid-cli)</h3>
+          <a href="reference/state_nested/mermaid-crop.png"><img src="reference/state_nested/mermaid-crop.png" alt="state_nested reference"></a>
+        </div>
+        <div class="panel">
+          <h3>mdmdview</h3>
+          <a href="actual/state_nested/mdmdview-crop.png"><img src="actual/state_nested/mdmdview-crop.png" alt="state_nested mdmdview"></a>
+        </div>
+      </div>
+      <div class="links">
+        <a href="diff/state_nested/diff.png">diff</a>
+      </div>
+    </section>
+    <section class="case" id="timeline">
+      <h2>timeline</h2>
+      <div class="row">
+        <div class="panel">
+          <h3>Reference (mermaid-cli)</h3>
+          <a href="reference/timeline/mermaid-crop.png"><img src="reference/timeline/mermaid-crop.png" alt="timeline reference"></a>
+        </div>
+        <div class="panel">
+          <h3>mdmdview</h3>
+          <a href="actual/timeline/mdmdview-crop.png"><img src="actual/timeline/mdmdview-crop.png" alt="timeline mdmdview"></a>
+        </div>
+      </div>
+      <div class="links">
+        <a href="diff/timeline/diff.png">diff</a>
+      </div>
+    </section>
+  </div>
+</body>
+</html>

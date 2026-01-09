@@ -1,0 +1,16 @@
+error: Mermaid render error: Mermaid render promise did not resolve
+    at <anonymous> (eval_script:69:36)
+
+
+---
+mindmap
+  root((mindmap))
+    Origins
+      Long history
+    Research
+      Graphs
+      Notes
+    Uses
+      Planning
+      Docs
+

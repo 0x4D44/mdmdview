@@ -634,7 +634,7 @@ mod tests {
         ];
         let opts = parse_cli_from(args).expect("parse");
         assert!(opts.screenshot);
-        assert_eq!(opts.content_only, true);
+        assert!(opts.content_only);
         assert_eq!(opts.wait_ms, Some(1200));
         assert_eq!(opts.settle_frames, Some(3));
         assert_eq!(opts.zoom, Some(1.5));

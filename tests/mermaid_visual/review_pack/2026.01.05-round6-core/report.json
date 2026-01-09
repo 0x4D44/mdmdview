@@ -1,0 +1,310 @@
+[
+  {
+    "case": "er",
+    "ok": false,
+    "message": "diff_exceeds_threshold",
+    "diff_pixels": 8482,
+    "percent": 12.276740483427414,
+    "max_delta": 227,
+    "size_ref": [
+      141,
+      490
+    ],
+    "size_actual": [
+      141,
+      490
+    ],
+    "meta": {
+      "version": "1.0.2",
+      "build_timestamp": "2026-01-04T15:58:18.3974654+00:00",
+      "output": "C:\\language\\mdmdview\\tests\\mermaid_visual\\review_pack\\2026.01.05-round6-core\\er\\mdmdview.png",
+      "theme": "light",
+      "zoom": 1.0,
+      "content_only": true,
+      "scroll_ratio": null,
+      "scroll_offset": 0.0,
+      "viewport_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "content_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "pixels_per_point": 1.0,
+      "wait_ms": 12000,
+      "settle_frames": 3,
+      "stable_frames": 5,
+      "timed_out": false,
+      "pending_renders": false,
+      "font_source": null,
+      "elapsed_ms": 5156
+    },
+    "md_non_bg": 0.11170936459690259,
+    "ref_non_bg": 0.22414242292661746
+  },
+  {
+    "case": "flowchart",
+    "ok": true,
+    "message": "ok",
+    "diff_pixels": 4630,
+    "percent": 6.010879302062913,
+    "max_delta": 227,
+    "size_ref": [
+      197,
+      391
+    ],
+    "size_actual": [
+      197,
+      391
+    ],
+    "meta": {
+      "version": "1.0.2",
+      "build_timestamp": "2026-01-04T15:58:18.3974654+00:00",
+      "output": "C:\\language\\mdmdview\\tests\\mermaid_visual\\review_pack\\2026.01.05-round6-core\\flowchart\\mdmdview.png",
+      "theme": "light",
+      "zoom": 1.0,
+      "content_only": true,
+      "scroll_ratio": null,
+      "scroll_offset": 0.0,
+      "viewport_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "content_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "pixels_per_point": 1.0,
+      "wait_ms": 12000,
+      "settle_frames": 3,
+      "stable_frames": 4,
+      "timed_out": false,
+      "pending_renders": false,
+      "font_source": null,
+      "elapsed_ms": 5199
+    },
+    "md_non_bg": 0.043958611915302426,
+    "ref_non_bg": 0.0585119503550703
+  },
+  {
+    "case": "flowchart_subgraph",
+    "ok": true,
+    "message": "ok",
+    "diff_pixels": 4404,
+    "percent": 5.294096433336939,
+    "max_delta": 227,
+    "size_ref": [
+      711,
+      117
+    ],
+    "size_actual": [
+      711,
+      117
+    ],
+    "meta": {
+      "version": "1.0.2",
+      "build_timestamp": "2026-01-04T15:58:18.3974654+00:00",
+      "output": "C:\\language\\mdmdview\\tests\\mermaid_visual\\review_pack\\2026.01.05-round6-core\\flowchart_subgraph\\mdmdview.png",
+      "theme": "light",
+      "zoom": 1.0,
+      "content_only": true,
+      "scroll_ratio": null,
+      "scroll_offset": 0.0,
+      "viewport_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "content_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "pixels_per_point": 1.0,
+      "wait_ms": 12000,
+      "settle_frames": 3,
+      "stable_frames": 4,
+      "timed_out": false,
+      "pending_renders": false,
+      "font_source": null,
+      "elapsed_ms": 5570
+    },
+    "md_non_bg": 0.6623631096204936,
+    "ref_non_bg": 0.6755382451584984
+  },
+  {
+    "case": "gitgraph",
+    "ok": false,
+    "message": "diff_exceeds_threshold",
+    "diff_pixels": 8945,
+    "percent": 15.433057280883366,
+    "max_delta": 238,
+    "size_ref": [
+      322,
+      180
+    ],
+    "size_actual": [
+      322,
+      180
+    ],
+    "meta": {
+      "version": "1.0.2",
+      "build_timestamp": "2026-01-04T15:58:18.3974654+00:00",
+      "output": "C:\\language\\mdmdview\\tests\\mermaid_visual\\review_pack\\2026.01.05-round6-core\\gitgraph\\mdmdview.png",
+      "theme": "light",
+      "zoom": 1.0,
+      "content_only": true,
+      "scroll_ratio": null,
+      "scroll_offset": 0.0,
+      "viewport_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "content_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "pixels_per_point": 1.0,
+      "wait_ms": 12000,
+      "settle_frames": 3,
+      "stable_frames": 4,
+      "timed_out": false,
+      "pending_renders": false,
+      "font_source": null,
+      "elapsed_ms": 4757
+    },
+    "md_non_bg": 0.17924430641821945,
+    "ref_non_bg": 0.14858523119392686
+  },
+  {
+    "case": "state",
+    "ok": true,
+    "message": "ok",
+    "diff_pixels": 3591,
+    "percent": 6.539792387543253,
+    "max_delta": 227,
+    "size_ref": [
+      170,
+      323
+    ],
+    "size_actual": [
+      170,
+      323
+    ],
+    "meta": {
+      "version": "1.0.2",
+      "build_timestamp": "2026-01-04T15:58:18.3974654+00:00",
+      "output": "C:\\language\\mdmdview\\tests\\mermaid_visual\\review_pack\\2026.01.05-round6-core\\state\\mdmdview.png",
+      "theme": "light",
+      "zoom": 1.0,
+      "content_only": true,
+      "scroll_ratio": null,
+      "scroll_offset": 0.0,
+      "viewport_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "content_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "pixels_per_point": 1.0,
+      "wait_ms": 12000,
+      "settle_frames": 3,
+      "stable_frames": 4,
+      "timed_out": false,
+      "pending_renders": false,
+      "font_source": null,
+      "elapsed_ms": 4947
+    },
+    "md_non_bg": 0.05246767437625205,
+    "ref_non_bg": 0.06038972864687671
+  },
+  {
+    "case": "state_nested",
+    "ok": true,
+    "message": "ok",
+    "diff_pixels": 8626,
+    "percent": 6.254939923281631,
+    "max_delta": 227,
+    "size_ref": [
+      199,
+      693
+    ],
+    "size_actual": [
+      199,
+      693
+    ],
+    "meta": {
+      "version": "1.0.2",
+      "build_timestamp": "2026-01-04T15:58:18.3974654+00:00",
+      "output": "C:\\language\\mdmdview\\tests\\mermaid_visual\\review_pack\\2026.01.05-round6-core\\state_nested\\mdmdview.png",
+      "theme": "light",
+      "zoom": 1.0,
+      "content_only": true,
+      "scroll_ratio": null,
+      "scroll_offset": 0.0,
+      "viewport_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "content_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "pixels_per_point": 1.0,
+      "wait_ms": 12000,
+      "settle_frames": 3,
+      "stable_frames": 8,
+      "timed_out": false,
+      "pending_renders": false,
+      "font_source": null,
+      "elapsed_ms": 7579
+    },
+    "md_non_bg": 0.048206399965193936,
+    "ref_non_bg": 0.05642933281124236
+  },
+  {
+    "case": "timeline",
+    "ok": false,
+    "message": "diff_exceeds_threshold",
+    "diff_pixels": 55853,
+    "percent": 16.735482711092466,
+    "max_delta": 255,
+    "size_ref": [
+      902,
+      370
+    ],
+    "size_actual": [
+      902,
+      370
+    ],
+    "meta": {
+      "version": "1.0.2",
+      "build_timestamp": "2026-01-04T15:58:18.3974654+00:00",
+      "output": "C:\\language\\mdmdview\\tests\\mermaid_visual\\review_pack\\2026.01.05-round6-core\\timeline\\mdmdview.png",
+      "theme": "light",
+      "zoom": 1.0,
+      "content_only": true,
+      "scroll_ratio": null,
+      "scroll_offset": 0.0,
+      "viewport_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "content_px": {
+        "width": 1600,
+        "height": 1000
+      },
+      "pixels_per_point": 1.0,
+      "wait_ms": 12000,
+      "settle_frames": 3,
+      "stable_frames": 4,
+      "timed_out": false,
+      "pending_renders": false,
+      "font_source": null,
+      "elapsed_ms": 7161
+    },
+    "md_non_bg": 0.28994426799304845,
+    "ref_non_bg": 0.297611913465572
+  }
+]
