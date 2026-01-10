@@ -7,7 +7,6 @@ tests/regression/actual/
 tests/regression/diff/
 tests/regression/report/
 tests/mermaid_visual/actual/
-tests/mermaid_visual/reference/
 tests/mermaid_visual/diff/
 tests/mermaid_visual/report/
 tests/mermaid_visual/scratch/
