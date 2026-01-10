@@ -3525,9 +3525,17 @@ function __mdmdview_mindmap_layout(nodes, edges) {
     var uy = dy / len;
     var s_radius = __mdmdview_rect_intersection(s_size.w / 2, s_size.h / 2, ux, uy);
     var t_radius = __mdmdview_rect_intersection(t_size.w / 2, t_size.h / 2, ux, uy);
-    var trim = 0.5;
-    if (s_radius > trim) { s_radius -= trim; }
-    if (t_radius > trim) { t_radius -= trim; }
+    var overlap = -2;
+    s_radius += overlap;
+    t_radius += overlap;
+    if (s_radius < 0) { s_radius = 0; }
+    if (t_radius < 0) { t_radius = 0; }
+    var max_total = len * 0.95;
+    if (s_radius + t_radius > max_total) {
+      var scale = max_total / (s_radius + t_radius);
+      s_radius *= scale;
+      t_radius *= scale;
+    }
     var sx = s_pos.x + ux * s_radius;
     var sy = s_pos.y + uy * s_radius;
     var ex = t_pos.x - ux * t_radius;
@@ -5045,6 +5053,13 @@ mod tests {
             .find("var s_radius = __mdmdview_rect_intersection")
             .expect("mindmap radius computed");
         assert!(dx_idx < radius_idx);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mindmap_edge_overlap_padding_present() {
+        assert!(MERMAID_DOM_SHIM.contains("var overlap = -2"));
+        assert!(MERMAID_DOM_SHIM.contains("var max_total = len * 0.95"));
     }
 
     #[cfg(feature = "mermaid-quickjs")]
