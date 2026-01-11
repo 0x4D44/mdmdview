@@ -231,4 +231,17 @@ mod tests {
             svg_bytes_to_color_image_with_bg(svg.as_bytes(), None).expect("svg decode");
         assert_eq!((w, h), (256, 256));
     }
+
+    #[test]
+    fn test_svg_bytes_to_color_image_scales_large_dimensions() {
+        let svg = r#"<svg width="8192" height="8192" xmlns="http://www.w3.org/2000/svg">
+<rect width="8192" height="8192" fill="red"/>
+</svg>"#;
+        let (_img, w, h) =
+            svg_bytes_to_color_image_with_bg(svg.as_bytes(), None).expect("svg decode");
+        assert!(w <= 4096);
+        assert!(h <= 4096);
+        assert!(w > 0);
+        assert!(h > 0);
+    }
 }

@@ -445,9 +445,6 @@ impl MarkdownViewerApp {
         } else {
             Self::fold_for_search(&self.last_query)
         };
-        if needle.is_empty() {
-            return;
-        }
         let mut start = self.last_match_index.unwrap_or(usize::MAX);
         if start == usize::MAX {
             start = 0;
@@ -485,9 +482,6 @@ impl MarkdownViewerApp {
         } else {
             Self::fold_for_search(&self.last_query)
         };
-        if needle.is_empty() {
-            return;
-        }
         let total = self.parsed_elements.len();
         let mut start = self.last_match_index.unwrap_or(0);
         if start == 0 {
@@ -2143,10 +2137,13 @@ impl MarkdownViewerApp {
                 egui::Vec2::ZERO
             };
 
+            // Use AlwaysVisible to prevent scrollbar appearance/disappearance from
+            // changing the available width, which would cause Mermaid diagrams to
+            // re-render at different widths and create layout oscillation/flickering.
             let mut scroll_area = egui::ScrollArea::vertical()
                 .id_source(self.scroll_area_id)
                 .auto_shrink([false, false])
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded);
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
             if let Some(offset) = screenshot_scroll_offset {
                 scroll_area = scroll_area.vertical_scroll_offset(offset);
             }
@@ -3047,6 +3044,20 @@ mod tests {
     }
 
     #[test]
+    fn test_load_sample_without_existing_content_skips_history() {
+        let mut app = MarkdownViewerApp::new();
+        app.current_content.clear();
+        app.raw_buffer.clear();
+        app.history.clear();
+        app.history_index = 0;
+        let sample = &SAMPLE_FILES[0];
+
+        app.load_sample(sample);
+
+        assert!(app.history.is_empty());
+    }
+
+    #[test]
     fn test_load_file() -> Result<()> {
         let mut app = MarkdownViewerApp::new();
 
@@ -3082,6 +3093,36 @@ mod tests {
             app.pending_file_load.as_ref().expect("pending").path,
             path
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_file_skips_async_when_screenshot_active() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let mut temp_file = NamedTempFile::new()?;
+        let payload = vec![b'a'; ASYNC_LOAD_THRESHOLD_BYTES as usize];
+        temp_file.write_all(&payload)?;
+        temp_file.flush()?;
+
+        let config = ScreenshotConfig {
+            output_path: temp_file.path().with_extension("png"),
+            viewport_width: 120.0,
+            viewport_height: 80.0,
+            content_only: false,
+            scroll_ratio: None,
+            wait_ms: 0,
+            settle_frames: 0,
+            zoom: 1.0,
+            theme: ScreenshotTheme::Light,
+            font_source: None,
+        };
+        app.screenshot = Some(ScreenshotState::new(config));
+
+        let path = temp_file.path().to_path_buf();
+        app.load_file(path.clone(), false)?;
+
+        assert!(app.pending_file_load.is_none());
+        assert_eq!(app.current_file, Some(path));
         Ok(())
     }
 
@@ -3779,6 +3820,44 @@ The end.
         assert!(app.last_window_pos.is_some());
         assert!(app.last_window_size.is_some());
         Ok(())
+    }
+
+    #[test]
+    fn test_update_impl_applies_size_adjustment() {
+        let mut app = MarkdownViewerApp::new();
+        let ctx = egui::Context::default();
+        let mut input = default_input();
+        if let Some(vp) = input.viewports.get_mut(&egui::ViewportId::ROOT) {
+            vp.monitor_size = Some(egui::vec2(800.0, 600.0));
+            vp.outer_rect = Some(egui::Rect::from_min_size(
+                egui::pos2(10.0, 10.0),
+                egui::vec2(800.0, 600.0),
+            ));
+            vp.inner_rect = Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(200.0, 100.0),
+            ));
+            vp.fullscreen = Some(false);
+            vp.maximized = Some(false);
+        }
+
+        run_app_frame(&mut app, &ctx, input);
+
+        assert!(app.last_window_size.is_some());
+        assert!(app.last_window_pos.is_some());
+    }
+
+    #[test]
+    fn test_update_impl_applies_deferred_toggles() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_toggle_requested = true;
+        app.write_toggle_requested = true;
+
+        let ctx = egui::Context::default();
+        run_app_frame(&mut app, &ctx, default_input());
+
+        assert_eq!(app.view_mode, ViewMode::Raw);
+        assert!(app.write_enabled);
     }
 
     #[test]
@@ -4595,6 +4674,18 @@ The end.
     }
 
     #[test]
+    fn test_restore_from_history_out_of_range_no_change() {
+        let mut app = MarkdownViewerApp::new();
+        app.current_content = "current".to_string();
+        app.history_index = 3;
+
+        app.restore_from_history();
+
+        assert_eq!(app.current_content, "current");
+        assert!(app.current_file.is_none());
+    }
+
+    #[test]
     fn test_handle_file_drop_mixed_files() -> Result<()> {
         let mut app = MarkdownViewerApp::new();
         let temp_dir = tempfile::TempDir::new()?;
@@ -4661,6 +4752,103 @@ The end.
         app.move_raw_cursor_lines(&ctx, -1);
         let up_idx = app.raw_cursor.unwrap_or(0);
         assert!(up_idx <= down_idx);
+    }
+
+    #[test]
+    fn test_move_raw_cursor_lines_early_return_when_not_raw() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_mode = ViewMode::Rendered;
+        app.write_enabled = true;
+        app.raw_cursor = Some(2);
+
+        let ctx = egui::Context::default();
+        app.move_raw_cursor_lines(&ctx, 1);
+
+        assert_eq!(app.raw_cursor, Some(2));
+    }
+
+    #[test]
+    fn test_move_raw_cursor_lines_write_disabled_returns() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_mode = ViewMode::Raw;
+        app.write_enabled = false;
+        app.raw_cursor = Some(1);
+
+        let ctx = egui::Context::default();
+        app.move_raw_cursor_lines(&ctx, 1);
+
+        assert_eq!(app.raw_cursor, Some(1));
+    }
+
+    #[test]
+    fn test_move_raw_cursor_lines_without_text_state() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_mode = ViewMode::Raw;
+        app.write_enabled = true;
+        app.raw_buffer = "Line".to_string();
+        app.current_content = app.raw_buffer.clone();
+
+        let ctx = egui::Context::default();
+        app.move_raw_cursor_lines(&ctx, 1);
+
+        assert!(app.raw_cursor.is_none());
+    }
+
+    #[test]
+    fn test_move_raw_cursor_lines_negative_at_start_no_loop() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_mode = ViewMode::Raw;
+        app.write_enabled = true;
+        app.raw_buffer = "Line 1\nLine 2".to_string();
+        app.current_content = app.raw_buffer.clone();
+
+        let ctx = egui::Context::default();
+        let editor_id = egui::Id::new("raw_editor");
+        let mut state = egui::text_edit::TextEditState::default();
+        let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(0));
+        state.cursor.set_char_range(Some(cr));
+        state.store(&ctx, editor_id);
+
+        app.move_raw_cursor_lines(&ctx, -1);
+        assert_eq!(app.raw_cursor, Some(0));
+    }
+
+    #[test]
+    fn test_move_raw_cursor_lines_down_without_newline() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_mode = ViewMode::Raw;
+        app.write_enabled = true;
+        app.raw_buffer = "Line".to_string();
+        app.current_content = app.raw_buffer.clone();
+
+        let ctx = egui::Context::default();
+        let editor_id = egui::Id::new("raw_editor");
+        let mut state = egui::text_edit::TextEditState::default();
+        let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(0));
+        state.cursor.set_char_range(Some(cr));
+        state.store(&ctx, editor_id);
+
+        app.move_raw_cursor_lines(&ctx, 1);
+        assert_eq!(app.raw_cursor, Some(app.raw_buffer.len()));
+    }
+
+    #[test]
+    fn test_move_raw_cursor_lines_down_at_end_no_loop() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_mode = ViewMode::Raw;
+        app.write_enabled = true;
+        app.raw_buffer = "Line 1\nLine 2".to_string();
+        app.current_content = app.raw_buffer.clone();
+
+        let ctx = egui::Context::default();
+        let editor_id = egui::Id::new("raw_editor");
+        let mut state = egui::text_edit::TextEditState::default();
+        let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(app.raw_buffer.len()));
+        state.cursor.set_char_range(Some(cr));
+        state.store(&ctx, editor_id);
+
+        app.move_raw_cursor_lines(&ctx, 1);
+        assert_eq!(app.raw_cursor, Some(app.raw_buffer.len()));
     }
 
     #[test]
@@ -4928,6 +5116,28 @@ The end.
     }
 
     #[test]
+    fn test_handle_shortcuts_ctrl_f_preserves_match_index() {
+        let mut app = MarkdownViewerApp::new();
+        app.last_match_index = Some(2);
+
+        let mut input = default_input();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::F,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::CTRL,
+        });
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(input, |ctx| {
+            app.handle_shortcuts(ctx);
+        });
+
+        assert_eq!(app.last_match_index, Some(2));
+    }
+
+    #[test]
     fn test_handle_shortcuts_ctrl_mouse_wheel_zoom_directions() {
         let mut app = MarkdownViewerApp::new();
         let ctx = egui::Context::default();
@@ -4950,6 +5160,17 @@ The end.
             delta: egui::vec2(0.0, -20.0),
             modifiers: egui::Modifiers::CTRL,
         });
+        let _ = ctx.run(input, |ctx| {
+            app.handle_shortcuts(ctx);
+        });
+    }
+
+    #[test]
+    fn test_handle_shortcuts_ctrl_mouse_wheel_without_events() {
+        let mut app = MarkdownViewerApp::new();
+        let ctx = egui::Context::default();
+        let mut input = default_input();
+        input.modifiers = egui::Modifiers::CTRL;
         let _ = ctx.run(input, |ctx| {
             app.handle_shortcuts(ctx);
         });
@@ -5330,6 +5551,23 @@ The end.
     }
 
     #[test]
+    fn test_toggle_write_mode_without_cursor_range() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_mode = ViewMode::Raw;
+        app.write_enabled = true;
+
+        let ctx = egui::Context::default();
+        let editor_id = egui::Id::new("raw_editor");
+        let mut state = egui::text_edit::TextEditState::default();
+        state.cursor.set_char_range(None);
+        state.store(&ctx, editor_id);
+
+        app.toggle_write_mode(&ctx);
+        assert!(!app.write_enabled);
+        assert!(app.raw_cursor.is_none());
+    }
+
+    #[test]
     fn test_move_raw_cursor_lines_moves_to_end() {
         let mut app = MarkdownViewerApp::new();
         app.view_mode = ViewMode::Raw;
@@ -5596,6 +5834,56 @@ The end.
     }
 
     #[test]
+    fn test_handle_shortcuts_f3_triggers_next() {
+        let mut app = MarkdownViewerApp::new();
+        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+            "Nav".to_string(),
+        )])];
+        app.search_query = "Nav".to_string();
+
+        let mut input = default_input();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::F3,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(input, |ctx| {
+            app.handle_shortcuts(ctx);
+        });
+
+        assert_eq!(app.last_match_index, Some(0));
+    }
+
+    #[test]
+    fn test_handle_shortcuts_alt_f3_triggers_previous() {
+        let mut app = MarkdownViewerApp::new();
+        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+            "Nav".to_string(),
+        )])];
+        app.search_query = "Nav".to_string();
+
+        let mut input = default_input();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::F3,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::ALT,
+        });
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(input, |ctx| {
+            app.handle_shortcuts(ctx);
+        });
+
+        assert_eq!(app.last_match_index, Some(0));
+    }
+
+    #[test]
     fn test_render_file_menu_save_error_sets_message() {
         let mut app = MarkdownViewerApp::new();
         app.current_file = Some(PathBuf::from("missing_dir\\save.md"));
@@ -5621,6 +5909,13 @@ The end.
             true,
             Color32::WHITE,
         );
+        assert!(!job.sections.is_empty());
+    }
+
+    #[test]
+    fn test_menu_text_with_mnemonic_no_underline() {
+        let job =
+            MarkdownViewerApp::menu_text_with_mnemonic(None, "Save", 'S', false, Color32::WHITE);
         assert!(!job.sections.is_empty());
     }
 
@@ -5657,6 +5952,23 @@ The end.
         };
         let mut app = MarkdownViewerApp::new();
         app.screenshot = Some(ScreenshotState::new(config));
+        assert!(!app.should_persist_window_state());
+    }
+
+    #[test]
+    fn test_should_persist_window_state_recently_persisted() {
+        let mut app = MarkdownViewerApp::new();
+        app.last_window_pos = Some([10.0, 10.0]);
+        app.last_window_size = Some([800.0, 600.0]);
+        app.last_persist_instant = std::time::Instant::now();
+        assert!(!app.should_persist_window_state());
+    }
+
+    #[test]
+    fn test_should_persist_window_state_without_window_state() {
+        let mut app = MarkdownViewerApp::new();
+        app.last_persist_instant =
+            std::time::Instant::now() - std::time::Duration::from_secs(2);
         assert!(!app.should_persist_window_state());
     }
 

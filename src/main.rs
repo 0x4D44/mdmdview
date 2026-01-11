@@ -98,9 +98,6 @@ where
     }
 
     if opts.screenshot {
-        if opts.initial_file.is_none() {
-            return Err("Missing screenshot input file after --screenshot".to_string());
-        }
         if opts.screenshot_output.is_none() {
             return Err("Missing --output for screenshot mode".to_string());
         }
@@ -518,6 +515,17 @@ mod tests {
                 _lock: lock,
             }
         }
+
+        fn unset(key: &'static str) -> Self {
+            let lock = env_lock();
+            let original = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self {
+                key,
+                original,
+                _lock: lock,
+            }
+        }
     }
 
     impl Drop for EnvGuard {
@@ -738,6 +746,36 @@ mod tests {
             let _guard = EnvGuard::set("MDMDVIEW_MERMAID_MAIN_BKG", "bad");
             let color = screenshot_background_color();
             assert_eq!(color, egui::Color32::from_rgb(255, 248, 219));
+        }
+    }
+
+    #[test]
+    fn test_screenshot_background_color_default_when_unset() {
+        let _guard = EnvGuard::unset("MDMDVIEW_MERMAID_MAIN_BKG");
+        let color = screenshot_background_color();
+        assert_eq!(color, egui::Color32::from_rgb(255, 248, 219));
+    }
+
+    #[test]
+    fn test_env_guard_restores_previous_value() {
+        let key = "MDMDVIEW_MERMAID_MAIN_BKG";
+        let previous = std::env::var(key).ok();
+        {
+            let lock = env_lock();
+            std::env::set_var(key, "orig");
+            let guard = EnvGuard {
+                key,
+                original: Some("orig".to_string()),
+                _lock: lock,
+            };
+            std::env::set_var(key, "new");
+            drop(guard);
+        }
+        assert_eq!(std::env::var(key).ok().as_deref(), Some("orig"));
+        let _lock = env_lock();
+        match previous {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
         }
     }
 

@@ -115,12 +115,6 @@ pub enum InlineSpan {
     },
 }
 
-impl InlineSpan {
-    fn is_text_like(&self) -> bool {
-        !matches!(self, InlineSpan::Image { .. })
-    }
-}
-
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone)]
 enum CellFragment<'a> {
@@ -405,9 +399,7 @@ impl MarkdownRenderer {
         let flush_run =
             |start: &mut Option<usize>, end: usize, fragments: &mut Vec<CellFragment<'a>>| {
                 if let Some(run_begin) = start.take() {
-                    if run_begin < end {
-                        fragments.push(CellFragment::Text(&spans[run_begin..end]));
-                    }
+                    fragments.push(CellFragment::Text(&spans[run_begin..end]));
                 }
             };
 
@@ -418,7 +410,7 @@ impl MarkdownRenderer {
                 continue;
             }
 
-            if span.is_text_like() && run_start.is_none() {
+            if run_start.is_none() {
                 run_start = Some(idx);
             }
         }
@@ -3218,10 +3210,8 @@ impl MarkdownRenderer {
                 }
 
                 if found_closing && char_count > 0 {
-                    for _ in 0..char_count {
-                        if let Some(nc) = chars.next() {
-                            buf.push(nc);
-                        }
+                    for nc in chars.by_ref().take(char_count) {
+                        buf.push(nc);
                     }
                     // Skip the closing caret
                     chars.next();
@@ -5557,7 +5547,9 @@ mod tests {
     fn test_resolve_image_path_keeps_remote() {
         let renderer = MarkdownRenderer::new();
         let src = "https://example.com/image.png";
+        let http_src = "http://example.com/image.png";
         assert_eq!(renderer.resolve_image_path(src), src);
+        assert_eq!(renderer.resolve_image_path(http_src), http_src);
         let data_src = "data:image/png;base64,AAAA";
         assert_eq!(renderer.resolve_image_path(data_src), data_src);
     }
@@ -5637,6 +5629,25 @@ mod tests {
     fn test_persist_resizable_widths_returns_on_empty() {
         let renderer = MarkdownRenderer::new();
         renderer.persist_resizable_widths(1, &[], &[]);
+    }
+
+    #[test]
+    fn test_persist_resizable_widths_returns_on_empty_widths() {
+        let renderer = MarkdownRenderer::new();
+        let spec = ColumnSpec::new(
+            0,
+            "A",
+            ColumnPolicy::Resizable {
+                min: 20.0,
+                preferred: 80.0,
+                clip: false,
+            },
+            None,
+        );
+        let table_id = 7u64;
+        renderer.persist_resizable_widths(table_id, &[spec], &[]);
+        let metrics = renderer.table_metrics.borrow();
+        assert!(metrics.entry(table_id).is_none());
     }
 
     #[test]
@@ -5838,6 +5849,12 @@ mod tests {
     }
 
     #[test]
+    fn test_superscript_expansion_allows_plus_symbol() {
+        let out = MarkdownRenderer::expand_superscripts("x^+^");
+        assert!(out.contains('\u{207a}'));
+    }
+
+    #[test]
     fn test_superscript_expansion_single_caret() {
         // Test that single carets (not paired) are left as-is
         let s = "2^32 = 4,294,967,296";
@@ -6023,6 +6040,13 @@ mod tests {
     }
 
     #[test]
+    fn test_expand_shortcodes_unknown_code_keeps_text() {
+        let input = "Unknown :notacode: stays the same.";
+        let out = MarkdownRenderer::expand_shortcodes(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
     fn test_fix_unicode_chars_normalizes_basic_cases() {
         let renderer = MarkdownRenderer::new();
         let input = "A\u{00A0}B\u{2013}C";
@@ -6122,6 +6146,54 @@ mod tests {
         ];
         let plain_text = MarkdownRenderer::elements_to_plain_text(&elements);
         assert_eq!(plain_text, "First\nList\nQuote\nH1\nH2\nR1\n---\n");
+    }
+
+    #[test]
+    fn test_elements_to_plain_text_list_only_starts_without_newline() {
+        let elements = vec![MarkdownElement::List {
+            ordered: false,
+            items: vec![ListItem {
+                blocks: vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+                    "Item".to_string(),
+                )])],
+            }],
+        }];
+        let plain_text = MarkdownRenderer::elements_to_plain_text(&elements);
+        assert_eq!(plain_text, "Item");
+    }
+
+    #[test]
+    fn test_elements_to_plain_text_quote_only_starts_without_newline() {
+        let elements = vec![MarkdownElement::Quote {
+            depth: 1,
+            blocks: vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+                "Quote".to_string(),
+            )])],
+        }];
+        let plain_text = MarkdownRenderer::elements_to_plain_text(&elements);
+        assert_eq!(plain_text, "Quote");
+    }
+
+    #[test]
+    fn test_elements_to_plain_text_table_headers_only_starts_without_newline() {
+        let elements = vec![MarkdownElement::Table {
+            headers: vec![vec![InlineSpan::Text("H".to_string())]],
+            rows: Vec::new(),
+            alignments: vec![Alignment::Left],
+        }];
+        let plain_text = MarkdownRenderer::elements_to_plain_text(&elements);
+        assert_eq!(plain_text, "H");
+    }
+
+    #[test]
+    fn test_elements_to_plain_text_table_rows_only_starts_without_newline() {
+        let elements = vec![MarkdownElement::Table {
+            headers: Vec::new(),
+            rows: vec![vec![vec![InlineSpan::Text("R".to_string())]]],
+            alignments: vec![Alignment::Left],
+        }];
+        let plain_text = MarkdownRenderer::elements_to_plain_text(&elements);
+        assert_eq!(plain_text, "R");
     }
 
     #[test]
@@ -6542,6 +6614,7 @@ mod tests {
     #[test]
     fn test_is_html_line_break_rejects_missing_bracket() {
         assert!(!MarkdownRenderer::is_html_line_break("<br"));
+        assert!(!MarkdownRenderer::is_html_line_break("<br/"));
     }
 
     #[test]
@@ -7591,6 +7664,11 @@ fn main() {}
             alt: "Remote".to_string(),
             title: None,
         };
+        let remote_http_span = InlineSpan::Image {
+            src: "http://example.com/image.png".to_string(),
+            alt: "RemoteHttp".to_string(),
+            title: None,
+        };
 
         let _guard = ForcedRenderActions::new(&["link_hover", "link_click", "image_hover"]);
         with_test_ui(|ctx, ui| {
@@ -7635,6 +7713,7 @@ fn main() {}
             renderer.render_inline_span(ui, &image_span, None, None);
             renderer.render_inline_span(ui, &missing_span, None, None);
             renderer.render_inline_span(ui, &remote_span, None, None);
+            renderer.render_inline_span(ui, &remote_http_span, None, None);
         });
     }
 
@@ -8514,6 +8593,22 @@ fn main() {}
     }
 
     #[test]
+    fn test_render_list_paragraph_handles_blank_parts_and_indent() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![
+            InlineSpan::Text("Line 1\n\n  indented".to_string()),
+            InlineSpan::Image {
+                src: "assets/emoji/1f600.png".to_string(),
+                alt: "img".to_string(),
+                title: None,
+            },
+        ];
+        with_test_ui(|_, ui| {
+            renderer.render_list_paragraph(ui, None, Color32::WHITE, 12.0, &spans);
+        });
+    }
+
+    #[test]
     fn test_render_inline_span_forced_actions_and_image_title() {
         let renderer = MarkdownRenderer::new();
         renderer.set_highlight_phrase(Some("hi"));
@@ -9282,6 +9377,12 @@ fn main() {}
     }
 
     #[test]
+    fn test_list_marker_info_any_indent_requires_trailing_space() {
+        assert!(MarkdownRenderer::list_marker_info_any_indent("-").is_none());
+        assert!(MarkdownRenderer::list_marker_info_any_indent("   -").is_none());
+    }
+
+    #[test]
     fn test_list_marker_info_any_indent_rejects_missing_whitespace() {
         assert!(MarkdownRenderer::list_marker_info_any_indent("1.item").is_none());
         assert!(MarkdownRenderer::list_marker_info_any_indent("1)item").is_none());
@@ -9618,8 +9719,8 @@ fn main() {}
     #[test]
     fn test_escape_table_pipes_in_inline_code_nested_lists() {
         let md_parent = "\
-- Parent
-  | Col | Notes |
+ - Parent
+   | Col | Notes |
   | --- | --- |
   | code | `a|b` |
 ";
@@ -9634,6 +9735,39 @@ fn main() {}
 ";
         let escaped_nested = MarkdownRenderer::escape_table_pipes_in_inline_code(md_nested);
         assert!(escaped_nested.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
+    fn test_escape_table_pipes_parent_indent_list_marker_header() {
+        let md = "\
+- Parent
+    - | H | I |
+      | --- | --- |
+      | 1 | 2 |";
+        let escaped = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert_eq!(escaped, md);
+    }
+
+    #[test]
+    fn test_escape_table_pipes_parent_indent_strips_non_code_row() {
+        let md = "\
+- Parent
+  | H | I |
+  | --- | --- |
+  | 1 | 2 |";
+        let escaped = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert_eq!(escaped, md);
+    }
+
+    #[test]
+    fn test_escape_table_pipes_parent_indent_out_of_range() {
+        let md = "\
+- Parent
+        - Child
+        continuation
+";
+        let escaped = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert_eq!(escaped, md);
     }
 
     #[test]
@@ -9988,6 +10122,16 @@ fn main() {}
     }
 
     #[test]
+    fn test_paint_table_text_job_adds_hover_for_multiline_text() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![InlineSpan::Text("Line 1\nLine 2".to_string())];
+        with_test_ui(|_, ui| {
+            let build = renderer.build_layout_job(ui.style(), &spans, 200.0, false, Align::LEFT);
+            let _response = renderer.paint_table_text_job(ui, 200.0, build);
+        });
+    }
+
+    #[test]
     fn test_link_at_pointer_outside_text_rect() {
         let renderer = MarkdownRenderer::new();
         let spans = vec![InlineSpan::Link {
@@ -10004,9 +10148,9 @@ fn main() {}
         };
         input
             .events
-            .push(egui::Event::PointerMoved(egui::pos2(150.0, 10.0)));
+            .push(egui::Event::PointerMoved(egui::pos2(190.0, 10.0)));
         run_frame_with_input(&ctx, input, |_, ui| {
-            let build = renderer.build_layout_job(ui.style(), &spans, 200.0, false, Align::LEFT);
+            let build = renderer.build_layout_job(ui.style(), &spans, 40.0, false, Align::LEFT);
             let galley = ui.fonts(|f| f.layout_job(build.job.clone()));
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(200.0, galley.size().y), egui::Sense::hover());
@@ -10064,6 +10208,9 @@ fn main() {}
             assert!(renderer
                 .get_or_load_image_texture(ui, "https://example.com/image.png")
                 .is_none());
+            assert!(renderer
+                .get_or_load_image_texture(ui, "http://example.com/image.png")
+                .is_none());
         });
     }
 
@@ -10090,6 +10237,10 @@ fn main() {}
         let (level, rest) = MarkdownRenderer::table_line_info(" >\tabc");
         assert_eq!(level, 1);
         assert_eq!(rest, "abc");
+
+        let (level, rest) = MarkdownRenderer::table_line_info(">");
+        assert_eq!(level, 1);
+        assert_eq!(rest, "");
     }
 
     #[test]
