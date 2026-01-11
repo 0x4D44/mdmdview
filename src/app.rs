@@ -3023,6 +3023,17 @@ mod tests {
     }
 
     #[test]
+    fn test_toggle_view_mode_without_text_state() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_mode = ViewMode::Raw;
+        app.write_enabled = true;
+        let ctx = egui::Context::default();
+        app.toggle_view_mode(&ctx);
+        assert!(matches!(app.view_mode, ViewMode::Rendered));
+        assert!(app.raw_cursor.is_none());
+    }
+
+    #[test]
     fn test_load_sample() {
         let mut app = MarkdownViewerApp::new();
         let sample = &SAMPLE_FILES[0]; // First sample file
@@ -3235,6 +3246,14 @@ mod tests {
         let mut moved = state;
         moved.pos = [12.0, 10.0];
         assert!(app.window_state_changed(&moved));
+
+        let mut resized = state;
+        resized.size = [820.0, 610.0];
+        assert!(app.window_state_changed(&resized));
+
+        let mut maximized = state;
+        maximized.maximized = true;
+        assert!(app.window_state_changed(&maximized));
     }
 
     #[test]
@@ -3987,6 +4006,144 @@ The end.
         MarkdownViewerApp::save_screenshot_image(&image, &snapshot)?;
         assert!(output_path.exists());
         assert!(output_path.with_extension("json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_screenshot_image_no_crop() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let output_path = temp_dir.path().join("shot.png");
+        let config = ScreenshotConfig {
+            output_path: output_path.clone(),
+            viewport_width: 100.0,
+            viewport_height: 80.0,
+            content_only: false,
+            scroll_ratio: None,
+            wait_ms: 0,
+            settle_frames: 0,
+            zoom: 1.0,
+            theme: ScreenshotTheme::Light,
+            font_source: None,
+        };
+        let snapshot = ScreenshotSnapshot {
+            config,
+            content_rect: None,
+            pixels_per_point: 1.0,
+            stable_frames: 0,
+            timed_out: false,
+            pending_renders: false,
+            last_scroll_offset: None,
+            started: std::time::Instant::now(),
+        };
+        let image = egui::ColorImage::new([10, 10], Color32::from_rgb(10, 20, 30));
+        MarkdownViewerApp::save_screenshot_image(&image, &snapshot)?;
+        assert!(output_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_screenshot_image_zero_content_rect_ignored() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let output_path = temp_dir.path().join("shot.png");
+        let config = ScreenshotConfig {
+            output_path: output_path.clone(),
+            viewport_width: 100.0,
+            viewport_height: 80.0,
+            content_only: true,
+            scroll_ratio: None,
+            wait_ms: 0,
+            settle_frames: 0,
+            zoom: 1.0,
+            theme: ScreenshotTheme::Dark,
+            font_source: None,
+        };
+        let snapshot = ScreenshotSnapshot {
+            config,
+            content_rect: Some(egui::Rect::from_min_max(
+                egui::pos2(5.0, 5.0),
+                egui::pos2(5.0, 5.0),
+            )),
+            pixels_per_point: 1.0,
+            stable_frames: 0,
+            timed_out: false,
+            pending_renders: false,
+            last_scroll_offset: None,
+            started: std::time::Instant::now(),
+        };
+        let image = egui::ColorImage::new([10, 10], Color32::from_rgb(10, 20, 30));
+        MarkdownViewerApp::save_screenshot_image(&image, &snapshot)?;
+        let saved = image::open(&output_path)?;
+        assert_eq!(saved.width(), 10);
+        assert_eq!(saved.height(), 10);
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_screenshot_image_crop_condition_variants() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let image = egui::ColorImage::new([10, 10], Color32::from_rgb(10, 20, 30));
+
+        let make_config = |name: &str| ScreenshotConfig {
+            output_path: temp_dir.path().join(name),
+            viewport_width: 100.0,
+            viewport_height: 80.0,
+            content_only: true,
+            scroll_ratio: None,
+            wait_ms: 0,
+            settle_frames: 0,
+            zoom: 1.0,
+            theme: ScreenshotTheme::Light,
+            font_source: None,
+        };
+
+        let snapshot_y = ScreenshotSnapshot {
+            config: make_config("shot_y.png"),
+            content_rect: Some(egui::Rect::from_min_max(
+                egui::pos2(0.0, 2.0),
+                egui::pos2(10.0, 9.0),
+            )),
+            pixels_per_point: 1.0,
+            stable_frames: 0,
+            timed_out: false,
+            pending_renders: false,
+            last_scroll_offset: None,
+            started: std::time::Instant::now(),
+        };
+        MarkdownViewerApp::save_screenshot_image(&image, &snapshot_y)?;
+
+        let snapshot_w = ScreenshotSnapshot {
+            config: make_config("shot_w.png"),
+            content_rect: Some(egui::Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(6.0, 10.0),
+            )),
+            pixels_per_point: 1.0,
+            stable_frames: 0,
+            timed_out: false,
+            pending_renders: false,
+            last_scroll_offset: None,
+            started: std::time::Instant::now(),
+        };
+        MarkdownViewerApp::save_screenshot_image(&image, &snapshot_w)?;
+
+        let snapshot_h = ScreenshotSnapshot {
+            config: make_config("shot_h.png"),
+            content_rect: Some(egui::Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(10.0, 6.0),
+            )),
+            pixels_per_point: 1.0,
+            stable_frames: 0,
+            timed_out: false,
+            pending_renders: false,
+            last_scroll_offset: None,
+            started: std::time::Instant::now(),
+        };
+        MarkdownViewerApp::save_screenshot_image(&image, &snapshot_h)?;
+
+        assert!(temp_dir.path().join("shot_y.png").exists());
+        assert!(temp_dir.path().join("shot_w.png").exists());
+        assert!(temp_dir.path().join("shot_h.png").exists());
         Ok(())
     }
 
@@ -5119,6 +5276,30 @@ The end.
     }
 
     #[test]
+    fn test_record_scroll_without_ratio_returns_false() {
+        let config = ScreenshotConfig {
+            output_path: PathBuf::from("dummy.png"),
+            viewport_width: 120.0,
+            viewport_height: 80.0,
+            content_only: false,
+            scroll_ratio: None,
+            wait_ms: 500,
+            settle_frames: 2,
+            zoom: 1.0,
+            theme: ScreenshotTheme::Light,
+            font_source: None,
+        };
+        let mut state = ScreenshotState::new(config);
+        let snapshot = ScrollSnapshot {
+            content_size: egui::vec2(200.0, 400.0),
+            inner_rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 200.0)),
+            offset_y: 0.0,
+        };
+        assert!(!state.record_scroll(snapshot));
+        assert!(state.scroll_offset.is_none());
+    }
+
+    #[test]
     fn test_toggle_write_mode_captures_cursor() {
         let mut app = MarkdownViewerApp::new();
         app.view_mode = ViewMode::Raw;
@@ -5134,6 +5315,18 @@ The end.
         app.toggle_write_mode(&ctx);
         assert!(!app.write_enabled);
         assert_eq!(app.raw_cursor, Some(2));
+    }
+
+    #[test]
+    fn test_toggle_write_mode_without_text_state() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_mode = ViewMode::Raw;
+        app.write_enabled = true;
+
+        let ctx = egui::Context::default();
+        app.toggle_write_mode(&ctx);
+        assert!(!app.write_enabled);
+        assert!(app.raw_cursor.is_none());
     }
 
     #[test]
@@ -5216,6 +5409,17 @@ The end.
     }
 
     #[test]
+    fn test_compute_window_adjustment_invalid_monitor_height_returns_none() {
+        let outer = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 100.0));
+        let adjusted = MarkdownViewerApp::compute_window_adjustment(
+            Some(outer),
+            Some(outer),
+            Some(egui::vec2(800.0, 0.0)),
+        );
+        assert!(adjusted.is_none());
+    }
+
+    #[test]
     fn test_compute_window_adjustment_handles_nan_and_clamps() {
         let outer = egui::Rect::from_min_size(
             egui::pos2(f32::NAN, f32::NAN),
@@ -5235,6 +5439,37 @@ The end.
             Some(egui::vec2(800.0, 600.0)),
         );
         assert!(adjusted.is_some());
+    }
+
+    #[test]
+    fn test_compute_window_adjustment_invalid_pos_only() {
+        let outer = egui::Rect::from_min_size(egui::pos2(f32::NAN, 0.0), egui::vec2(800.0, 600.0));
+        let inner =
+            egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(800.0, 600.0));
+        let adjusted = MarkdownViewerApp::compute_window_adjustment(
+            Some(outer),
+            Some(inner),
+            Some(egui::vec2(1200.0, 900.0)),
+        )
+        .expect("adjustment");
+        assert!(adjusted.pos.is_some());
+        assert!(adjusted.size.is_none());
+    }
+
+    #[test]
+    fn test_compute_window_adjustment_invalid_size_only() {
+        let outer = egui::Rect::from_min_size(
+            egui::pos2(10.0, 20.0),
+            egui::vec2(800.0, f32::NAN),
+        );
+        let adjusted = MarkdownViewerApp::compute_window_adjustment(
+            Some(outer),
+            Some(outer),
+            Some(egui::vec2(1200.0, 900.0)),
+        )
+        .expect("adjustment");
+        assert!(adjusted.pos.is_none());
+        assert!(adjusted.size.is_some());
     }
 
     #[test]
