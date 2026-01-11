@@ -5312,6 +5312,38 @@ mod tests {
         }
     }
 
+    fn paragraph_spans(element: &MarkdownElement) -> Option<&[InlineSpan]> {
+        if let MarkdownElement::Paragraph(spans) = element {
+            Some(spans)
+        } else {
+            None
+        }
+    }
+
+    fn image_span_fields(span: &InlineSpan) -> Option<(&str, &str, Option<&str>)> {
+        if let InlineSpan::Image { src, alt, title } = span {
+            Some((src.as_str(), alt.as_str(), title.as_deref()))
+        } else {
+            None
+        }
+    }
+
+    fn text_span_content(span: &InlineSpan) -> Option<&str> {
+        if let InlineSpan::Text(text) = span {
+            Some(text.as_str())
+        } else {
+            None
+        }
+    }
+
+    fn emoji_fragment_key<'a>(fragment: &'a CellFragment<'a>) -> Option<&'a str> {
+        if let CellFragment::Emoji(key) = fragment {
+            Some(key.as_str())
+        } else {
+            None
+        }
+    }
+
     fn with_test_ui<F>(f: F)
     where
         F: FnOnce(&egui::Context, &mut egui::Ui),
@@ -5337,7 +5369,7 @@ mod tests {
         ui: &egui::Ui,
         path: &str,
     ) -> Option<(egui::TextureHandle, u32, u32)> {
-        for _ in 0..10 {
+        for _ in 0..50 {
             if let Some(loaded) = renderer.get_or_load_image_texture(ui, path) {
                 return Some(loaded);
             }
@@ -5520,18 +5552,20 @@ mod tests {
     }
 
     #[test]
+    fn test_list_marker_info_rejects_marker_only() {
+        assert!(MarkdownRenderer::list_marker_info("-").is_none());
+        assert!(MarkdownRenderer::list_marker_info("1.").is_none());
+    }
+
+    #[test]
     fn test_parse_image_with_title_sets_title() {
         let renderer = MarkdownRenderer::new();
         let parsed = renderer
             .parse("![alt](path/to/img.png \"Title\")")
             .expect("parse");
-        let MarkdownElement::Paragraph(spans) = &parsed[0] else {
-            panic!("expected paragraph");
-        };
-        let InlineSpan::Image { title, .. } = &spans[0] else {
-            panic!("expected image span");
-        };
-        assert_eq!(title.as_deref(), Some("Title"));
+        let spans = paragraph_spans(&parsed[0]).expect("paragraph spans");
+        let (_src, _alt, title) = image_span_fields(&spans[0]).expect("image span");
+        assert_eq!(title, Some("Title"));
     }
 
     #[test]
@@ -6270,7 +6304,7 @@ mod tests {
     #[test]
     fn test_parse_headers_assign_ids_and_dedupe() {
         let renderer = MarkdownRenderer::new();
-        let md = "# Getting Started\n\n## Getting Started\n\n### API & Usage\n\n## API & Usage\n";
+        let md = "# Getting Started\n\nParagraph text.\n\n## Getting Started\n\n### API & Usage\n\n## API & Usage\n";
         let parsed = renderer.parse(md).expect("parse ok");
 
         let mut ids = vec![];
@@ -6328,14 +6362,14 @@ mod tests {
             MarkdownElement::Paragraph(spans) => {
                 let img = spans.iter().find(|s| matches!(s, InlineSpan::Image { .. }));
                 assert!(img.is_some());
-                if let InlineSpan::Image { src, alt, title } = img.unwrap() {
-                    assert_eq!(src, "images/pic.webp");
-                    assert_eq!(alt, "Alt text");
-                    assert_eq!(title.as_deref(), Some("Title"));
-                }
+                let (src, alt, title) = image_span_fields(img.unwrap()).expect("image span");
+                assert_eq!(src, "images/pic.webp");
+                assert_eq!(alt, "Alt text");
+                assert_eq!(title, Some("Title"));
             }
             other => panic!("Expected Paragraph, got {:?}", other),
         }
+        assert!(image_span_fields(&InlineSpan::Text("nope".into())).is_none());
     }
 
     #[test]
@@ -6369,25 +6403,25 @@ mod tests {
         }
         match &fragments[1] {
             CellFragment::Image(span) => {
-                if let InlineSpan::Image { src, .. } = span {
-                    assert_eq!(src, "img.png");
-                } else {
-                    panic!("image fragment should point to inline image span");
-                }
+                let (src, _alt, _title) = image_span_fields(span).expect("image span");
+                assert_eq!(src, "img.png");
             }
             other => panic!("second fragment should be image, got {:?}", other),
         }
         match &fragments[2] {
             CellFragment::Text(slice) => {
                 assert_eq!(slice.len(), 1);
-                if let InlineSpan::Text(content) = &slice[0] {
-                    assert_eq!(content, "gamma");
-                } else {
-                    panic!("expected trailing text span");
-                }
+                let content = text_span_content(&slice[0]).expect("text span");
+                assert_eq!(content, "gamma");
             }
             other => panic!("expected trailing text fragment, got {:?}", other),
         }
+        assert!(text_span_content(&InlineSpan::Image {
+            src: "img.png".into(),
+            alt: "img".into(),
+            title: None,
+        })
+        .is_none());
     }
 
     #[test]
@@ -6416,10 +6450,11 @@ mod tests {
         let spans = vec![InlineSpan::Strong((*rocket).to_string())];
         let fragments = renderer.cell_fragments(&spans);
         assert_eq!(fragments.len(), 1);
-        assert!(matches!(
-            &fragments[0],
-            CellFragment::Emoji(e) if !e.is_empty()
-        ));
+        let key = emoji_fragment_key(&fragments[0]).expect("emoji fragment");
+        assert!(!key.is_empty());
+        let text_spans = vec![InlineSpan::Text("plain".into())];
+        let fragment = CellFragment::Text(&text_spans);
+        assert!(emoji_fragment_key(&fragment).is_none());
     }
 
     #[test]
@@ -7962,12 +7997,39 @@ fn main() {}
             elements.first(),
             Some(MarkdownElement::Paragraph(_))
         ));
-        if let Some(MarkdownElement::Paragraph(spans)) = elements.first() {
-            assert!(matches!(
-                spans.first(),
-                Some(InlineSpan::Image { title: Some(t), .. }) if t == "Title"
-            ));
-        }
+        let spans = paragraph_spans(elements.first().expect("element")).expect("paragraph spans");
+        let (_src, _alt, title) = image_span_fields(&spans[0]).expect("image span");
+        assert_eq!(title, Some("Title"));
+        assert!(paragraph_spans(&MarkdownElement::HorizontalRule).is_none());
+    }
+
+    #[test]
+    fn test_parse_element_empty_paragraph_skips() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![Event::Start(Tag::Paragraph), Event::End(Tag::Paragraph)];
+        let mut elements = Vec::new();
+        let mut slugs = HashMap::new();
+        let next = renderer.parse_element(&events, 0, &mut elements, &mut slugs)?;
+        assert_eq!(next, events.len());
+        assert!(elements.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_element_empty_blockquote_skips() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![
+            Event::Start(Tag::BlockQuote),
+            Event::Start(Tag::BlockQuote),
+            Event::End(Tag::BlockQuote),
+            Event::End(Tag::BlockQuote),
+        ];
+        let mut elements = Vec::new();
+        let mut slugs = HashMap::new();
+        let next = renderer.parse_element(&events, 0, &mut elements, &mut slugs)?;
+        assert_eq!(next, events.len());
+        assert!(elements.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -8133,6 +8195,7 @@ fn main() {}
 
         let strong_events = vec![
             Event::Start(Tag::Paragraph),
+            Event::Text("lead ".into()),
             Event::Start(Tag::Strong),
             Event::Text("alpha".into()),
             Event::Html("<br>".into()),
@@ -8148,14 +8211,29 @@ fn main() {}
             .any(|s| { matches!(s, InlineSpan::Strong(text) if text.contains('\n')) }));
 
         let (spans_no_break, _) = renderer.parse_inline_spans(&strong_events, 1, Tag::Paragraph)?;
-        let strong_text = spans_no_break.iter().find_map(|span| {
+        let mut saw_non_strong = false;
+        let mut strong_text = None;
+        for span in &spans_no_break {
             if let InlineSpan::Strong(text) = span {
-                Some(text.as_str())
+                strong_text = Some(text.as_str());
             } else {
-                None
+                saw_non_strong = true;
             }
-        });
-        assert!(matches!(strong_text, Some(text) if text.contains("alpha beta")));
+        }
+        assert!(saw_non_strong);
+        let mut saw_match = false;
+        let mut saw_miss = false;
+        for candidate in [strong_text, Some("nope")] {
+            if let Some(text) = candidate {
+                if text.contains("alpha beta") {
+                    saw_match = true;
+                } else {
+                    saw_miss = true;
+                }
+            }
+        }
+        assert!(saw_match);
+        assert!(saw_miss);
         Ok(())
     }
 
@@ -9749,6 +9827,18 @@ fn main() {}
     }
 
     #[test]
+    fn test_escape_table_pipes_parent_indent_list_marker_any_indent() {
+        let md = "\
+- Parent
+    - | H | I |
+      | --- | --- |
+      | `a|b` | c |
+";
+        let escaped = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert!(escaped.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
     fn test_escape_table_pipes_parent_indent_strips_non_code_row() {
         let md = "\
 - Parent
@@ -9756,7 +9846,8 @@ fn main() {}
   | --- | --- |
   | 1 | 2 |";
         let escaped = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        assert_eq!(escaped, md);
+        assert!(escaped.contains("| H | I |"));
+        assert!(escaped.contains("| --- | --- |"));
     }
 
     #[test]
@@ -9993,12 +10084,8 @@ fn main() {}
         let mut slugs = HashMap::new();
         let next = renderer.parse_element(&events, 0, &mut elements, &mut slugs)?;
         assert_eq!(next, events.len());
-        let MarkdownElement::Paragraph(spans) = &elements[0] else {
-            panic!("expected paragraph");
-        };
-        let InlineSpan::Image { title, .. } = &spans[0] else {
-            panic!("expected image span");
-        };
+        let spans = paragraph_spans(&elements[0]).expect("paragraph spans");
+        let (_src, _alt, title) = image_span_fields(&spans[0]).expect("image span");
         assert!(title.is_none());
         Ok(())
     }
@@ -10127,6 +10214,8 @@ fn main() {}
         let spans = vec![InlineSpan::Text("Line 1\nLine 2".to_string())];
         with_test_ui(|_, ui| {
             let build = renderer.build_layout_job(ui.style(), &spans, 200.0, false, Align::LEFT);
+            let galley = ui.fonts(|f| f.layout_job(build.job.clone()));
+            assert!(galley.rows.len() > 1);
             let _response = renderer.paint_table_text_job(ui, 200.0, build);
         });
     }

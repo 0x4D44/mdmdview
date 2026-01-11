@@ -97,10 +97,8 @@ where
         }
     }
 
-    if opts.screenshot {
-        if opts.screenshot_output.is_none() {
-            return Err("Missing --output for screenshot mode".to_string());
-        }
+    if opts.screenshot && opts.screenshot_output.is_none() {
+        return Err("Missing --output for screenshot mode".to_string());
     }
 
     Ok(opts)

@@ -217,6 +217,10 @@ impl MermaidRenderer {
     const MERMAID_MAX_TEXT_SIZE: u32 = 50_000;
     #[cfg(feature = "mermaid-quickjs")]
     const MERMAID_MAX_RENDER_SIDE: u32 = 4096;
+    /// Minimum height for Mermaid placeholder to reduce layout shift when diagrams render.
+    /// Most Mermaid diagrams are 150-400px tall; using 200px as a reasonable middle ground.
+    #[cfg(feature = "mermaid-quickjs")]
+    const MERMAID_PLACEHOLDER_MIN_HEIGHT: f32 = 200.0;
 
     pub(crate) fn new() -> Self {
         #[cfg(feature = "mermaid-quickjs")]
@@ -533,6 +537,9 @@ impl MermaidRenderer {
                 .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
                 .inner_margin(8.0)
                 .show(ui, |ui| {
+                    // Reserve minimum height for placeholder to reduce layout shift
+                    // when the actual diagram renders. Most diagrams are 150-400px tall.
+                    ui.set_min_height(Self::MERMAID_PLACEHOLDER_MIN_HEIGHT);
                     if waiting_for_slot {
                         ui.label(
                             RichText::new(format!(
@@ -551,7 +558,7 @@ impl MermaidRenderer {
                         );
                     }
                 });
-            return true;
+            true
         }
         #[cfg(not(feature = "mermaid-quickjs"))]
         {
@@ -5372,9 +5379,15 @@ mod tests {
         MermaidWorker::maybe_dump_error(11, Some("::bad label::"), "boom");
         MermaidWorker::maybe_dump_error(12, Some("good_label"), "ok");
         MermaidWorker::maybe_dump_svg(13, Some("\nrest"), "<svg></svg>");
+        MermaidWorker::maybe_dump_error(14, Some("dash-label"), "dash");
         MermaidWorker::maybe_dump_error(14, Some("abcdefghijklmnopqrstuvwxyz0123456789"), "long");
         MermaidWorker::maybe_dump_svg(16, Some("abcdefghijklmnopqrstuvwxyz0123456789"), "<svg></svg>");
+        MermaidWorker::maybe_dump_svg(16, Some("under_score"), "<svg></svg>");
         MermaidWorker::maybe_dump_error(15, None, "no code");
+        MermaidWorker::maybe_dump_svg(17, None, "<svg></svg>");
+        MermaidWorker::maybe_dump_error(18, Some(""), "empty");
+        MermaidWorker::maybe_dump_svg(19, Some(""), "<svg></svg>");
+        MermaidWorker::maybe_dump_error(20, Some("\nrest"), "empty-label");
 
         let entries: Vec<_> = std::fs::read_dir(dir.path())
             .expect("read dir")
@@ -6182,6 +6195,19 @@ mod tests {
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
+    fn test_fix_state_end_circles_missing_parts_noop() {
+        let missing_start = r#"<svg><g id="state-root_end-0"><circle class="state-end" r="5"></circle></g></svg>"#;
+        assert!(MermaidWorker::fix_state_end_circles(missing_start).is_none());
+
+        let missing_r = r#"<svg><g id="state-root_end-0"><circle class="state-end"></circle><circle class="state-start" r="7"></circle></g></svg>"#;
+        assert!(MermaidWorker::fix_state_end_circles(missing_r).is_none());
+
+        let non_numeric = r#"<svg><g id="state-root_end-0"><circle class="state-end" r="x"></circle><circle class="state-start" r="7"></circle></g></svg>"#;
+        assert!(MermaidWorker::fix_state_end_circles(non_numeric).is_none());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
     fn test_mindmap_edge_trim_uses_min_radius() {
         let dx_idx = MERMAID_DOM_SHIM
             .find("var dx = t_pos.x - s_pos.x")
@@ -6224,6 +6250,16 @@ mod tests {
             MermaidWorker::fix_er_attribute_fills(input).expect("er fills updated");
         assert!(output.contains("attributeBoxOdd\" fill=\"#ffffff\""));
         assert!(output.contains("attributeBoxEven\" fill=\"#f2f2f2\""));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_fix_er_attribute_fills_skips_unmatched_rects() {
+        let input = r#"<svg><rect class="er attributeBoxOdd"></rect><rect class="er"></rect></svg>"#;
+        let output =
+            MermaidWorker::fix_er_attribute_fills(input).expect("er fills updated");
+        assert!(output.contains("attributeBoxOdd\" fill=\"#ffffff\""));
+        assert!(output.contains("class=\"er\"></rect>"));
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -6446,6 +6482,9 @@ mod tests {
         assert_eq!(MermaidWorker::format_dim(10.5), "10.5");
         assert_eq!(MermaidWorker::format_dim(0.0), "0");
         assert_eq!(MermaidWorker::format_dim(10.123), "10.123");
+        let nan = MermaidWorker::format_dim(f32::NAN);
+        assert!(!nan.contains('.'));
+        assert!(nan.to_lowercase().contains("nan"));
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -6509,6 +6548,14 @@ mod tests {
         let (width, height) = measurer.measure_text("", 16.0, None);
         assert_eq!(width, 0.0);
         assert_eq!(height, 0.0);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_text_measurer_fallback_handles_shorter_lines() {
+        let (width, height) = TextMeasurer::fallback_measure("abcd\na", 10.0);
+        assert!((width - 20.0).abs() < 0.01);
+        assert!((height - 24.0).abs() < 0.01);
     }
 
     #[cfg(feature = "mermaid-quickjs")]
