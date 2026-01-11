@@ -86,7 +86,7 @@ This document demonstrates the various formatting options supported by MarkdownV
 - [Horizontal Rules](#horizontal-rules)
 - [Tables](#tables)
 
-Quick jump: [Go to Lists](#lists) ΓÇó [Go to Tables](#tables)
+Quick jump: [Go to Lists](#lists) | [Go to Tables](#tables)
 
 ## Text Formatting
 
@@ -157,11 +157,11 @@ Shortcodes like `:rocket:` and `:tada:` are expanded to emoji images in normal t
 
 | Feature | Supported | Notes |
 |---------|-----------|-------|
-| Headers | Γ£à | All levels 1-6 |
-| Lists | Γ£à | Ordered and unordered |
-| Code blocks | Γ£à | With syntax highlighting |
-| Tables | Γ£à | Basic table support |
-| Links | Γ£à | Opens in browser; internal anchors scroll inΓÇædocument |
+| Headers | Yes | All levels 1-6 |
+| Lists | Yes | Ordered and unordered |
+| Code blocks | Yes | With syntax highlighting |
+| Tables | Yes | Basic table support |
+| Links | Yes | Opens in browser; internal anchors scroll in document |
 
 ---
 

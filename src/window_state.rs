@@ -281,6 +281,30 @@ mod tests {
     }
 
     #[test]
+    fn test_sanitize_window_state_rejects_non_finite_components() {
+        let invalid_y = WindowState {
+            pos: [10.0, f32::NAN],
+            size: [800.0, 600.0],
+            maximized: false,
+        };
+        assert!(sanitize_window_state(invalid_y).is_none());
+
+        let invalid_w = WindowState {
+            pos: [10.0, 20.0],
+            size: [f32::NAN, 600.0],
+            maximized: false,
+        };
+        assert!(sanitize_window_state(invalid_w).is_none());
+
+        let invalid_h = WindowState {
+            pos: [10.0, 20.0],
+            size: [800.0, f32::NAN],
+            maximized: false,
+        };
+        assert!(sanitize_window_state(invalid_h).is_none());
+    }
+
+    #[test]
     fn test_save_and_load_window_state_from_file() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
@@ -328,6 +352,24 @@ mod tests {
         assert_eq!(size_x, state.size[0]);
         assert_eq!(size_y, state.size[1]);
         assert_eq!(max_flag, "1");
+    }
+
+    #[test]
+    fn test_save_window_state_when_dir_exists() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+        let config_dir = temp.path().join("MarkdownView");
+        fs::create_dir_all(&config_dir).expect("create config dir");
+
+        let state = WindowState {
+            pos: [5.0, 6.0],
+            size: [700.0, 500.0],
+            maximized: false,
+        };
+        save_window_state(&state).expect("save");
+        let path = config_dir.join("window_state.txt");
+        assert!(path.exists());
     }
 
     #[test]
