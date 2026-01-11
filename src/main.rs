@@ -605,24 +605,6 @@ mod tests {
     }
 
     #[test]
-    fn test_screenshot_background_color_env() {
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_MAIN_BKG", "#112233");
-            assert_eq!(
-                screenshot_background_color(),
-                egui::Color32::from_rgb(17, 34, 51)
-            );
-        }
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_MAIN_BKG", "bad");
-            assert_eq!(
-                screenshot_background_color(),
-                egui::Color32::from_rgb(255, 248, 219)
-            );
-        }
-    }
-
-    #[test]
     fn test_parse_cli_screenshot_args() {
         let args = vec![
             "--screenshot".to_string(),
@@ -747,10 +729,16 @@ mod tests {
 
     #[test]
     fn test_screenshot_background_color_env() {
-        std::env::set_var("MDMDVIEW_MERMAID_MAIN_BKG", "#112233");
-        let color = screenshot_background_color();
-        assert_eq!(color, egui::Color32::from_rgb(17, 34, 51));
-        std::env::remove_var("MDMDVIEW_MERMAID_MAIN_BKG");
+        {
+            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_MAIN_BKG", "#112233");
+            let color = screenshot_background_color();
+            assert_eq!(color, egui::Color32::from_rgb(17, 34, 51));
+        }
+        {
+            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_MAIN_BKG", "bad");
+            let color = screenshot_background_color();
+            assert_eq!(color, egui::Color32::from_rgb(255, 248, 219));
+        }
     }
 
     #[test]

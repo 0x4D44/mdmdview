@@ -58,9 +58,7 @@ fn draw_circle(img: &mut egui::ColorImage, size: usize, color: C) {
 fn draw_check(img: &mut egui::ColorImage, size: usize, color: C) {
     let s = size as i32;
     let mut plot = |x: i32, y: i32| {
-        if x >= 0 && y >= 0 && x < s && y < s {
-            img[(x as usize, y as usize)] = color;
-        }
+        img[(x as usize, y as usize)] = color;
     };
     // simple check mark
     for i in 0..s / 3 {
@@ -84,7 +82,7 @@ fn confetti(img: &mut egui::ColorImage, size: usize) {
     for (i, col) in dots.iter().enumerate() {
         let x = (s / 4) * ((i as i32) + 1);
         let y = (s / 5) * ((i as i32) + 1);
-        if x < s && y < s {
+        if x < s {
             img[(x as usize, y as usize)] = *col;
         }
     }
@@ -102,18 +100,14 @@ fn rocket(img: &mut egui::ColorImage, size: usize, body: C, flame: C) {
     for i in 0..s / 6 {
         for x in s / 2 - i..=s / 2 + i {
             let y = s / 4 - i;
-            if y >= 0 {
-                img[(x as usize, y as usize)] = body;
-            }
+            img[(x as usize, y as usize)] = body;
         }
     }
     // flame
     for i in 0..s / 6 {
         for x in s / 2 - i..=s / 2 + i {
             let y = s * 3 / 4 + i;
-            if y < s {
-                img[(x as usize, y as usize)] = flame;
-            }
+            img[(x as usize, y as usize)] = flame;
         }
     }
 }
@@ -140,13 +134,9 @@ fn star(img: &mut egui::ColorImage, size: usize, color: C) {
         let x1 = s / 2;
         let x2 = s / 2 - i / 2;
         let x3 = s / 2 + i / 2;
-        if x2 >= 0 {
-            img[(x2 as usize, y as usize)] = color;
-        }
+        img[(x2 as usize, y as usize)] = color;
         img[(x1 as usize, y as usize)] = color;
-        if x3 < s {
-            img[(x3 as usize, y as usize)] = color;
-        }
+        img[(x3 as usize, y as usize)] = color;
     }
 }
 

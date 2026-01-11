@@ -283,10 +283,9 @@ pub fn derive_column_specs(ctx: &TableColumnContext) -> Vec<ColumnSpec> {
                 .map(|(idx, _)| idx);
         }
         if let Some(idx) = candidate {
-            if let Some(spec) = specs.get_mut(idx) {
-                spec.set_policy(ColumnPolicy::Remainder { clip: false });
-                remainder_assigned += 1;
-            }
+            let spec = &mut specs[idx];
+            spec.set_policy(ColumnPolicy::Remainder { clip: false });
+            remainder_assigned += 1;
         }
     }
 
@@ -296,13 +295,12 @@ pub fn derive_column_specs(ctx: &TableColumnContext) -> Vec<ColumnSpec> {
         if remainder_assigned >= MAX_REMAINDER_COLUMNS {
             break;
         }
-        if let Some(spec) = specs.get_mut(idx) {
-            if matches!(spec.policy, ColumnPolicy::Resizable { .. })
-                && column_needs_remainder(ctx.column_stat(idx))
-            {
-                spec.set_policy(ColumnPolicy::Remainder { clip: false });
-                remainder_assigned += 1;
-            }
+        let spec = &mut specs[idx];
+        if matches!(spec.policy, ColumnPolicy::Resizable { .. })
+            && column_needs_remainder(ctx.column_stat(idx))
+        {
+            spec.set_policy(ColumnPolicy::Remainder { clip: false });
+            remainder_assigned += 1;
         }
     }
 
@@ -1082,6 +1080,36 @@ mod tests {
             },
         };
         assert!(column_needs_remainder(Some(&stat)));
+    }
+
+    #[test]
+    fn test_column_needs_remainder_true_for_images() {
+        let stat = ColumnStat {
+            max_graphemes: 5,
+            longest_word: 5,
+            rich_content: RichContentFlags {
+                has_link: false,
+                has_image: true,
+                has_emoji_like: false,
+            },
+        };
+        assert!(column_needs_remainder(Some(&stat)));
+    }
+
+    #[test]
+    fn test_classify_column_skips_remainder_when_limit_reached() {
+        let mut remainder_assigned = MAX_REMAINDER_COLUMNS;
+        let stat = ColumnStat {
+            max_graphemes: 2,
+            longest_word: 2,
+            rich_content: RichContentFlags {
+                has_link: false,
+                has_image: true,
+                has_emoji_like: false,
+            },
+        };
+        let policy = classify_column("misc", 1, &mut remainder_assigned, Some(&stat), 14.0);
+        assert!(matches!(policy, ColumnPolicy::Resizable { .. }));
     }
 
     #[test]

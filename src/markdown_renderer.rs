@@ -453,9 +453,6 @@ impl MarkdownRenderer {
         if graphemes.next().is_some() {
             return None;
         }
-        if first != trimmed {
-            return None;
-        }
         self.emoji_key_for_grapheme(first)
     }
 
@@ -481,29 +478,18 @@ impl MarkdownRenderer {
             char_ranges.push((byte_idx, byte_idx + ch.len_utf8()));
         }
 
-        if folded.is_empty() {
-            return vec![(0..text.len(), false)];
-        }
-
         let mut segments = Vec::new();
         let mut rendered_until = 0usize;
         let mut search_at = 0usize;
         while let Some(pos) = folded[search_at..].find(needle) {
             let abs = search_at + pos;
-            if abs >= folded_to_char.len() {
-                break;
-            }
             let start_char_idx = folded_to_char[abs];
             let (start_byte, _) = char_ranges[start_char_idx];
             if start_byte > rendered_until {
                 segments.push((rendered_until..start_byte, false));
             }
             let match_end = abs + needle.len();
-            let end_char_idx = if match_end == 0 {
-                start_char_idx
-            } else {
-                folded_to_char[match_end.saturating_sub(1)]
-            };
+            let end_char_idx = folded_to_char[match_end.saturating_sub(1)];
             let (_, end_byte) = char_ranges[end_char_idx];
             segments.push((start_byte..end_byte, true));
             rendered_until = end_byte;
@@ -514,9 +500,6 @@ impl MarkdownRenderer {
             segments.push((rendered_until..text.len(), false));
         }
 
-        if segments.is_empty() {
-            segments.push((0..text.len(), false));
-        }
         segments
     }
 
@@ -666,9 +649,6 @@ impl MarkdownRenderer {
         let mut normalized = self.fix_unicode_chars(text);
         normalized = Self::expand_shortcodes(&normalized);
         normalized = Self::expand_superscripts(&normalized);
-        if normalized.is_empty() {
-            return 0;
-        }
         self.append_text_sections(
             style,
             job,
@@ -728,9 +708,6 @@ impl MarkdownRenderer {
         let visuals = &style.visuals;
         let segments = self.highlight_segments(text, highlight);
         for (range, highlighted) in segments {
-            if range.is_empty() {
-                continue;
-            }
             let slice = &text[range];
             let mut rich = RichText::new(slice.to_string()).size(font_size);
             if inline_style.strong {
@@ -1089,9 +1066,7 @@ impl MarkdownRenderer {
 
         if in_code {
             for idx in pending_pipes {
-                if let Some(slot) = out.get_mut(idx) {
-                    *slot = '|';
-                }
+                out[idx] = '|';
             }
         }
 
@@ -1283,12 +1258,8 @@ impl MarkdownRenderer {
                 idx += 1;
             }
             b'0'..=b'9' => {
-                let start = idx;
                 while idx < bytes.len() && bytes[idx].is_ascii_digit() {
                     idx += 1;
-                }
-                if start == idx {
-                    return None;
                 }
                 if idx < bytes.len() && (bytes[idx] == b'.' || bytes[idx] == b')') {
                     idx += 1;
@@ -4410,9 +4381,6 @@ impl MarkdownRenderer {
             return fallback;
         }
         let fragments = self.cell_fragments(spans);
-        if fragments.is_empty() {
-            return fallback;
-        }
         let mut total = 0.0;
         for (idx, fragment) in fragments.into_iter().enumerate() {
             if idx > 0 {
@@ -5473,10 +5441,92 @@ mod tests {
     }
 
     #[test]
+    fn test_image_cache_insert_existing_key_updates_entry() {
+        let mut cache = ImageCache::new(2);
+        let mut entry_slot = None;
+        with_test_ui(|ctx, _ui| {
+            let tex = ctx.load_texture(
+                "cache_update",
+                egui::ColorImage::new([1, 1], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            entry_slot = Some(ImageCacheEntry {
+                texture: tex,
+                size: [1, 1],
+                modified: None,
+            });
+        });
+        let entry = entry_slot.expect("texture");
+        cache.insert(
+            "a".to_string(),
+            ImageCacheEntry {
+                texture: entry.texture.clone(),
+                size: [1, 1],
+                modified: entry.modified,
+            },
+        );
+        cache.insert(
+            "a".to_string(),
+            ImageCacheEntry {
+                texture: entry.texture.clone(),
+                size: [2, 2],
+                modified: entry.modified,
+            },
+        );
+        let stored = cache.get("a").expect("stored");
+        assert_eq!(stored.size, [2, 2]);
+    }
+
+    #[test]
+    fn test_image_cache_evicts_oldest_entry() {
+        let mut cache = ImageCache::new(1);
+        let mut entry_slot = None;
+        with_test_ui(|ctx, _ui| {
+            let tex = ctx.load_texture(
+                "cache_evict",
+                egui::ColorImage::new([1, 1], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            entry_slot = Some(ImageCacheEntry {
+                texture: tex,
+                size: [1, 1],
+                modified: None,
+            });
+        });
+        let entry = entry_slot.expect("texture");
+        cache.insert(
+            "a".to_string(),
+            ImageCacheEntry {
+                texture: entry.texture.clone(),
+                size: entry.size,
+                modified: entry.modified,
+            },
+        );
+        cache.insert(
+            "b".to_string(),
+            ImageCacheEntry {
+                texture: entry.texture.clone(),
+                size: entry.size,
+                modified: entry.modified,
+            },
+        );
+        assert!(cache.contains_key("b"));
+        assert!(!cache.contains_key("a"));
+    }
+
+    #[test]
     fn test_list_marker_info_rejects_empty_and_bad_numeric() {
         assert!(MarkdownRenderer::list_marker_info("").is_none());
         assert!(MarkdownRenderer::list_marker_info("1 abc").is_none());
         assert!(MarkdownRenderer::list_marker_info("   ").is_none());
+    }
+
+    #[test]
+    fn test_list_marker_info_rejects_tabs_and_missing_whitespace() {
+        assert!(MarkdownRenderer::list_marker_info("\t- item").is_none());
+        assert!(MarkdownRenderer::list_marker_info("1.item").is_none());
+        assert!(MarkdownRenderer::list_marker_info("1)item").is_none());
+        assert!(MarkdownRenderer::list_marker_info("-item").is_none());
     }
 
     #[test]
@@ -5553,6 +5603,34 @@ mod tests {
             egui::Rect::from_min_size(egui::pos2(5.0, 6.0), egui::vec2(2.0, 2.0)),
         );
         assert!(target_none.is_some());
+    }
+
+    #[test]
+    fn test_extend_table_rect_rejects_nan_components() {
+        let base = egui::Rect::from_min_size(egui::pos2(1.0, 2.0), egui::vec2(3.0, 4.0));
+        let mut target = Some(base);
+        let nan_min_y = egui::Rect::from_min_size(
+            egui::pos2(0.0, f32::NAN),
+            egui::vec2(1.0, 1.0),
+        );
+        MarkdownRenderer::extend_table_rect(&mut target, nan_min_y);
+        assert_eq!(target, Some(base));
+
+        let mut target = Some(base);
+        let nan_max_x = egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(f32::NAN, 1.0),
+        );
+        MarkdownRenderer::extend_table_rect(&mut target, nan_max_x);
+        assert_eq!(target, Some(base));
+
+        let mut target = Some(base);
+        let nan_max_y = egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(1.0, f32::NAN),
+        );
+        MarkdownRenderer::extend_table_rect(&mut target, nan_max_y);
+        assert_eq!(target, Some(base));
     }
 
     #[test]
@@ -5661,6 +5739,32 @@ mod tests {
     }
 
     #[test]
+    fn test_table_line_info_blockquote_levels() {
+        let (level, rest) = MarkdownRenderer::table_line_info("  >\t| a |");
+        assert_eq!(level, 1);
+        assert!(rest.trim_start().starts_with('|'));
+
+        let (level, rest) = MarkdownRenderer::table_line_info("> > | b |");
+        assert_eq!(level, 2);
+        assert!(rest.trim_start().starts_with('|'));
+    }
+
+    #[test]
+    fn test_strip_indent_columns_indent_zero_returns_line() {
+        assert_eq!(
+            MarkdownRenderer::strip_indent_columns("content", 0),
+            Some("content")
+        );
+    }
+
+    #[test]
+    fn test_parent_list_indent_for_line_zero_index_returns_none() {
+        let lines = vec!["- item"];
+        let (level, rest) = MarkdownRenderer::table_line_info(lines[0]);
+        assert!(MarkdownRenderer::parent_list_indent_for_line(&lines, 0, level, rest).is_none());
+    }
+
+    #[test]
     fn test_should_retry_image_backoff_respected() {
         let renderer = MarkdownRenderer::new();
         renderer.image_failures.borrow_mut().insert(
@@ -5750,6 +5854,16 @@ mod tests {
         let result = MarkdownRenderer::expand_superscripts(mixed);
         assert!(result.contains("2^32"));
         assert!(result.contains("5ᵗʰ"));
+    }
+
+    #[test]
+    fn test_superscript_expansion_rejects_invalid_sequences() {
+        let s = "2^ab$^ and ^^";
+        let out = MarkdownRenderer::expand_superscripts(s);
+        assert_eq!(out, s);
+        let no_close = "10^abc";
+        let out = MarkdownRenderer::expand_superscripts(no_close);
+        assert_eq!(out, no_close);
     }
 
     #[test]
@@ -5969,6 +6083,71 @@ mod tests {
     }
 
     #[test]
+    fn test_elements_to_plain_text_horizontal_rule_after_text() {
+        let elements = vec![
+            MarkdownElement::Paragraph(vec![InlineSpan::Text("Hello".to_string())]),
+            MarkdownElement::HorizontalRule,
+        ];
+        let plain_text = MarkdownRenderer::elements_to_plain_text(&elements);
+        assert_eq!(plain_text, "Hello\n---\n");
+    }
+
+    #[test]
+    fn test_elements_to_plain_text_mixed_blocks_adds_newlines() {
+        let elements = vec![
+            MarkdownElement::Paragraph(vec![InlineSpan::Text("First".to_string())]),
+            MarkdownElement::List {
+                ordered: false,
+                items: vec![ListItem {
+                    blocks: vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+                        "List".to_string(),
+                    )])],
+                }],
+            },
+            MarkdownElement::Quote {
+                depth: 1,
+                blocks: vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+                    "Quote".to_string(),
+                )])],
+            },
+            MarkdownElement::Table {
+                headers: vec![
+                    vec![InlineSpan::Text("H1".to_string())],
+                    vec![InlineSpan::Text("H2".to_string())],
+                ],
+                rows: vec![vec![vec![InlineSpan::Text("R1".to_string())]]],
+                alignments: vec![Alignment::Left, Alignment::Left],
+            },
+            MarkdownElement::HorizontalRule,
+        ];
+        let plain_text = MarkdownRenderer::elements_to_plain_text(&elements);
+        assert_eq!(plain_text, "First\nList\nQuote\nH1\nH2\nR1\n---\n");
+    }
+
+    #[test]
+    fn test_spans_plain_text_image_title_without_alt() {
+        let spans = vec![
+            InlineSpan::Image {
+                src: "img.png".to_string(),
+                alt: "".to_string(),
+                title: Some("Title".to_string()),
+            },
+            InlineSpan::Image {
+                src: "img.png".to_string(),
+                alt: "Alt".to_string(),
+                title: Some("Caption".to_string()),
+            },
+            InlineSpan::Image {
+                src: "img.png".to_string(),
+                alt: "".to_string(),
+                title: Some("".to_string()),
+            },
+        ];
+        let plain_text = MarkdownRenderer::spans_plain_text(&spans);
+        assert_eq!(plain_text, "TitleAlt Caption");
+    }
+
+    #[test]
     fn test_image_source_stale_detects_file_changes() {
         use std::time::Duration as StdDuration;
 
@@ -6140,6 +6319,23 @@ mod tests {
     }
 
     #[test]
+    fn test_cell_fragments_leading_image() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![
+            InlineSpan::Image {
+                src: "cover.png".into(),
+                alt: "cover".into(),
+                title: None,
+            },
+            InlineSpan::Text("tail".into()),
+        ];
+        let fragments = renderer.cell_fragments(&spans);
+        assert_eq!(fragments.len(), 2);
+        assert!(matches!(fragments[0], CellFragment::Image(_)));
+        assert!(matches!(fragments[1], CellFragment::Text(_)));
+    }
+
+    #[test]
     fn test_cell_fragments_detect_single_emoji_cell() {
         let renderer = MarkdownRenderer::new();
         let rocket = crate::emoji_catalog::shortcode_map()
@@ -6267,6 +6463,18 @@ mod tests {
     }
 
     #[test]
+    fn test_layout_job_builder_skips_empty_link_text() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![InlineSpan::Link {
+            text: String::new(),
+            url: "https://example.org/docs".into(),
+        }];
+        let style = egui::Style::default();
+        let build = renderer.build_layout_job(&style, &spans, 220.0, false, Align::LEFT);
+        assert!(build.link_ranges.is_empty());
+    }
+
+    #[test]
     fn test_build_layout_job_skips_images() {
         let renderer = MarkdownRenderer::new();
         let style = egui::Style::default();
@@ -6332,9 +6540,44 @@ mod tests {
     }
 
     #[test]
+    fn test_is_html_line_break_rejects_missing_bracket() {
+        assert!(!MarkdownRenderer::is_html_line_break("<br"));
+    }
+
+    #[test]
+    fn test_is_html_line_break_slash_variants() {
+        assert!(MarkdownRenderer::is_html_line_break("<br/>"));
+        assert!(!MarkdownRenderer::is_html_line_break("<br/ x>"));
+    }
+
+    #[test]
     fn test_escape_pipes_inline_code_multi_backticks() {
         let out = MarkdownRenderer::escape_pipes_in_inline_code_line("``code|``");
         assert!(out.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
+    fn test_escape_pipes_inline_code_line_branches() {
+        let plain = "no pipes here";
+        assert_eq!(MarkdownRenderer::escape_pipes_in_inline_code_line(plain), plain);
+
+        let line = "``code`|more``";
+        let escaped = MarkdownRenderer::escape_pipes_in_inline_code_line(line);
+        assert!(escaped.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
+    fn test_escape_table_pipes_list_indent_with_tabs_and_table() {
+        let input = "- Parent\n\t- Child\n  | Head | Tail |\n  | --- | --- |\n  | a | b |\n";
+        let output = MarkdownRenderer::escape_table_pipes_in_inline_code(input);
+        assert!(output.contains("| Head | Tail |"));
+    }
+
+    #[test]
+    fn test_escape_pipes_inline_code_line_restores_pending_on_unclosed() {
+        let line = "`code|tail";
+        let escaped = MarkdownRenderer::escape_pipes_in_inline_code_line(line);
+        assert_eq!(escaped, line);
     }
 
     #[test]
@@ -6834,6 +7077,64 @@ Not a table";
     }
 
     #[test]
+    fn list_parent_indent_nested_marker_table_escapes_pipes() {
+        let md = "\
+- Parent
+    - | Col | Notes |
+      | --- | --- |
+      | code | `a|b|c` |";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
+        assert!(prepared.contains(&expected));
+    }
+
+    #[test]
+    fn list_parent_indent_table_without_marker_escapes_pipes() {
+        let md = "\
+- Parent
+  | Col | Notes |
+  | --- | --- |
+  | code | `a|b|c` |";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
+        assert!(prepared.contains(&expected));
+    }
+
+    #[test]
+    fn table_blockquote_level_mismatch_ends_table() {
+        let md = "\
+| Col | Notes |
+| --- | --- |
+> | code | `a|b|c` |";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert!(prepared.contains("`a|b|c`"));
+        assert!(!prepared.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
+    fn table_inserts_blank_line_before_header_with_crlf() {
+        let md = "Intro line\r\n| Col | Notes |\r\n| --- | --- |\r\n| code | `a|b|c` |\r\n";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
+        assert!(prepared.contains("\r\n\r\n| Col | Notes |"));
+        assert!(prepared.contains(&expected));
+    }
+
+    #[test]
+    fn fenced_block_quote_level_mismatch_keeps_block_open() {
+        let md = "\
+> ```
+> | Col | Notes |
+```
+> | --- | --- |
+> | code | `a|b|c` |
+> ```";
+        let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
+        assert!(prepared.contains("`a|b|c`"));
+        assert!(!prepared.contains(PIPE_SENTINEL));
+    }
+
+    #[test]
     fn table_ids_are_unique_per_position() {
         let renderer = MarkdownRenderer::new();
         let md = "\
@@ -6991,6 +7292,30 @@ fn main() {}
         cache.insert(key_b.clone(), build);
 
         assert!(cache.get(&key_b).is_some());
+    }
+
+    #[test]
+    fn test_cell_layout_cache_reinsert_existing_key() {
+        let mut cache = CellLayoutCache::new(1);
+        let build = LayoutJobBuild {
+            job: LayoutJob::default(),
+            plain_text: String::new(),
+            link_ranges: Vec::new(),
+        };
+        let key = CellLayoutKey {
+            row: Some(0),
+            col: 0,
+            width: 120,
+            align: 0,
+            strong: false,
+            text_color: [0, 0, 0, 255],
+            highlight_hash: 0,
+            content_hash: 42,
+        };
+        cache.insert(key.clone(), build.clone());
+        cache.insert(key.clone(), build);
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.order.len(), 1);
     }
 
     #[test]
@@ -7261,9 +7586,14 @@ fn main() {}
             alt: "".to_string(),
             title: None,
         };
+        let remote_span = InlineSpan::Image {
+            src: "https://example.com/image.png".to_string(),
+            alt: "Remote".to_string(),
+            title: None,
+        };
 
         let _guard = ForcedRenderActions::new(&["link_hover", "link_click", "image_hover"]);
-        with_test_ui(|_, ui| {
+        with_test_ui(|ctx, ui| {
             ui.visuals_mut().dark_mode = false;
             renderer.render_inline_span(ui, &InlineSpan::Code("code".to_string()), None, None);
 
@@ -7300,9 +7630,23 @@ fn main() {}
                 None,
                 None,
             );
+            let resolved = renderer.resolve_image_path("image.png");
+            let _loaded = wait_for_image(&renderer, ctx, ui, &resolved);
             renderer.render_inline_span(ui, &image_span, None, None);
             renderer.render_inline_span(ui, &missing_span, None, None);
+            renderer.render_inline_span(ui, &remote_span, None, None);
         });
+    }
+
+    #[test]
+    fn test_has_pending_renders_with_image_pending() {
+        let renderer = MarkdownRenderer::new();
+        assert!(!renderer.has_pending_renders());
+        renderer
+            .image_pending
+            .borrow_mut()
+            .insert("queued.png".to_string());
+        assert!(renderer.has_pending_renders());
     }
 
     #[test]
@@ -7384,6 +7728,20 @@ fn main() {}
         assert!(text.contains("Item"));
         assert!(text.contains("Quote"));
         assert!(text.contains("Alt"));
+    }
+
+    #[test]
+    fn test_elements_to_plain_text_image_title_and_empty_rule() {
+        let elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Image {
+            src: "img.png".to_string(),
+            alt: "".to_string(),
+            title: Some("Diagram Title".to_string()),
+        }])];
+        let text = MarkdownRenderer::elements_to_plain_text(&elements);
+        assert!(text.contains("Diagram Title"));
+
+        let hr_only = vec![MarkdownElement::HorizontalRule];
+        assert_eq!(MarkdownRenderer::elements_to_plain_text(&hr_only), "");
     }
 
     #[test]
@@ -7834,6 +8192,34 @@ fn main() {}
     }
 
     #[test]
+    fn test_collect_blockquotes_empty_paragraph_and_html_ignored() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![
+            Event::Start(Tag::BlockQuote),
+            Event::Start(Tag::Paragraph),
+            Event::End(Tag::Paragraph),
+            Event::Html("<span>".into()),
+            Event::End(Tag::BlockQuote),
+        ];
+        let mut slugs = HashMap::new();
+        let (quotes, next) = renderer.collect_blockquotes(&events, 1, 1, &mut slugs)?;
+        assert_eq!(next, events.len());
+        assert!(quotes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_collect_blockquotes_empty_unclosed_returns_empty() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![Event::Start(Tag::BlockQuote)];
+        let mut slugs = HashMap::new();
+        let (quotes, next) = renderer.collect_blockquotes(&events, 1, 1, &mut slugs)?;
+        assert_eq!(next, events.len());
+        assert!(quotes.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn test_parse_list_block_elements() -> Result<()> {
         let renderer = MarkdownRenderer::new();
         let events = vec![
@@ -8176,6 +8562,59 @@ fn main() {}
             assert!(embedded.is_some());
             let remote = renderer.get_or_load_image_texture(ui, "https://example.com/img.png");
             assert!(remote.is_none());
+        });
+    }
+
+    #[test]
+    fn test_get_or_load_image_texture_embedded_cache_hit() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|ctx, ui| {
+            let tex = ctx.load_texture(
+                "embedded-cache",
+                egui::ColorImage::new([2, 2], Color32::WHITE),
+                Default::default(),
+            );
+            renderer.store_image_texture("assets/emoji/1f600.png", tex, [2, 2], None);
+            let loaded = renderer.get_or_load_image_texture(ui, "assets/emoji/1f600.png");
+            assert!(loaded.is_some());
+        });
+    }
+
+    #[test]
+    fn test_get_or_load_image_texture_skips_recent_failure() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            renderer.note_image_failure("missing.png");
+            let loaded = renderer.get_or_load_image_texture(ui, "missing.png");
+            assert!(loaded.is_none());
+            assert!(renderer.image_failures.borrow().contains_key("missing.png"));
+        });
+    }
+
+    #[test]
+    fn test_get_or_load_image_texture_skips_pending() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            renderer
+                .image_pending
+                .borrow_mut()
+                .insert("pending.png".to_string());
+            let loaded = renderer.get_or_load_image_texture(ui, "pending.png");
+            assert!(loaded.is_none());
+        });
+    }
+
+    #[test]
+    fn test_render_inline_span_loaded_image_without_title() {
+        let renderer = MarkdownRenderer::new();
+        let span = InlineSpan::Image {
+            src: "assets/emoji/1f600.png".to_string(),
+            alt: "".to_string(),
+            title: None,
+        };
+        with_test_ui(|ctx, ui| {
+            let _ = wait_for_image(&renderer, ctx, ui, "assets/emoji/1f600.png");
+            renderer.render_inline_span(ui, &span, None, None);
         });
     }
 
@@ -8843,6 +9282,13 @@ fn main() {}
     }
 
     #[test]
+    fn test_list_marker_info_any_indent_rejects_missing_whitespace() {
+        assert!(MarkdownRenderer::list_marker_info_any_indent("1.item").is_none());
+        assert!(MarkdownRenderer::list_marker_info_any_indent("1)item").is_none());
+        assert!(MarkdownRenderer::list_marker_info_any_indent("1item").is_none());
+    }
+
+    #[test]
     fn test_collect_until_tag_end_breaks_and_code() -> Result<()> {
         let renderer = MarkdownRenderer::new();
         let events = vec![
@@ -9374,5 +9820,385 @@ fn main() {}
     fn test_to_superscript_maps_values() {
         let mapped = MarkdownRenderer::to_superscript("Abc123!");
         assert_ne!(mapped, "Abc123!");
+    }
+
+    #[test]
+    fn test_cell_single_emoji_whitespace_only() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![InlineSpan::Text("   ".to_string())];
+        assert!(renderer.cell_single_emoji(&spans).is_none());
+    }
+
+    #[test]
+    fn test_table_line_info_with_list_fallback_indent() {
+        let line = "  >| A |";
+        let (level, rest) = MarkdownRenderer::table_line_info_with_list(line, Some(2));
+        assert_eq!(level, 1);
+        assert!(rest.starts_with('|'));
+    }
+
+    #[test]
+    fn test_list_marker_info_any_indent_missing_punctuation() {
+        assert!(MarkdownRenderer::list_marker_info_any_indent("1 item").is_none());
+    }
+
+    #[test]
+    fn test_strip_indent_columns_rejects_non_whitespace() {
+        assert!(MarkdownRenderer::strip_indent_columns("x", 1).is_none());
+    }
+
+    #[test]
+    fn test_parse_element_image_empty_title_outside_paragraph() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let events = vec![
+            Event::Start(Tag::Image(LinkType::Inline, "img.png".into(), "".into())),
+            Event::Text("alt".into()),
+            Event::End(Tag::Image(LinkType::Inline, "img.png".into(), "".into())),
+        ];
+        let mut elements = Vec::new();
+        let mut slugs = HashMap::new();
+        let next = renderer.parse_element(&events, 0, &mut elements, &mut slugs)?;
+        assert_eq!(next, events.len());
+        let MarkdownElement::Paragraph(spans) = &elements[0] else {
+            panic!("expected paragraph");
+        };
+        let InlineSpan::Image { title, .. } = &spans[0] else {
+            panic!("expected image span");
+        };
+        assert!(title.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_slugify_trailing_dash_trimmed() {
+        let slug = MarkdownRenderer::slugify("Hello - ");
+        assert_eq!(slug, "hello");
+    }
+
+    #[test]
+    fn test_slugify_leading_whitespace_and_internal_spaces() {
+        let slug = MarkdownRenderer::slugify("  Hello   World ");
+        assert_eq!(slug, "hello-world");
+    }
+
+    #[test]
+    fn test_render_plain_and_highlight_empty_text() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            ui.visuals_mut().override_text_color = Some(Color32::from_rgb(10, 20, 30));
+            let style = InlineStyle {
+                strong: true,
+                ..Default::default()
+            };
+            renderer.render_plain_segment(ui, "", 12.0, style);
+            renderer.render_plain_segment(ui, "Header", 12.0, style);
+            renderer.render_highlighted_segment(ui, "", 12.0, style);
+        });
+    }
+
+    #[test]
+    fn test_emoji_key_for_grapheme_strips_vs16() {
+        let renderer = MarkdownRenderer::new();
+        let key = renderer.emoji_key_for_grapheme("\u{2705}\u{fe0f}");
+        assert_eq!(key, Some("\u{2705}".to_string()));
+    }
+
+    #[test]
+    fn test_expand_superscripts_long_sequence_no_expand() {
+        let input = "value^abcdefghijk^";
+        let out = MarkdownRenderer::expand_superscripts(input);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn test_compute_table_content_hash_stops_after_sample_rows() {
+        let renderer = MarkdownRenderer::new();
+        let headers = vec![vec![InlineSpan::Text("H".to_string())]];
+        let rows: Vec<Vec<Vec<InlineSpan>>> = (0..(COLUMN_STATS_SAMPLE_ROWS + 1))
+            .map(|idx| vec![vec![InlineSpan::Text(format!("R{idx}"))]])
+            .collect();
+        let hash = renderer.compute_table_content_hash(&headers, &rows, &[]);
+        assert_ne!(hash, 0);
+    }
+
+    #[test]
+    fn test_table_width_helpers_empty_inputs() {
+        let renderer = MarkdownRenderer::new();
+        let table_id = 100u64;
+        let mut specs: Vec<ColumnSpec> = Vec::new();
+        renderer.apply_persisted_widths(table_id, &mut specs);
+        renderer.persist_resizable_widths(table_id, &[], &[]);
+        let change = renderer.record_resolved_widths(table_id, 0, &[]);
+        assert!(matches!(change, WidthChange::None));
+        assert!(renderer
+            .resolve_table_column_widths(table_id, &[], 10.0)
+            .is_empty());
+        assert_eq!(renderer.estimate_table_total_width(table_id, &[], 6.0), 0.0);
+        with_test_ui(|_, ui| {
+            let style = ui.style().clone();
+            let row = vec![vec![]];
+            let height = renderer.estimate_table_row_height(
+                ui,
+                &style,
+                &row,
+                &[Align::LEFT],
+                &[40.0],
+                12.0,
+            );
+            assert_eq!(height, 12.0);
+            let rect = egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(10.0, 10.0),
+            );
+            renderer.paint_table_dividers(ui.painter(), ui.visuals(), rect, rect, &[], 0.0, 0.0);
+        });
+    }
+
+    #[test]
+    fn test_persist_resizable_widths_stores_new_width() {
+        let renderer = MarkdownRenderer::new();
+        let table_id = 200u64;
+        let specs = vec![ColumnSpec::new(
+            0,
+            "A",
+            ColumnPolicy::Resizable {
+                min: 20.0,
+                preferred: 100.0,
+                clip: false,
+            },
+            None,
+        )];
+        let widths = vec![140.0f32];
+        renderer.persist_resizable_widths(table_id, &specs, &widths);
+        let metrics = renderer.table_metrics.borrow();
+        let entry = metrics.entry(table_id).expect("entry created");
+        assert_eq!(entry.persisted_width(specs[0].policy_hash), Some(140.0));
+    }
+
+    #[test]
+    fn test_paint_table_text_job_adds_hover_for_wrapped_text() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![InlineSpan::Text(
+            "This is a long line that should wrap in a narrow cell.".to_string(),
+        )];
+        with_test_ui(|_, ui| {
+            let build = renderer.build_layout_job(ui.style(), &spans, 20.0, false, Align::LEFT);
+            let _response = renderer.paint_table_text_job(ui, 20.0, build);
+        });
+    }
+
+    #[test]
+    fn test_link_at_pointer_outside_text_rect() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![InlineSpan::Link {
+            text: "link".to_string(),
+            url: "https://example.com".to_string(),
+        }];
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(220.0, 120.0),
+            )),
+            ..Default::default()
+        };
+        input
+            .events
+            .push(egui::Event::PointerMoved(egui::pos2(150.0, 10.0)));
+        run_frame_with_input(&ctx, input, |_, ui| {
+            let build = renderer.build_layout_job(ui.style(), &spans, 200.0, false, Align::LEFT);
+            let galley = ui.fonts(|f| f.layout_job(build.job.clone()));
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(200.0, galley.size().y), egui::Sense::hover());
+            let text_origin = MarkdownRenderer::aligned_text_origin(rect, &galley, build.job.halign);
+            let link = renderer.link_at_pointer(&response, &galley, &build, text_origin);
+            assert!(link.is_none());
+        });
+    }
+
+    #[test]
+    fn test_element_plain_text_list_quote_table_spacing() {
+        let list = MarkdownElement::List {
+            ordered: false,
+            items: vec![ListItem {
+                blocks: vec![
+                    MarkdownElement::Paragraph(vec![InlineSpan::Text("One".to_string())]),
+                    MarkdownElement::Paragraph(vec![InlineSpan::Text("Two".to_string())]),
+                ],
+            }],
+        };
+        let list_text = MarkdownRenderer::element_plain_text(&list);
+        assert!(list_text.contains('\n'));
+
+        let quote = MarkdownElement::Quote {
+            depth: 1,
+            blocks: vec![
+                MarkdownElement::Paragraph(vec![InlineSpan::Text("Alpha".to_string())]),
+                MarkdownElement::Paragraph(vec![InlineSpan::Text("Beta".to_string())]),
+            ],
+        };
+        let quote_text = MarkdownRenderer::element_plain_text(&quote);
+        assert!(quote_text.contains('\n'));
+
+        let table = MarkdownElement::Table {
+            headers: vec![
+                vec![InlineSpan::Text("H1".to_string())],
+                vec![InlineSpan::Text("H2".to_string())],
+            ],
+            rows: vec![vec![
+                vec![InlineSpan::Text("A".to_string())],
+                vec![InlineSpan::Text("B".to_string())],
+            ]],
+            alignments: vec![],
+        };
+        let table_text = MarkdownRenderer::element_plain_text(&table);
+        assert_eq!(table_text, "H1 H2 A B");
+    }
+
+    #[test]
+    fn test_resolve_image_path_data_uri_and_remote_texture_reject() {
+        let renderer = MarkdownRenderer::new();
+        let data_uri = "data:image/png;base64,AAAA";
+        assert_eq!(renderer.resolve_image_path(data_uri), data_uri);
+        with_test_ui(|_, ui| {
+            assert!(renderer
+                .get_or_load_image_texture(ui, "https://example.com/image.png")
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn test_is_html_line_break_rejects_non_br() {
+        assert!(!MarkdownRenderer::is_html_line_break("<div>"));
+        assert!(!MarkdownRenderer::is_html_line_break("br"));
+    }
+
+    #[test]
+    fn test_table_line_info_variants_cover_edges() {
+        let (level, rest) = MarkdownRenderer::table_line_info("text");
+        assert_eq!(level, 0);
+        assert_eq!(rest, "text");
+
+        let (level, rest) = MarkdownRenderer::table_line_info("   text");
+        assert_eq!(level, 0);
+        assert_eq!(rest, "   text");
+
+        let (level, rest) = MarkdownRenderer::table_line_info(">abc");
+        assert_eq!(level, 1);
+        assert_eq!(rest, "abc");
+
+        let (level, rest) = MarkdownRenderer::table_line_info(" >\tabc");
+        assert_eq!(level, 1);
+        assert_eq!(rest, "abc");
+    }
+
+    #[test]
+    fn test_list_marker_info_rejects_missing_delimiter_or_spacing() {
+        assert!(MarkdownRenderer::list_marker_info("1 item").is_none());
+        assert!(MarkdownRenderer::list_marker_info("1.item").is_none());
+    }
+
+    #[test]
+    fn test_list_marker_info_numeric_missing_punctuation() {
+        assert!(MarkdownRenderer::list_marker_info("12").is_none());
+        assert!(MarkdownRenderer::list_marker_info_any_indent("  12").is_none());
+    }
+
+    #[test]
+    fn test_list_marker_info_any_indent_rejects_missing_delimiter_or_spacing() {
+        assert!(MarkdownRenderer::list_marker_info_any_indent("   1 item").is_none());
+        assert!(MarkdownRenderer::list_marker_info_any_indent("  2.item").is_none());
+    }
+
+    #[test]
+    fn test_strip_indent_columns_insufficient_indent_returns_none() {
+        assert!(MarkdownRenderer::strip_indent_columns("  text", 4).is_none());
+    }
+
+    #[test]
+    fn test_strip_indent_columns_whitespace_short_returns_none() {
+        assert!(MarkdownRenderer::strip_indent_columns("  ", 4).is_none());
+    }
+
+    #[test]
+    fn test_has_pipe_outside_inline_code_unmatched_backticks() {
+        let line = "`code`` | still in code";
+        assert!(!MarkdownRenderer::has_pipe_outside_inline_code(line));
+    }
+
+    #[test]
+    fn test_is_table_delimiter_line_requires_dash_and_pipe() {
+        assert!(!MarkdownRenderer::is_table_delimiter_line("----"));
+        assert!(!MarkdownRenderer::is_table_delimiter_line("| ::: |"));
+    }
+
+    #[test]
+    fn test_append_text_sections_preserves_color_when_highlighted() {
+        let renderer = MarkdownRenderer::new();
+        let style = egui::Style::default();
+        let mut job = LayoutJob::default();
+        let mut plain_text = String::new();
+        let inline_style = InlineStyle {
+            strong: false,
+            italics: false,
+            strike: false,
+            color: Some(Color32::from_rgb(10, 20, 30)),
+        };
+        let count = renderer.append_text_sections(
+            &style,
+            &mut job,
+            &mut plain_text,
+            "hit",
+            renderer.font_sizes.body,
+            inline_style,
+            Some("hit"),
+        );
+        assert_eq!(count, 3);
+        assert_eq!(plain_text, "hit");
+    }
+
+    #[test]
+    fn test_render_text_with_emojis_leading_emoji() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            renderer.render_text_with_emojis(ui, "😀 test", 14.0, InlineStyle::default());
+        });
+    }
+
+    #[test]
+    fn test_persist_resizable_widths_records_change() {
+        let renderer = MarkdownRenderer::new();
+        let spec = ColumnSpec::new(
+            0,
+            "col",
+            ColumnPolicy::Resizable {
+                min: 40.0,
+                preferred: 80.0,
+                clip: false,
+            },
+            None,
+        );
+        let hash = spec.policy_hash;
+        renderer.persist_resizable_widths(42, &[spec], &[120.0]);
+        let metrics = renderer.table_metrics.borrow();
+        let entry = metrics.entry(42).expect("metrics entry");
+        assert_eq!(entry.persisted_width(hash), Some(120.0));
+    }
+
+    #[test]
+    fn test_env_var_guard_restores_previous_value() {
+        std::env::set_var("MDMDVIEW_TEST_ENV", "before");
+        {
+            let _guard = EnvVarGuard::set("MDMDVIEW_TEST_ENV", "after");
+            assert_eq!(
+                std::env::var("MDMDVIEW_TEST_ENV").ok().as_deref(),
+                Some("after")
+            );
+        }
+        assert_eq!(
+            std::env::var("MDMDVIEW_TEST_ENV").ok().as_deref(),
+            Some("before")
+        );
+        std::env::remove_var("MDMDVIEW_TEST_ENV");
     }
 }
