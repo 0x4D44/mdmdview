@@ -279,11 +279,13 @@ impl MermaidRenderer {
     pub(crate) fn has_pending(&self) -> bool {
         #[cfg(feature = "mermaid-quickjs")]
         {
-            if self.mermaid_frame_pending.get() || !self.mermaid_pending.borrow().is_empty() {
-                return true;
-            }
+            return self.mermaid_frame_pending.get()
+                || !self.mermaid_pending.borrow().is_empty();
         }
-        false
+        #[cfg(not(feature = "mermaid-quickjs"))]
+        {
+            false
+        }
     }
 
     pub(crate) fn begin_frame(&self) {
@@ -551,7 +553,10 @@ impl MermaidRenderer {
                 });
             return true;
         }
-        false
+        #[cfg(not(feature = "mermaid-quickjs"))]
+        {
+            false
+        }
     }
 
     #[cfg(any(test, feature = "mermaid-quickjs"))]
@@ -5082,6 +5087,18 @@ mod tests {
         assert!(h > 0);
         assert!(w <= MermaidRenderer::MERMAID_MAX_RENDER_SIDE);
         assert!(h <= MermaidRenderer::MERMAID_MAX_RENDER_SIDE);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_worker_dom_debug_env() {
+        let _lock = env_lock();
+        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_DOM_DEBUG", "1");
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        let fontdb = Arc::new(fontdb);
+        let worker = MermaidWorker::new(0, fontdb);
+        assert!(worker.is_ok());
     }
 
     #[cfg(feature = "mermaid-quickjs")]
