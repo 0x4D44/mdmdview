@@ -4055,6 +4055,12 @@ impl MarkdownRenderer {
                         }
                     }
 
+                    // Capture painter from outer UI BEFORE TableBuilder to ensure dividers
+                    // paint on top of both header and body (fixes header divider visibility).
+                    let outer_painter = ui.painter().clone();
+                    let outer_visuals = ui.visuals().clone();
+                    let outer_ctx = ui.ctx().clone();
+
                     let mut table = TableBuilder::new(ui).striped(true).vscroll(false);
                     for column in &column_layout {
                         table = table.column(*column);
@@ -4078,9 +4084,6 @@ impl MarkdownRenderer {
                     // This ensures dividers respect scroll boundaries for both regions.
                     let mut header_clip_rect: Option<egui::Rect> = None;
                     let body_clip_rect: RefCell<Option<egui::Rect>> = RefCell::new(None);
-                    let mut painter: Option<Painter> = None;
-                    let mut visuals: Option<Visuals> = None;
-                    let mut ctx_snapshot: Option<Context> = None;
 
                     let mut height_change = false;
                     let header_height_actual = Cell::new(0.0f32);
@@ -4104,9 +4107,6 @@ impl MarkdownRenderer {
                                     Self::extend_table_rect(&mut header_rect, ui.min_rect());
                                     if header_clip_rect.is_none() {
                                         header_clip_rect = Some(ui.clip_rect());
-                                        painter = Some(ui.painter().clone());
-                                        visuals = Some(ui.visuals().clone());
-                                        ctx_snapshot = Some(ui.ctx().clone());
                                     }
                                 });
                             }
@@ -4148,12 +4148,6 @@ impl MarkdownRenderer {
                                         Self::extend_table_rect(&mut body_rect, ui.min_rect());
                                         if body_clip_rect.borrow().is_none() {
                                             *body_clip_rect.borrow_mut() = Some(ui.clip_rect());
-                                            // Also capture painter/visuals/ctx if not already captured from header
-                                            if painter.is_none() {
-                                                painter = Some(ui.painter().clone());
-                                                visuals = Some(ui.visuals().clone());
-                                                ctx_snapshot = Some(ui.ctx().clone());
-                                            }
                                         }
                                     });
                                     row_height = row_height.max(cell_height);
@@ -4228,17 +4222,17 @@ impl MarkdownRenderer {
                         }
                     };
 
-                    if let (Some(rect), Some(clip_rect), Some(painter), Some(visuals), Some(ctx)) =
-                        (table_rect, clip_rect, painter, visuals, ctx_snapshot)
-                    {
+                    if let (Some(rect), Some(clip_rect)) = (table_rect, clip_rect) {
                         if column_specs.len() == widths.len() && widths.iter().any(|w| *w > 0.0) {
-                            let frame_id = ctx.frame_nr();
+                            let frame_id = outer_ctx.frame_nr();
                             let change = self.record_resolved_widths(table_id, frame_id, &widths);
                             self.persist_resizable_widths(table_id, &column_specs, &widths);
-                            self.handle_width_change(&ctx, table_id, change);
+                            self.handle_width_change(&outer_ctx, table_id, change);
+                            // Use outer_painter (captured before TableBuilder) to ensure
+                            // dividers paint on top of both header and body.
                             self.paint_table_dividers(
-                                &painter,
-                                &visuals,
+                                &outer_painter,
+                                &outer_visuals,
                                 rect,
                                 clip_rect,
                                 &widths,
@@ -4604,7 +4598,10 @@ impl MarkdownRenderer {
             .gamma_multiply(0.9);
         let separator_stroke = Stroke::new(1.0, separator_color);
         let border_stroke = visuals.window_stroke();
-        let painter = painter.with_clip_rect(clip_rect);
+        // Expand clip_rect to include the full table rect so borders aren't clipped.
+        // The cell clip_rect may not include the outer border area.
+        let expanded_clip = clip_rect.union(rect);
+        let painter = painter.with_clip_rect(expanded_clip);
 
         // Draw vertical dividers between columns
         if widths.len() > 1 {
@@ -5440,6 +5437,280 @@ mod tests {
     }
 
     #[test]
+    fn test_image_cache_get_missing_and_insert_empty_order() {
+        let mut cache = ImageCache::new(1);
+        assert!(cache.get("missing").is_none());
+
+        let mut entry_slot = None;
+        with_test_ui(|ctx, _ui| {
+            let tex = ctx.load_texture(
+                "cache_test",
+                egui::ColorImage::new([1, 1], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            entry_slot = Some(ImageCacheEntry {
+                texture: tex,
+                size: [1, 1],
+                modified: None,
+            });
+        });
+        let entry = entry_slot.expect("texture");
+        cache.entries.insert("a".to_string(), ImageCacheEntry {
+            texture: entry.texture.clone(),
+            size: entry.size,
+            modified: entry.modified,
+        });
+        cache.order.clear();
+        cache.insert(
+            "b".to_string(),
+            ImageCacheEntry {
+                texture: entry.texture.clone(),
+                size: entry.size,
+                modified: entry.modified,
+            },
+        );
+        assert!(cache.contains_key("b"));
+    }
+
+    #[test]
+    fn test_list_marker_info_rejects_empty_and_bad_numeric() {
+        assert!(MarkdownRenderer::list_marker_info("").is_none());
+        assert!(MarkdownRenderer::list_marker_info("1 abc").is_none());
+        assert!(MarkdownRenderer::list_marker_info("   ").is_none());
+    }
+
+    #[test]
+    fn test_parse_image_with_title_sets_title() {
+        let renderer = MarkdownRenderer::new();
+        let parsed = renderer
+            .parse("![alt](path/to/img.png \"Title\")")
+            .expect("parse");
+        let MarkdownElement::Paragraph(spans) = &parsed[0] else {
+            panic!("expected paragraph");
+        };
+        let InlineSpan::Image { title, .. } = &spans[0] else {
+            panic!("expected image span");
+        };
+        assert_eq!(title.as_deref(), Some("Title"));
+    }
+
+    #[test]
+    fn test_is_external_url_variants() {
+        assert!(MarkdownRenderer::is_external_url("http://example.com"));
+        assert!(MarkdownRenderer::is_external_url("https://example.com"));
+        assert!(MarkdownRenderer::is_external_url("mailto:test@example.com"));
+        assert!(MarkdownRenderer::is_external_url("www.example.com"));
+        assert!(!MarkdownRenderer::is_external_url("local/path.png"));
+    }
+
+    #[test]
+    fn test_resolve_image_path_keeps_remote() {
+        let renderer = MarkdownRenderer::new();
+        let src = "https://example.com/image.png";
+        assert_eq!(renderer.resolve_image_path(src), src);
+        let data_src = "data:image/png;base64,AAAA";
+        assert_eq!(renderer.resolve_image_path(data_src), data_src);
+    }
+
+    #[test]
+    fn test_compute_table_id_includes_base_dir() {
+        let renderer = MarkdownRenderer::new();
+        let headers = vec![vec![InlineSpan::Text("A".to_string())]];
+        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
+        let alignments = vec![Alignment::Left];
+        let base_id = renderer.compute_table_id(&headers, &rows, &alignments, 0);
+
+        *renderer.base_dir.borrow_mut() = Some(PathBuf::from("C:\\tmp"));
+        let with_base = renderer.compute_table_id(&headers, &rows, &alignments, 0);
+        assert_ne!(base_id, with_base);
+    }
+
+    #[test]
+    fn test_render_table_early_return_on_empty_headers() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            renderer.render_table(ui, &[], &[], &[]);
+        });
+    }
+
+    #[test]
+    fn test_extend_table_rect_handles_nan() {
+        let mut target = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(10.0, 10.0),
+        ));
+        let nan_rect = egui::Rect::from_min_size(
+            egui::pos2(f32::NAN, 0.0),
+            egui::vec2(1.0, 1.0),
+        );
+        MarkdownRenderer::extend_table_rect(&mut target, nan_rect);
+        let stored = target.expect("target");
+        assert!(!stored.min.x.is_nan());
+
+        let mut target_none = None;
+        MarkdownRenderer::extend_table_rect(
+            &mut target_none,
+            egui::Rect::from_min_size(egui::pos2(5.0, 6.0), egui::vec2(2.0, 2.0)),
+        );
+        assert!(target_none.is_some());
+    }
+
+    #[test]
+    fn test_persist_resizable_widths_returns_on_empty() {
+        let renderer = MarkdownRenderer::new();
+        renderer.persist_resizable_widths(1, &[], &[]);
+    }
+
+    #[test]
+    fn test_link_at_pointer_outside_rect_returns_none() {
+        let renderer = MarkdownRenderer::new();
+        let spans = vec![InlineSpan::Link {
+            text: "Link".to_string(),
+            url: "https://example.com".to_string(),
+        }];
+        let ctx = egui::Context::default();
+        let mut input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(320.0, 240.0),
+            )),
+            ..Default::default()
+        };
+        input.events.push(egui::Event::PointerMoved(egui::pos2(200.0, 200.0)));
+        ctx.begin_frame(input);
+        let mut found = false;
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            let response = ui.label("anchor");
+            let build = renderer.build_layout_job(ui.style(), &spans, 200.0, false, Align::LEFT);
+            let galley = ui.fonts(|f| f.layout_job(build.job.clone()));
+            found = renderer
+                .link_at_pointer(&response, &galley, &build, egui::pos2(0.0, 0.0))
+                .is_some();
+        });
+        let _ = ctx.end_frame();
+        assert!(!found);
+    }
+
+    #[test]
+    fn test_spawn_image_loader_missing_file_reports_failed() {
+        let (job_tx, job_rx) = bounded(1);
+        let (result_tx, result_rx) = bounded(1);
+        MarkdownRenderer::spawn_image_loader(job_rx, result_tx);
+
+        let dir = tempdir().expect("temp dir");
+        let path = dir.path().join("missing.png");
+        job_tx
+            .send(ImageLoadRequest {
+                key: "missing".to_string(),
+                source: ImageLoadSource::File(path),
+            })
+            .expect("send");
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("result");
+        match result {
+            ImageLoadResult::Failed { key } => assert_eq!(key, "missing"),
+            _ => panic!("expected failed result"),
+        }
+    }
+
+    #[test]
+    fn test_env_var_guard_removes_unset_value() {
+        let key = "MDMDVIEW_TEST_ENV_GUARD";
+        env::remove_var(key);
+        {
+            let _guard = EnvVarGuard::set(key, "value");
+            assert_eq!(env::var(key).ok().as_deref(), Some("value"));
+        }
+        assert!(env::var(key).is_err());
+    }
+
+    #[test]
+    fn test_parse_forced_error_returns_err_once() {
+        let renderer = MarkdownRenderer::new();
+        force_parse_error_once();
+        assert!(renderer.parse("hello").is_err());
+        assert!(renderer.parse("hello").is_ok());
+    }
+
+    #[test]
+    fn test_fence_helpers_cover_branches() {
+        assert_eq!(MarkdownRenderer::fence_start("```"), Some(('`', 3)));
+        assert_eq!(MarkdownRenderer::fence_start("``"), None);
+        assert_eq!(MarkdownRenderer::fence_start("~~~"), Some(('~', 3)));
+        assert!(MarkdownRenderer::is_fence_end("```", '`', 3));
+        assert!(!MarkdownRenderer::is_fence_end("``", '`', 3));
+        assert!(MarkdownRenderer::is_fence_end("   ```", '`', 3));
+    }
+
+    #[test]
+    fn test_restore_pipe_sentinel_round_trip() {
+        let input = format!("a{}b", PIPE_SENTINEL);
+        assert_eq!(MarkdownRenderer::restore_pipe_sentinel(&input), "a|b");
+        assert_eq!(MarkdownRenderer::restore_pipe_sentinel("a|b"), "a|b");
+    }
+
+    #[test]
+    fn test_list_marker_info_numeric_punctuation() {
+        let (content, _indent, _content_indent) =
+            MarkdownRenderer::list_marker_info("1. item").expect("dot marker");
+        assert_eq!(content.trim_start(), "item");
+        let (content, _indent, _content_indent) =
+            MarkdownRenderer::list_marker_info("2) item").expect("paren marker");
+        assert_eq!(content.trim_start(), "item");
+    }
+
+    #[test]
+    fn test_should_retry_image_backoff_respected() {
+        let renderer = MarkdownRenderer::new();
+        renderer.image_failures.borrow_mut().insert(
+            "recent".to_string(),
+            ImageFailure {
+                last_attempt: std::time::Instant::now(),
+            },
+        );
+        assert!(!renderer.should_retry_image("recent"));
+
+        renderer.image_failures.borrow_mut().insert(
+            "old".to_string(),
+            ImageFailure {
+                last_attempt: std::time::Instant::now() - IMAGE_FAILURE_BACKOFF - Duration::from_millis(1),
+            },
+        );
+        assert!(renderer.should_retry_image("old"));
+    }
+
+    #[test]
+    fn test_extend_table_rect_accepts_valid_rect() {
+        let mut target = None;
+        let rect = egui::Rect::from_min_size(egui::pos2(1.0, 2.0), egui::vec2(3.0, 4.0));
+        MarkdownRenderer::extend_table_rect(&mut target, rect);
+        assert_eq!(target, Some(rect));
+
+        let rect2 = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0));
+        MarkdownRenderer::extend_table_rect(&mut target, rect2);
+        let merged = target.expect("merged rect");
+        assert!(merged.contains(rect.min));
+        assert!(merged.contains(rect2.max));
+    }
+
+    #[test]
+    fn test_render_code_block_with_none_language() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            renderer.render_code_block(ui, None, "fn main() {}");
+        });
+    }
+
+    #[test]
+    fn test_render_action_triggered_forced_paths() {
+        let _actions = ForcedRenderActions::new(&["forced_action"]);
+        assert!(render_action_triggered(false, "forced_action"));
+        assert!(!render_action_triggered(false, "other_action"));
+        assert!(render_action_triggered(true, "other_action"));
+    }
+
+    #[test]
     fn test_markdown_renderer_creation() {
         let renderer = MarkdownRenderer::new();
         assert_eq!(renderer.font_sizes.body, 14.0);
@@ -5891,6 +6162,22 @@ mod tests {
             .expect("rocket shortcode");
         let spans = vec![InlineSpan::Emphasis((*rocket).to_string())];
         assert!(renderer.cell_single_emoji(&spans).is_some());
+    }
+
+    #[test]
+    fn test_cell_single_emoji_returns_none_for_code_and_link() {
+        let renderer = MarkdownRenderer::new();
+        let rocket = crate::emoji_catalog::shortcode_map()
+            .get(":rocket:")
+            .expect("rocket shortcode");
+        let code_spans = vec![InlineSpan::Code((*rocket).to_string())];
+        assert!(renderer.cell_single_emoji(&code_spans).is_none());
+
+        let link_spans = vec![InlineSpan::Link {
+            text: (*rocket).to_string(),
+            url: "https://example.com".to_string(),
+        }];
+        assert!(renderer.cell_single_emoji(&link_spans).is_none());
     }
 
     #[test]
@@ -6883,8 +7170,9 @@ fn main() {}
 
         renderer.set_base_dir(Some(temp.path()));
         let resolved = renderer.resolve_image_path("disk.png");
-        with_test_ui(|_, ui| {
-            let loaded = renderer.get_or_load_image_texture(ui, &resolved);
+        with_test_ui(|ctx, ui| {
+            // Use wait_for_image to handle async image loading
+            let loaded = wait_for_image(&renderer, ctx, ui, &resolved);
             assert!(loaded.is_some());
         });
 
@@ -9052,18 +9340,16 @@ fn main() {}
             .themes
             .get_mut("base16-ocean.dark")
             .expect("theme");
-        let selector = ScopeSelectors::from_str("keyword").expect("selector");
-        theme.scopes.insert(
-            0,
-            ThemeItem {
-                scope: selector,
-                style: StyleModifier {
-                    foreground: Some(Color::WHITE),
-                    background: Some(Color::BLACK),
-                    font_style: Some(FontStyle::BOLD | FontStyle::ITALIC),
-                },
+        theme.scopes.clear();
+        let selector = ScopeSelectors::from_str("source.rust").expect("selector");
+        theme.scopes.push(ThemeItem {
+            scope: selector,
+            style: StyleModifier {
+                foreground: Some(Color::WHITE),
+                background: Some(Color::BLACK),
+                font_style: Some(FontStyle::BOLD | FontStyle::ITALIC),
             },
-        );
+        });
         with_test_ui(|_, ui| {
             renderer.render_code_block(ui, Some("rust"), "fn main() {}");
         });

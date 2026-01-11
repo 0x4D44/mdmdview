@@ -1629,7 +1629,16 @@ impl MarkdownViewerApp {
 
         ui.horizontal(|ui| {
             let clicked = ui
-                .selectable_label(self.wrap_raw, "Wrap Raw Lines")
+                .add(egui::SelectableLabel::new(
+                    self.wrap_raw,
+                    Self::menu_text_with_mnemonic(
+                        None,
+                        "Wrap Raw Lines",
+                        'L',
+                        alt_pressed,
+                        menu_text_color,
+                    ),
+                ))
                 .clicked();
             if app_action_triggered(clicked, "menu_wrap_raw") {
                 self.wrap_raw = !self.wrap_raw;
@@ -1637,7 +1646,15 @@ impl MarkdownViewerApp {
         });
 
         ui.horizontal(|ui| {
-            let clicked = ui.button("Zoom In").clicked();
+            let clicked = ui
+                .add(egui::Button::new(Self::menu_text_with_mnemonic(
+                    None,
+                    "Zoom In",
+                    'I',
+                    alt_pressed,
+                    menu_text_color,
+                )))
+                .clicked();
             if app_action_triggered(clicked, "menu_zoom_in") {
                 self.renderer.zoom_in();
                 ui.close_menu();
@@ -1648,7 +1665,15 @@ impl MarkdownViewerApp {
         });
 
         ui.horizontal(|ui| {
-            let clicked = ui.button("Zoom Out").clicked();
+            let clicked = ui
+                .add(egui::Button::new(Self::menu_text_with_mnemonic(
+                    None,
+                    "Zoom Out",
+                    'O',
+                    alt_pressed,
+                    menu_text_color,
+                )))
+                .clicked();
             if app_action_triggered(clicked, "menu_zoom_out") {
                 self.renderer.zoom_out();
                 ui.close_menu();
@@ -1659,7 +1684,15 @@ impl MarkdownViewerApp {
         });
 
         ui.horizontal(|ui| {
-            let clicked = ui.button("Reset Zoom").clicked();
+            let clicked = ui
+                .add(egui::Button::new(Self::menu_text_with_mnemonic(
+                    None,
+                    "Reset Zoom",
+                    'Z',
+                    alt_pressed,
+                    menu_text_color,
+                )))
+                .clicked();
             if app_action_triggered(clicked, "menu_zoom_reset") {
                 self.renderer.reset_zoom();
                 ui.close_menu();
@@ -1672,7 +1705,15 @@ impl MarkdownViewerApp {
         ui.separator();
 
         ui.horizontal(|ui| {
-            let clicked = ui.button("Toggle Fullscreen").clicked();
+            let clicked = ui
+                .add(egui::Button::new(Self::menu_text_with_mnemonic(
+                    None,
+                    "Toggle Fullscreen",
+                    'T',
+                    alt_pressed,
+                    menu_text_color,
+                )))
+                .clicked();
             if app_action_triggered(clicked, "menu_fullscreen") {
                 let is_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!is_fullscreen));
@@ -1684,20 +1725,47 @@ impl MarkdownViewerApp {
         });
     }
 
-    fn render_help_menu_contents(&mut self, ui: &mut egui::Ui) {
-        if app_action_triggered(ui.button("Usage Instructions").clicked(), "menu_help_usage") {
-            if let Some(usage) = SAMPLE_FILES.iter().find(|f| f.name == "usage.md") {
-                self.load_sample(usage);
+    fn render_help_menu_contents(
+        &mut self,
+        ui: &mut egui::Ui,
+        alt_pressed: bool,
+        menu_text_color: Color32,
+    ) {
+        ui.horizontal(|ui| {
+            let clicked = ui
+                .add(egui::Button::new(Self::menu_text_with_mnemonic(
+                    None,
+                    "Usage Instructions",
+                    'U',
+                    alt_pressed,
+                    menu_text_color,
+                )))
+                .clicked();
+            if app_action_triggered(clicked, "menu_help_usage") {
+                if let Some(usage) = SAMPLE_FILES.iter().find(|f| f.name == "usage.md") {
+                    self.load_sample(usage);
+                }
+                ui.close_menu();
             }
-            ui.close_menu();
-        }
+        });
 
-        if app_action_triggered(ui.button("About").clicked(), "menu_help_about") {
-            if let Some(welcome) = SAMPLE_FILES.iter().find(|f| f.name == "welcome.md") {
-                self.load_sample(welcome);
+        ui.horizontal(|ui| {
+            let clicked = ui
+                .add(egui::Button::new(Self::menu_text_with_mnemonic(
+                    None,
+                    "About",
+                    'A',
+                    alt_pressed,
+                    menu_text_color,
+                )))
+                .clicked();
+            if app_action_triggered(clicked, "menu_help_about") {
+                if let Some(welcome) = SAMPLE_FILES.iter().find(|f| f.name == "welcome.md") {
+                    self.load_sample(welcome);
+                }
+                ui.close_menu();
             }
-            ui.close_menu();
-        }
+        });
     }
 
     /// Render the menu bar
@@ -1732,11 +1800,14 @@ impl MarkdownViewerApp {
                     self.render_view_menu_contents(ui, ctx, alt_pressed, menu_text_color);
                 }
 
-                ui.menu_button("Help", |ui| {
-                    self.render_help_menu_contents(ui);
-                });
+                ui.menu_button(
+                    Self::menu_text_with_mnemonic(None, "Help", 'H', alt_pressed, menu_text_color),
+                    |ui| {
+                        self.render_help_menu_contents(ui, alt_pressed, menu_text_color);
+                    },
+                );
                 if app_action_triggered(false, "menu_bar_help") {
-                    self.render_help_menu_contents(ui);
+                    self.render_help_menu_contents(ui, alt_pressed, menu_text_color);
                 }
             });
         });
@@ -1827,24 +1898,6 @@ impl MarkdownViewerApp {
                     if app_action_triggered(false, "status_hover") {
                         self.render_status_tooltip(ui);
                     }
-
-                    let (hits, misses) = self.renderer.table_layout_cache_stats();
-                    let (rendered_rows, total_rows) = self.renderer.table_render_stats();
-                    let row_info = if total_rows > 0 {
-                        format!(
-                            "\nRows rendered this frame: {} / {}",
-                            rendered_rows, total_rows
-                        )
-                    } else {
-                        String::new()
-                    };
-                    let cache_tip = format!(
-                        "Table layout cache: {} hits / {} misses{}",
-                        hits, misses, row_info
-                    );
-                    let wrap_label =
-                        RichText::new("Tables: Wrap").color(Color32::from_rgb(120, 200, 255));
-                    ui.label(wrap_label).on_hover_text(cache_tip);
                 });
             });
         });
@@ -2674,9 +2727,10 @@ impl Default for MarkdownViewerApp {
 mod tests {
     use super::*;
     use crate::markdown_renderer::InlineSpan;
+    use eframe::App;
     use std::io::Write;
     use std::sync::{Arc, Mutex, OnceLock};
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, TempDir};
 
     fn run_app_frame(app: &mut MarkdownViewerApp, ctx: &egui::Context, input: egui::RawInput) {
         let _ = ctx.run(input, |ctx| {
@@ -2723,6 +2777,19 @@ mod tests {
                 std::env::remove_var(self.key);
             }
         }
+    }
+
+    #[derive(Default)]
+    struct DummyStorage;
+
+    impl eframe::Storage for DummyStorage {
+        fn get_string(&self, _key: &str) -> Option<String> {
+            None
+        }
+
+        fn set_string(&mut self, _key: &str, _value: String) {}
+
+        fn flush(&mut self) {}
     }
 
     struct ForcedAppActions {
@@ -2815,6 +2882,13 @@ mod tests {
                 *flag.borrow_mut() = false;
             });
         }
+    }
+
+    #[test]
+    fn test_app_action_triggered_with_forced_action() {
+        let _guard = ForcedAppActions::new(&["menu_open"]);
+        assert!(app_action_triggered(false, "menu_open"));
+        assert!(app_action_triggered(true, "menu_open"));
     }
 
     #[test]
@@ -2983,6 +3057,73 @@ mod tests {
     }
 
     #[test]
+    fn test_load_file_async_sends_request() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let mut temp_file = NamedTempFile::new()?;
+        let payload = vec![b'a'; ASYNC_LOAD_THRESHOLD_BYTES as usize];
+        temp_file.write_all(&payload)?;
+        temp_file.flush()?;
+
+        let path = temp_file.path().to_path_buf();
+        app.load_file(path.clone(), false)?;
+        assert!(app.pending_file_load.is_some());
+        assert_eq!(
+            app.pending_file_load.as_ref().expect("pending").path,
+            path
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_file_async_falls_back_when_channel_closed() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let (tx, rx) = unbounded::<FileLoadRequest>();
+        drop(rx);
+        app.file_load_tx = tx;
+
+        let mut temp_file = NamedTempFile::new()?;
+        let payload = vec![b'a'; ASYNC_LOAD_THRESHOLD_BYTES as usize];
+        temp_file.write_all(&payload)?;
+        temp_file.flush()?;
+
+        let path = temp_file.path().to_path_buf();
+        app.load_file(path.clone(), false)?;
+        assert_eq!(app.current_file, Some(path));
+        assert!(app.pending_file_load.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_poll_file_loads_handles_mismatch_and_lossy() {
+        let mut app = MarkdownViewerApp::new();
+        let (result_tx, result_rx) = unbounded::<FileLoadResult>();
+        app.file_load_rx = result_rx;
+
+        let temp = NamedTempFile::new().expect("temp");
+        let path = temp.path().to_path_buf();
+        app.pending_file_load = Some(PendingFileLoad { id: 1, path: path.clone() });
+
+        result_tx
+            .send(FileLoadResult {
+                id: 2,
+                content: Ok(("ignored".to_string(), false)),
+            })
+            .expect("send mismatch");
+        app.poll_file_loads();
+        assert!(app.pending_file_load.is_some());
+
+        result_tx
+            .send(FileLoadResult {
+                id: 1,
+                content: Ok(("loaded".to_string(), true)),
+            })
+            .expect("send match");
+        app.poll_file_loads();
+        assert!(app.pending_file_load.is_none());
+        assert_eq!(app.current_file, Some(path));
+    }
+
+    #[test]
     fn test_load_invalid_markdown() {
         let mut app = MarkdownViewerApp::new();
         // Even "invalid" markdown should parse successfully with pulldown-cmark
@@ -2993,7 +3134,7 @@ mod tests {
 
         // Should still work - pulldown-cmark is very permissive
         assert_eq!(app.current_content, content);
-        assert!(app.error_message.is_none() || app.error_message.is_some()); // Either is ok
+        assert!(app.error_message.is_none());
     }
 
     #[test]
@@ -3767,7 +3908,86 @@ The end.
         let state = app.screenshot.as_ref().expect("screenshot state");
         assert!(state.viewport_adjusted);
         assert!(state.requested);
-        assert!(state.timed_out || state.scroll_ready());
+        assert!(state.scroll_ready());
+    }
+
+    #[test]
+    fn test_save_persists_window_state_when_no_screenshot() {
+        let _lock = env_lock();
+        let temp_dir = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp_dir.path().to_string_lossy().as_ref());
+
+        let mut app = MarkdownViewerApp::new();
+        app.last_window_pos = Some([10.0, 20.0]);
+        app.last_window_size = Some([800.0, 600.0]);
+        let mut storage = DummyStorage::default();
+        app.save(&mut storage);
+
+        let path = temp_dir.path().join("MarkdownView").join("window_state.txt");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn test_save_skips_persist_when_screenshot_active() {
+        let _lock = env_lock();
+        let temp_dir = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp_dir.path().to_string_lossy().as_ref());
+
+        let mut app = MarkdownViewerApp::new();
+        let config = ScreenshotConfig {
+            output_path: temp_dir.path().join("shot.png"),
+            viewport_width: 10.0,
+            viewport_height: 10.0,
+            content_only: false,
+            scroll_ratio: None,
+            wait_ms: 0,
+            settle_frames: 0,
+            zoom: 1.0,
+            theme: ScreenshotTheme::Light,
+            font_source: None,
+        };
+        app.set_screenshot_mode(config);
+        let mut storage = DummyStorage::default();
+        app.save(&mut storage);
+
+        let path = temp_dir.path().join("MarkdownView").join("window_state.txt");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn test_save_screenshot_image_crops_content_rect() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let output_path = temp_dir.path().join("shot.png");
+        let config = ScreenshotConfig {
+            output_path: output_path.clone(),
+            viewport_width: 100.0,
+            viewport_height: 80.0,
+            content_only: true,
+            scroll_ratio: None,
+            wait_ms: 0,
+            settle_frames: 0,
+            zoom: 1.0,
+            theme: ScreenshotTheme::Dark,
+            font_source: None,
+        };
+        let snapshot = ScreenshotSnapshot {
+            config,
+            content_rect: Some(egui::Rect::from_min_max(
+                egui::pos2(2.0, 2.0),
+                egui::pos2(8.0, 8.0),
+            )),
+            pixels_per_point: 1.0,
+            stable_frames: 0,
+            timed_out: false,
+            pending_renders: false,
+            last_scroll_offset: None,
+            started: std::time::Instant::now(),
+        };
+        let image = egui::ColorImage::new([10, 10], Color32::from_rgb(10, 20, 30));
+        MarkdownViewerApp::save_screenshot_image(&image, &snapshot)?;
+        assert!(output_path.exists());
+        assert!(output_path.with_extension("json").exists());
+        Ok(())
     }
 
     #[test]
@@ -4117,7 +4337,7 @@ The end.
             CentralPanel::default().show(ctx, |ui| {
                 app.render_file_menu_contents(ui, false, Color32::WHITE);
                 app.render_view_menu_contents(ui, ctx, false, Color32::WHITE);
-                app.render_help_menu_contents(ui);
+                app.render_help_menu_contents(ui, false, Color32::WHITE);
             });
             app.render_status_bar(ctx);
             app.render_search_dialog(ctx);
@@ -4477,7 +4697,7 @@ The end.
             CentralPanel::default().show(ctx, |ui| {
                 app.render_file_menu_contents(ui, false, Color32::WHITE);
                 app.render_view_menu_contents(ui, ctx, false, Color32::WHITE);
-                app.render_help_menu_contents(ui);
+                app.render_help_menu_contents(ui, false, Color32::WHITE);
                 app.render_main_context_menu(ui);
             });
             app.show_search = true;

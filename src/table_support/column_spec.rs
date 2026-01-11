@@ -959,6 +959,10 @@ mod tests {
             width: 120.0,
             clip: true,
         };
+        let fixed_unclipped = ColumnPolicy::Fixed {
+            width: 120.0,
+            clip: false,
+        };
         let remainder = ColumnPolicy::Remainder { clip: true };
         let resizable = ColumnPolicy::Resizable {
             min: 40.0,
@@ -966,6 +970,7 @@ mod tests {
             clip: true,
         };
         let _ = fixed.to_column();
+        let _ = fixed_unclipped.to_column();
         let _ = remainder.to_column();
         let _ = resizable.to_column();
     }
@@ -1038,5 +1043,63 @@ mod tests {
         accumulate_stats_for_cell(&[InlineSpan::Text("plain".to_string())], &mut stat);
         assert!(stat.rich_content.has_image);
         assert!(!stat.rich_content.has_link);
+    }
+
+    #[test]
+    fn test_derive_column_specs_empty_context_returns_empty() {
+        let headers: Vec<Vec<InlineSpan>> = Vec::new();
+        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
+        let stats: Vec<ColumnStat> = Vec::new();
+        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
+        let specs = derive_column_specs(&ctx);
+        assert!(specs.is_empty());
+    }
+
+    #[test]
+    fn test_header_text_link_and_image_first() {
+        let spans = vec![InlineSpan::Link {
+            text: "Docs".to_string(),
+            url: "https://example.com".to_string(),
+        }];
+        assert_eq!(header_text(&spans), "Docs");
+        let spans = vec![InlineSpan::Image {
+            src: "img.png".to_string(),
+            alt: "Diagram".to_string(),
+            title: None,
+        }];
+        assert_eq!(header_text(&spans), "Diagram");
+    }
+
+    #[test]
+    fn test_column_needs_remainder_true_for_long_words() {
+        let stat = ColumnStat {
+            max_graphemes: 10,
+            longest_word: 24,
+            rich_content: RichContentFlags {
+                has_link: false,
+                has_image: false,
+                has_emoji_like: false,
+            },
+        };
+        assert!(column_needs_remainder(Some(&stat)));
+    }
+
+    #[test]
+    fn test_accumulate_stats_empty_text_and_existing_emoji_flag() {
+        let mut stat = ColumnStat {
+            max_graphemes: 0,
+            longest_word: 0,
+            rich_content: RichContentFlags {
+                has_link: false,
+                has_image: false,
+                has_emoji_like: true,
+            },
+        };
+        accumulate_stats_for_cell(&[InlineSpan::Text("Hello".to_string())], &mut stat);
+        assert!(stat.rich_content.has_emoji_like);
+
+        let mut empty_stat = ColumnStat::default();
+        accumulate_stats_for_cell(&[], &mut empty_stat);
+        assert_eq!(empty_stat.max_graphemes, 0);
     }
 }

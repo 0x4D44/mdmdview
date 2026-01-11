@@ -205,6 +205,17 @@ mod tests {
     }
 
     #[test]
+    fn test_raster_exceeds_limits_large_sides() {
+        assert!(raster_exceeds_limits(MAX_IMAGE_SIDE + 1, 1));
+        assert!(raster_exceeds_limits(1, MAX_IMAGE_SIDE + 1));
+    }
+
+    #[test]
+    fn test_raster_exceeds_limits_within_bounds() {
+        assert!(!raster_exceeds_limits(MAX_IMAGE_SIDE, MAX_IMAGE_SIDE));
+    }
+
+    #[test]
     fn test_raster_bytes_rejects_large_buffer() {
         let bytes = vec![0u8; MAX_IMAGE_BYTES + 1];
         assert!(raster_bytes_to_color_image_with_bg(&bytes, None).is_none());

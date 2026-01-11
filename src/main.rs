@@ -491,6 +491,44 @@ fn configure_egui_style(ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock")
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let lock = env_lock();
+            let original = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self {
+                key,
+                original,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            if let Some(prev) = &self.original {
+                std::env::set_var(self.key, prev);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
 
     #[test]
     fn test_app_icon_creation() {
@@ -558,6 +596,30 @@ mod tests {
             style.visuals.extreme_bg_color,
             egui::Color32::from_rgb(10, 11, 12)
         );
+    }
+
+    #[test]
+    fn test_parse_cli_sets_initial_file_from_arg() {
+        let opts = parse_cli_from(vec!["readme.md".to_string()]).expect("parse");
+        assert_eq!(opts.initial_file, Some(PathBuf::from("readme.md")));
+    }
+
+    #[test]
+    fn test_screenshot_background_color_env() {
+        {
+            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_MAIN_BKG", "#112233");
+            assert_eq!(
+                screenshot_background_color(),
+                egui::Color32::from_rgb(17, 34, 51)
+            );
+        }
+        {
+            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_MAIN_BKG", "bad");
+            assert_eq!(
+                screenshot_background_color(),
+                egui::Color32::from_rgb(255, 248, 219)
+            );
+        }
     }
 
     #[test]
