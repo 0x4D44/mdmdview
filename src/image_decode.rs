@@ -6,11 +6,23 @@ use std::io::Cursor;
 #[cfg(test)]
 thread_local! {
     static FORCED_ZERO_SVG_DIMENSIONS: RefCell<bool> = const { RefCell::new(false) };
+    static FORCED_RASTER_DIMENSIONS: RefCell<Option<(u32, u32)>> = const { RefCell::new(None) };
+    static FORCED_SVG_DIMENSIONS: RefCell<Option<(u32, u32)>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
 fn take_forced_zero_svg_dimensions() -> bool {
     FORCED_ZERO_SVG_DIMENSIONS.with(|flag| flag.replace(false))
+}
+
+#[cfg(test)]
+fn take_forced_raster_dimensions() -> Option<(u32, u32)> {
+    FORCED_RASTER_DIMENSIONS.with(|dims| dims.borrow_mut().take())
+}
+
+#[cfg(test)]
+fn take_forced_svg_dimensions() -> Option<(u32, u32)> {
+    FORCED_SVG_DIMENSIONS.with(|dims| dims.borrow_mut().take())
 }
 
 const MAX_IMAGE_SIDE: u32 = 4096;
@@ -55,6 +67,12 @@ pub(crate) fn raster_bytes_to_color_image_with_bg(
     let img = image::load_from_memory(bytes).ok()?;
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
+    #[cfg(test)]
+    let (w, h) = if let Some((forced_w, forced_h)) = take_forced_raster_dimensions() {
+        (forced_w, forced_h)
+    } else {
+        (w, h)
+    };
     if raster_exceeds_limits(w, h) {
         return None;
     }
@@ -88,6 +106,11 @@ pub(crate) fn svg_bytes_to_color_image_with_bg(
     if take_forced_zero_svg_dimensions() {
         w = 0;
         h = 0;
+    }
+    #[cfg(test)]
+    if let Some((forced_w, forced_h)) = take_forced_svg_dimensions() {
+        w = forced_w;
+        h = forced_h;
     }
     if w == 0 || h == 0 {
         w = 256;
@@ -133,6 +156,44 @@ mod tests {
         fn new() -> Self {
             FORCED_ZERO_SVG_DIMENSIONS.with(|flag| flag.replace(true));
             Self
+        }
+    }
+
+    struct ForcedRasterDimensions;
+
+    impl ForcedRasterDimensions {
+        fn new(w: u32, h: u32) -> Self {
+            FORCED_RASTER_DIMENSIONS.with(|dims| {
+                *dims.borrow_mut() = Some((w, h));
+            });
+            Self
+        }
+    }
+
+    impl Drop for ForcedRasterDimensions {
+        fn drop(&mut self) {
+            FORCED_RASTER_DIMENSIONS.with(|dims| {
+                dims.borrow_mut().take();
+            });
+        }
+    }
+
+    struct ForcedSvgDimensions;
+
+    impl ForcedSvgDimensions {
+        fn new(w: u32, h: u32) -> Self {
+            FORCED_SVG_DIMENSIONS.with(|dims| {
+                *dims.borrow_mut() = Some((w, h));
+            });
+            Self
+        }
+    }
+
+    impl Drop for ForcedSvgDimensions {
+        fn drop(&mut self) {
+            FORCED_SVG_DIMENSIONS.with(|dims| {
+                dims.borrow_mut().take();
+            });
         }
     }
 
@@ -190,6 +251,15 @@ mod tests {
     }
 
     #[test]
+    fn test_raster_bytes_rejects_forced_post_decode_limits() {
+        let mut rgba = RgbaImage::new(1, 1);
+        rgba.put_pixel(0, 0, image::Rgba([0, 0, 0, 255]));
+        let bytes = encode_png(&rgba);
+        let _forced = ForcedRasterDimensions::new(MAX_IMAGE_SIDE + 1, 1);
+        assert!(raster_bytes_to_color_image_with_bg(&bytes, None).is_none());
+    }
+
+    #[test]
     fn test_bytes_to_color_image_guess_svg_fallback() {
         let svg = r#"<svg width="64" height="64" xmlns="http://www.w3.org/2000/svg">
 <circle cx="32" cy="32" r="20" fill="blue"/>
@@ -233,9 +303,33 @@ mod tests {
     }
 
     #[test]
+    fn test_svg_zero_height_defaults_to_256() {
+        let _forced = ForcedSvgDimensions::new(64, 0);
+        let svg = r#"<svg width="64" height="64" xmlns="http://www.w3.org/2000/svg">
+<rect width="64" height="64" fill="red"/>
+</svg>"#;
+        let (_img, w, h) =
+            svg_bytes_to_color_image_with_bg(svg.as_bytes(), None).expect("svg decode");
+        assert_eq!((w, h), (256, 256));
+    }
+
+    #[test]
     fn test_svg_bytes_to_color_image_scales_large_dimensions() {
         let svg = r#"<svg width="8192" height="8192" xmlns="http://www.w3.org/2000/svg">
 <rect width="8192" height="8192" fill="red"/>
+</svg>"#;
+        let (_img, w, h) =
+            svg_bytes_to_color_image_with_bg(svg.as_bytes(), None).expect("svg decode");
+        assert!(w <= 4096);
+        assert!(h <= 4096);
+        assert!(w > 0);
+        assert!(h > 0);
+    }
+
+    #[test]
+    fn test_svg_bytes_to_color_image_scales_tall_dimensions() {
+        let svg = r#"<svg width="64" height="8192" xmlns="http://www.w3.org/2000/svg">
+<rect width="64" height="8192" fill="red"/>
 </svg>"#;
         let (_img, w, h) =
             svg_bytes_to_color_image_with_bg(svg.as_bytes(), None).expect("svg decode");
