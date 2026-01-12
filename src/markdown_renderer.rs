@@ -973,9 +973,17 @@ impl MarkdownRenderer {
                         let delimiter_line = Some(next_rest);
                         if delimiter_line.is_some_and(Self::is_table_delimiter_line) {
                             if !header_from_list_marker && i > 0 {
+                                // Add blank line separator when the previous line has content
+                                // at the same level, to help CommonMark parsers recognize tables.
+                                // Skip this for plain list items (no blockquote) where the
+                                // indentation alone is sufficient.
+                                let in_blockquote = level > 0;
                                 let (prev_level, prev_rest) =
                                     Self::table_line_info_with_list(lines[i - 1], list_indent);
-                                if prev_level == level && !prev_rest.trim().is_empty() {
+                                if prev_level == level
+                                    && !prev_rest.trim().is_empty()
+                                    && (list_indent.is_none() || in_blockquote)
+                                {
                                     let prefix_len = line.len().saturating_sub(rest.len());
                                     out.push_str(&line[..prefix_len]);
                                     let newline =
@@ -5369,12 +5377,13 @@ mod tests {
         ui: &egui::Ui,
         path: &str,
     ) -> Option<(egui::TextureHandle, u32, u32)> {
+        // Give more time when tests run in parallel (up to 2.5s total)
         for _ in 0..50 {
             if let Some(loaded) = renderer.get_or_load_image_texture(ui, path) {
                 return Some(loaded);
             }
             renderer.poll_image_results(ctx);
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(50));
         }
         renderer.get_or_load_image_texture(ui, path)
     }
