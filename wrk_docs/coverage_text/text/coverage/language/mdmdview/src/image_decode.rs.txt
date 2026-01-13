@@ -1,0 +1,359 @@
+Coverage Report
+Created: 2026-01-13 12:48
+C:\language\mdmdview\src\image_decode.rs:
+    1|       |use egui::ColorImage;
+    2|       |#[cfg(test)]
+    3|       |use std::cell::RefCell;
+    4|       |use std::io::Cursor;
+    5|       |
+    6|       |#[cfg(test)]
+    7|       |thread_local! {
+    8|       |    static FORCED_ZERO_SVG_DIMENSIONS: RefCell<bool> = const { RefCell::new(false) };
+    9|       |    static FORCED_RASTER_DIMENSIONS: RefCell<Option<(u32, u32)>> = const { RefCell::new(None) };
+   10|       |    static FORCED_SVG_DIMENSIONS: RefCell<Option<(u32, u32)>> = const { RefCell::new(None) };
+   11|       |}
+   12|       |
+   13|       |#[cfg(test)]
+   14|      8|fn take_forced_zero_svg_dimensions() -> bool {
+   15|      8|    FORCED_ZERO_SVG_DIMENSIONS.with(|flag| flag.replace(false))
+   16|      8|}
+   17|       |
+   18|       |#[cfg(test)]
+   19|     12|fn take_forced_raster_dimensions() -> Option<(u32, u32)> {
+   20|     12|    FORCED_RASTER_DIMENSIONS.with(|dims| dims.borrow_mut().take())
+   21|     12|}
+   22|       |
+   23|       |#[cfg(test)]
+   24|      8|fn take_forced_svg_dimensions() -> Option<(u32, u32)> {
+   25|      8|    FORCED_SVG_DIMENSIONS.with(|dims| dims.borrow_mut().take())
+   26|      8|}
+   27|       |
+   28|       |const MAX_IMAGE_SIDE: u32 = 4096;
+   29|       |const MAX_IMAGE_PIXELS: u64 = MAX_IMAGE_SIDE as u64 * MAX_IMAGE_SIDE as u64;
+   30|       |const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
+   31|       |
+   32|       |#[cfg(test)]
+   33|      1|pub(crate) fn svg_bytes_to_color_image(bytes: &[u8]) -> Option<(ColorImage, u32, u32)> {
+   34|      1|    svg_bytes_to_color_image_with_bg(bytes, None)
+   35|      1|}
+   36|       |
+   37|     18|fn raster_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+   38|     18|    let reader = image::io::Reader::new(Cursor::new(bytes))
+   39|     18|        .with_guessed_format()
+   40|     18|        .ok()?;
+                           ^0
+   41|     18|    reader.into_dimensions().ok()
+   42|     18|}
+   43|       |
+   44|     30|fn raster_exceeds_limits(w: u32, h: u32) -> bool {
+   45|     30|    if w == 0 || h == 0 {
+                               ^29
+   46|      2|        return true;
+   47|     28|    }
+   48|     28|    if w > MAX_IMAGE_SIDE || h > MAX_IMAGE_SIDE {
+                                           ^25
+   49|      4|        return true;
+   50|     24|    }
+   51|     24|    let pixels = (w as u64).saturating_mul(h as u64);
+   52|     24|    pixels > MAX_IMAGE_PIXELS
+   53|     30|}
+   54|       |
+   55|     19|pub(crate) fn raster_bytes_to_color_image_with_bg(
+   56|     19|    bytes: &[u8],
+   57|     19|    bg: Option<[u8; 4]>,
+   58|     19|) -> Option<(ColorImage, u32, u32)> {
+   59|     19|    if bytes.len() > MAX_IMAGE_BYTES {
+   60|      1|        return None;
+   61|     18|    }
+   62|     18|    if let Some((w, h)) = raster_dimensions(bytes) {
+                               ^13^13
+   63|     13|        if raster_exceeds_limits(w, h) {
+   64|      1|            return None;
+   65|     12|        }
+   66|      5|    }
+   67|     17|    let img = image::load_from_memory(bytes).ok()?;
+                      ^12                                      ^5
+   68|     12|    let rgba = img.to_rgba8();
+   69|     12|    let (w, h) = rgba.dimensions();
+   70|       |    #[cfg(test)]
+   71|     12|    let (w, h) = if let Some((forced_w, forced_h)) = take_forced_raster_dimensions() {
+                                            ^1        ^1
+   72|      1|        (forced_w, forced_h)
+   73|       |    } else {
+   74|     11|        (w, h)
+   75|       |    };
+   76|     12|    if raster_exceeds_limits(w, h) {
+   77|      1|        return None;
+   78|     11|    }
+   79|     11|    let mut ci = ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
+   80|     11|    if let Some([br, bgc, bb, ba]) = bg {
+                               ^1  ^1   ^1  ^1
+   81|      1|        for p in ci.pixels.iter_mut() {
+   82|      1|            let a = p[3] as f32 / 255.0;
+   83|      1|            let inv = 1.0 - a;
+   84|      1|            p[0] = (a * p[0] as f32 + inv * br as f32) as u8;
+   85|      1|            p[1] = (a * p[1] as f32 + inv * bgc as f32) as u8;
+   86|      1|            p[2] = (a * p[2] as f32 + inv * bb as f32) as u8;
+   87|      1|            p[3] = ba;
+   88|      1|        }
+   89|     10|    }
+   90|     11|    Some((ci, w, h))
+   91|     19|}
+   92|       |
+   93|     11|pub(crate) fn svg_bytes_to_color_image_with_bg(
+   94|     11|    bytes: &[u8],
+   95|     11|    bg: Option<[u8; 4]>,
+   96|     11|) -> Option<(ColorImage, u32, u32)> {
+   97|     11|    let mut opt = usvg::Options::default();
+   98|     11|    let mut db = usvg::fontdb::Database::new();
+   99|     11|    db.load_system_fonts();
+  100|     11|    opt.fontdb = std::sync::Arc::new(db);
+  101|     11|    let tree = usvg::Tree::from_data(bytes, &opt).ok()?;
+                      ^8                                            ^3
+  102|      8|    let sz = tree.size();
+  103|      8|    let pix = sz.to_int_size();
+  104|      8|    let (mut w, mut h) = (pix.width(), pix.height());
+  105|       |    #[cfg(test)]
+  106|      8|    if take_forced_zero_svg_dimensions() {
+  107|      1|        w = 0;
+  108|      1|        h = 0;
+  109|      7|    }
+  110|       |    #[cfg(test)]
+  111|      8|    if let Some((forced_w, forced_h)) = take_forced_svg_dimensions() {
+                               ^1        ^1
+  112|      1|        w = forced_w;
+  113|      1|        h = forced_h;
+  114|      7|    }
+  115|      8|    if w == 0 || h == 0 {
+                               ^7
+  116|      2|        w = 256;
+  117|      2|        h = 256;
+  118|      6|    }
+  119|      8|    let max_side: u32 = MAX_IMAGE_SIDE;
+  120|      8|    if w > max_side || h > max_side {
+                                     ^6
+  121|      3|        let scale = (max_side as f32 / w as f32).min(max_side as f32 / h as f32);
+  122|      3|        w = (w as f32 * scale) as u32;
+  123|      3|        h = (h as f32 * scale) as u32;
+  124|      5|    }
+  125|      8|    let mut pixmap = tiny_skia::Pixmap::new(w, h)?;
+                                                               ^0
+  126|      8|    if let Some([r, g, b, a]) = bg {
+                               ^1 ^1 ^1 ^1
+  127|      1|        let color = tiny_skia::Color::from_rgba8(r, g, b, a);
+  128|      1|        pixmap.fill(color);
+  129|      7|    }
+  130|      8|    let mut pmut = pixmap.as_mut();
+  131|      8|    resvg::render(&tree, tiny_skia::Transform::identity(), &mut pmut);
+  132|      8|    let data = pixmap.data();
+  133|      8|    let img = ColorImage::from_rgba_unmultiplied([w as usize, h as usize], data);
+  134|      8|    Some((img, w, h))
+  135|     11|}
+  136|       |
+  137|     16|pub(crate) fn bytes_to_color_image_guess(
+  138|     16|    bytes: &[u8],
+  139|     16|    bg: Option<[u8; 4]>,
+  140|     16|) -> Option<(ColorImage, u32, u32)> {
+  141|     16|    if let Some(img) = raster_bytes_to_color_image_with_bg(bytes, bg) {
+                              ^11
+  142|     11|        return Some(img);
+  143|      5|    }
+  144|      5|    svg_bytes_to_color_image_with_bg(bytes, bg)
+  145|     16|}
+  146|       |
+  147|       |#[cfg(test)]
+  148|       |mod tests {
+  149|       |    use super::*;
+  150|       |    use image::{ImageOutputFormat, RgbaImage};
+  151|       |    use std::io::Cursor;
+  152|       |
+  153|       |    struct ForcedZeroSvgDimensions;
+  154|       |
+  155|       |    impl ForcedZeroSvgDimensions {
+  156|      1|        fn new() -> Self {
+  157|      1|            FORCED_ZERO_SVG_DIMENSIONS.with(|flag| flag.replace(true));
+  158|      1|            Self
+  159|      1|        }
+  160|       |    }
+  161|       |
+  162|       |    struct ForcedRasterDimensions;
+  163|       |
+  164|       |    impl ForcedRasterDimensions {
+  165|      1|        fn new(w: u32, h: u32) -> Self {
+  166|      1|            FORCED_RASTER_DIMENSIONS.with(|dims| {
+  167|      1|                *dims.borrow_mut() = Some((w, h));
+  168|      1|            });
+  169|      1|            Self
+  170|      1|        }
+  171|       |    }
+  172|       |
+  173|       |    impl Drop for ForcedRasterDimensions {
+  174|      1|        fn drop(&mut self) {
+  175|      1|            FORCED_RASTER_DIMENSIONS.with(|dims| {
+  176|      1|                dims.borrow_mut().take();
+  177|      1|            });
+  178|      1|        }
+  179|       |    }
+  180|       |
+  181|       |    struct ForcedSvgDimensions;
+  182|       |
+  183|       |    impl ForcedSvgDimensions {
+  184|      1|        fn new(w: u32, h: u32) -> Self {
+  185|      1|            FORCED_SVG_DIMENSIONS.with(|dims| {
+  186|      1|                *dims.borrow_mut() = Some((w, h));
+  187|      1|            });
+  188|      1|            Self
+  189|      1|        }
+  190|       |    }
+  191|       |
+  192|       |    impl Drop for ForcedSvgDimensions {
+  193|      1|        fn drop(&mut self) {
+  194|      1|            FORCED_SVG_DIMENSIONS.with(|dims| {
+  195|      1|                dims.borrow_mut().take();
+  196|      1|            });
+  197|      1|        }
+  198|       |    }
+  199|       |
+  200|      3|    fn encode_png(rgba: &RgbaImage) -> Vec<u8> {
+  201|      3|        let mut bytes = Vec::new();
+  202|      3|        let mut cursor = Cursor::new(&mut bytes);
+  203|      3|        image::DynamicImage::ImageRgba8(rgba.clone())
+  204|      3|            .write_to(&mut cursor, ImageOutputFormat::Png)
+  205|      3|            .expect("encode png");
+  206|      3|        bytes
+  207|      3|    }
+  208|       |
+  209|       |    #[test]
+  210|      1|    fn test_bytes_to_color_image_guess_png_blends_background() {
+  211|      1|        let mut rgba = RgbaImage::new(1, 1);
+  212|      1|        rgba.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+  213|      1|        let bytes = encode_png(&rgba);
+  214|       |
+  215|      1|        let bg = [0, 0, 255, 200];
+  216|      1|        let (img, w, h) = bytes_to_color_image_guess(&bytes, Some(bg)).expect("png decode");
+  217|      1|        assert_eq!((w, h), (1, 1));
+  218|       |
+  219|      1|        let px = img.pixels[0];
+  220|      1|        assert_eq!(px[0], 255);
+  221|      1|        assert_eq!(px[1], 0);
+  222|      1|        assert_eq!(px[2], 0);
+  223|      1|        assert_eq!(px[3], bg[3]);
+  224|      1|    }
+  225|       |
+  226|       |    #[test]
+  227|      1|    fn test_svg_bytes_to_color_image_scales_and_fills_bg() {
+  228|      1|        let svg = r#"<svg width="5000" height="3000" xmlns="http://www.w3.org/2000/svg">
+  229|      1|<rect width="5000" height="3000" fill="red"/>
+  230|      1|</svg>"#;
+  231|      1|        let bg = Some([1, 2, 3, 255]);
+  232|      1|        let (_img, w, h) =
+  233|      1|            svg_bytes_to_color_image_with_bg(svg.as_bytes(), bg).expect("svg decode");
+  234|      1|        assert!(w > 0);
+  235|      1|        assert!(h > 0);
+  236|      1|        assert!(w <= 4096);
+  237|      1|        assert!(h <= 4096);
+  238|      1|    }
+  239|       |
+  240|       |    #[test]
+  241|      1|    fn test_svg_bytes_to_color_image_invalid_returns_none() {
+  242|      1|        assert!(svg_bytes_to_color_image(b"not svg").is_none());
+  243|      1|    }
+  244|       |
+  245|       |    #[test]
+  246|      1|    fn test_raster_bytes_rejects_large_dimensions() {
+  247|      1|        let mut rgba = RgbaImage::new(5000, 1);
+  248|      1|        rgba.put_pixel(0, 0, image::Rgba([0, 0, 0, 255]));
+  249|      1|        let bytes = encode_png(&rgba);
+  250|      1|        assert!(raster_bytes_to_color_image_with_bg(&bytes, None).is_none());
+  251|      1|    }
+  252|       |
+  253|       |    #[test]
+  254|      1|    fn test_raster_bytes_rejects_forced_post_decode_limits() {
+  255|      1|        let mut rgba = RgbaImage::new(1, 1);
+  256|      1|        rgba.put_pixel(0, 0, image::Rgba([0, 0, 0, 255]));
+  257|      1|        let bytes = encode_png(&rgba);
+  258|      1|        let _forced = ForcedRasterDimensions::new(MAX_IMAGE_SIDE + 1, 1);
+  259|      1|        assert!(raster_bytes_to_color_image_with_bg(&bytes, None).is_none());
+  260|      1|    }
+  261|       |
+  262|       |    #[test]
+  263|      1|    fn test_bytes_to_color_image_guess_svg_fallback() {
+  264|      1|        let svg = r#"<svg width="64" height="64" xmlns="http://www.w3.org/2000/svg">
+  265|      1|<circle cx="32" cy="32" r="20" fill="blue"/>
+  266|      1|</svg>"#;
+  267|      1|        let (_img, w, h) = bytes_to_color_image_guess(svg.as_bytes(), None).expect("svg fallback");
+  268|      1|        assert_eq!((w, h), (64, 64));
+  269|      1|    }
+  270|       |
+  271|       |    #[test]
+  272|      1|    fn test_raster_exceeds_limits_zero_dimensions() {
+  273|      1|        assert!(raster_exceeds_limits(0, 10));
+  274|      1|        assert!(raster_exceeds_limits(10, 0));
+  275|      1|    }
+  276|       |
+  277|       |    #[test]
+  278|      1|    fn test_raster_exceeds_limits_large_sides() {
+  279|      1|        assert!(raster_exceeds_limits(MAX_IMAGE_SIDE + 1, 1));
+  280|      1|        assert!(raster_exceeds_limits(1, MAX_IMAGE_SIDE + 1));
+  281|      1|    }
+  282|       |
+  283|       |    #[test]
+  284|      1|    fn test_raster_exceeds_limits_within_bounds() {
+  285|      1|        assert!(!raster_exceeds_limits(MAX_IMAGE_SIDE, MAX_IMAGE_SIDE));
+  286|      1|    }
+  287|       |
+  288|       |    #[test]
+  289|      1|    fn test_raster_bytes_rejects_large_buffer() {
+  290|      1|        let bytes = vec![0u8; MAX_IMAGE_BYTES + 1];
+  291|      1|        assert!(raster_bytes_to_color_image_with_bg(&bytes, None).is_none());
+  292|      1|    }
+  293|       |
+  294|       |    #[test]
+  295|      1|    fn test_svg_zero_dimensions_defaults_to_256() {
+  296|      1|        let _forced = ForcedZeroSvgDimensions::new();
+  297|      1|        let svg = r#"<svg width="64" height="64" xmlns="http://www.w3.org/2000/svg">
+  298|      1|<rect width="64" height="64" fill="red"/>
+  299|      1|</svg>"#;
+  300|      1|        let (_img, w, h) =
+  301|      1|            svg_bytes_to_color_image_with_bg(svg.as_bytes(), None).expect("svg decode");
+  302|      1|        assert_eq!((w, h), (256, 256));
+  303|      1|    }
+  304|       |
+  305|       |    #[test]
+  306|      1|    fn test_svg_zero_height_defaults_to_256() {
+  307|      1|        let _forced = ForcedSvgDimensions::new(64, 0);
+  308|      1|        let svg = r#"<svg width="64" height="64" xmlns="http://www.w3.org/2000/svg">
+  309|      1|<rect width="64" height="64" fill="red"/>
+  310|      1|</svg>"#;
+  311|      1|        let (_img, w, h) =
+  312|      1|            svg_bytes_to_color_image_with_bg(svg.as_bytes(), None).expect("svg decode");
+  313|      1|        assert_eq!((w, h), (256, 256));
+  314|      1|    }
+  315|       |
+  316|       |    #[test]
+  317|      1|    fn test_svg_bytes_to_color_image_scales_large_dimensions() {
+  318|      1|        let svg = r#"<svg width="8192" height="8192" xmlns="http://www.w3.org/2000/svg">
+  319|      1|<rect width="8192" height="8192" fill="red"/>
+  320|      1|</svg>"#;
+  321|      1|        let (_img, w, h) =
+  322|      1|            svg_bytes_to_color_image_with_bg(svg.as_bytes(), None).expect("svg decode");
+  323|      1|        assert!(w <= 4096);
+  324|      1|        assert!(h <= 4096);
+  325|      1|        assert!(w > 0);
+  326|      1|        assert!(h > 0);
+  327|      1|    }
+  328|       |
+  329|       |    #[test]
+  330|      1|    fn test_svg_bytes_to_color_image_scales_tall_dimensions() {
+  331|      1|        let svg = r#"<svg width="64" height="8192" xmlns="http://www.w3.org/2000/svg">
+  332|      1|<rect width="64" height="8192" fill="red"/>
+  333|      1|</svg>"#;
+  334|      1|        let (_img, w, h) =
+  335|      1|            svg_bytes_to_color_image_with_bg(svg.as_bytes(), None).expect("svg decode");
+  336|      1|        assert!(w <= 4096);
+  337|      1|        assert!(h <= 4096);
+  338|      1|        assert!(w > 0);
+  339|      1|        assert!(h > 0);
+  340|      1|    }
+  341|       |}
+

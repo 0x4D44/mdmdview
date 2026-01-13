@@ -1,3 +1,4 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // Hide console in release mode
 
 #[cfg(not(test))]
@@ -484,6 +485,7 @@ fn configure_egui_style(ctx: &egui::Context) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
@@ -662,6 +664,36 @@ mod tests {
             .expect("expected invalid width error");
         assert!(err.contains("Invalid --width"));
 
+        let args = vec!["--height".to_string(), "nope".to_string()];
+        let err = parse_cli_from(args)
+            .err()
+            .expect("expected invalid height error");
+        assert!(err.contains("Invalid --height"));
+
+        let args = vec!["--zoom".to_string(), "nope".to_string()];
+        let err = parse_cli_from(args)
+            .err()
+            .expect("expected invalid zoom error");
+        assert!(err.contains("Invalid --zoom"));
+
+        let args = vec!["--scroll".to_string(), "nope".to_string()];
+        let err = parse_cli_from(args)
+            .err()
+            .expect("expected invalid scroll error");
+        assert!(err.contains("Invalid --scroll"));
+
+        let args = vec!["--wait-ms".to_string(), "nope".to_string()];
+        let err = parse_cli_from(args)
+            .err()
+            .expect("expected invalid wait-ms error");
+        assert!(err.contains("Invalid --wait-ms"));
+
+        let args = vec!["--settle-frames".to_string(), "nope".to_string()];
+        let err = parse_cli_from(args)
+            .err()
+            .expect("expected invalid settle-frames error");
+        assert!(err.contains("Invalid --settle-frames"));
+
         let args = vec!["--theme".to_string(), "blue".to_string()];
         let err = parse_cli_from(args)
             .err()
@@ -670,12 +702,24 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_cli_missing_flag_value() {
-        let args = vec!["--height".to_string()];
-        let err = parse_cli_from(args)
-            .err()
-            .expect("expected missing height value error");
-        assert!(err.contains("--height requires a value"));
+    fn test_parse_cli_missing_flag_values() {
+        let flags = [
+            "--output",
+            "--width",
+            "--height",
+            "--theme",
+            "--zoom",
+            "--scroll",
+            "--wait-ms",
+            "--settle-frames",
+            "--test-fonts",
+        ];
+        for flag in flags {
+            let err = parse_cli_from(vec![flag.to_string()])
+                .err()
+                .expect("expected missing flag value error");
+            assert!(err.contains(&format!("{flag} requires a value")));
+        }
     }
 
     #[test]
@@ -731,6 +775,17 @@ mod tests {
         let color = parse_hex_color32("#FFF8DB").expect("color");
         assert_eq!(color, egui::Color32::from_rgb(255, 248, 219));
         assert!(parse_hex_color32("#XYZ").is_none());
+        assert!(parse_hex_color32("#GG0000").is_none());
+        assert!(parse_hex_color32("#00GG00").is_none());
+        assert!(parse_hex_color32("#0000GG").is_none());
+    }
+
+    #[test]
+    fn test_parse_unsigned_helpers() {
+        assert_eq!(parse_u32("--width", "12").expect("u32"), 12);
+        assert!(parse_u32("--width", "nope").is_err());
+        assert_eq!(parse_u64("--timeout", "42").expect("u64"), 42);
+        assert!(parse_u64("--timeout", "-1").is_err());
     }
 
     #[test]
@@ -772,10 +827,32 @@ mod tests {
         }
         assert_eq!(std::env::var(key).ok().as_deref(), Some("orig"));
         let _lock = env_lock();
-        match previous {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
+        for previous in [previous, None] {
+            match previous {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
         }
+        let missing_key = "MDMDVIEW_MERMAID_MAIN_BKG_MISSING";
+        std::env::remove_var(missing_key);
+        let previous = std::env::var(missing_key).ok();
+        for previous in [previous, Some("temp".to_string())] {
+            match previous {
+                Some(value) => std::env::set_var(missing_key, value),
+                None => std::env::remove_var(missing_key),
+            }
+        }
+    }
+
+    #[test]
+    fn test_env_guard_drop_removes_unset_key() {
+        let key = "MDMDVIEW_MERMAID_MAIN_BKG";
+        std::env::remove_var(key);
+        {
+            let _guard = EnvGuard::unset(key);
+            std::env::set_var(key, "temp");
+        }
+        assert!(std::env::var(key).is_err());
     }
 
     #[test]

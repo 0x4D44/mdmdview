@@ -108,6 +108,7 @@ pub fn shortcode_map() -> &'static HashMap<&'static str, &'static str> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

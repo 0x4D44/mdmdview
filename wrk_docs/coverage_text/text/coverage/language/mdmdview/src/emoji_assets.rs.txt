@@ -1,0 +1,222 @@
+Coverage Report
+Created: 2026-01-13 12:48
+C:\language\mdmdview\src\emoji_assets.rs:
+    1|       |use egui::Color32 as C;
+    2|       |
+    3|       |// Draw simple vector fallback icons for a subset of emoji.
+    4|     19|pub fn make_image(emoji: &str, size: usize) -> Option<egui::ColorImage> {
+    5|     19|    let mut img = egui::ColorImage::new([size, size], C::TRANSPARENT);
+    6|     19|    match emoji {
+    7|     19|        "\u{2705}" => {
+    8|      1|            draw_circle(&mut img, size, C::from_rgb(34, 139, 34));
+    9|      1|            draw_check(&mut img, size, C::WHITE);
+   10|      1|            Some(img)
+   11|       |        }
+   12|     18|        "\u{1f389}" => {
+   13|      1|            draw_circle(&mut img, size, C::from_rgb(255, 215, 0));
+   14|      1|            confetti(&mut img, size);
+   15|      1|            Some(img)
+   16|       |        }
+   17|     17|        "\u{1f680}" => {
+   18|      2|            draw_circle(&mut img, size, C::from_rgb(60, 60, 170));
+   19|      2|            rocket(
+   20|      2|                &mut img,
+   21|      2|                size,
+   22|      2|                C::from_rgb(230, 230, 230),
+   23|      2|                C::from_rgb(255, 110, 60),
+   24|       |            );
+   25|      2|            Some(img)
+   26|       |        }
+   27|     15|        "\u{2764}" | "\u{1f496}" => {
+                                   ^8
+   28|      8|            heart(&mut img, size, C::from_rgb(220, 20, 60));
+   29|      8|            Some(img)
+   30|       |        }
+   31|      7|        "\u{2b50}" => {
+   32|      1|            star(&mut img, size, C::from_rgb(255, 215, 0));
+   33|      1|            Some(img)
+   34|       |        }
+   35|      6|        "\u{1f525}" => {
+   36|      1|            flame(&mut img, size);
+   37|      1|            Some(img)
+   38|       |        }
+   39|      5|        _ => None,
+   40|       |    }
+   41|     19|}
+   42|       |
+   43|      4|fn draw_circle(img: &mut egui::ColorImage, size: usize, color: C) {
+   44|      4|    let cx = (size as i32) / 2;
+   45|      4|    let cy = cx;
+   46|      4|    let r = (size as i32) / 2 - 2;
+   47|    136|    for y in 0..size as i32 {
+                              ^4
+   48|  5.82k|        for x in 0..size as i32 {
+                                  ^136
+   49|  5.82k|            let dx = x - cx;
+   50|  5.82k|            let dy = y - cy;
+   51|  5.82k|            if dx * dx + dy * dy <= r * r {
+   52|  3.77k|                img[(x as usize, y as usize)] = color;
+   53|  3.77k|            }
+                          ^2.05k
+   54|       |        }
+   55|       |    }
+   56|      4|}
+   57|       |
+   58|      1|fn draw_check(img: &mut egui::ColorImage, size: usize, color: C) {
+   59|      1|    let s = size as i32;
+   60|     40|    let mut plot = |x: i32, y: i32| {
+                      ^1
+   61|     40|        img[(x as usize, y as usize)] = color;
+   62|     40|    };
+   63|       |    // simple check mark
+   64|      8|    for i in 0..s / 3 {
+                              ^1
+   65|      8|        plot(s / 3 - i, s * 2 / 3 + i);
+   66|      8|        plot(s / 3 - i + 1, s * 2 / 3 + i);
+   67|      8|    }
+   68|     12|    for i in 0..s / 2 {
+                              ^1
+   69|     12|        plot(s / 3 + i, s * 2 / 3 - i);
+   70|     12|        plot(s / 3 + i + 1, s * 2 / 3 - i);
+   71|     12|    }
+   72|      1|}
+   73|       |
+   74|      1|fn confetti(img: &mut egui::ColorImage, size: usize) {
+   75|      1|    let dots = [
+   76|      1|        C::from_rgb(255, 80, 80),
+   77|      1|        C::from_rgb(80, 180, 255),
+   78|      1|        C::from_rgb(120, 220, 120),
+   79|      1|        C::from_rgb(220, 120, 220),
+   80|      1|    ];
+   81|      1|    let s = size as i32;
+   82|      4|    for (i, col) in dots.iter().enumerate() {
+                                  ^1   ^1     ^1
+   83|      4|        let x = (s / 4) * ((i as i32) + 1);
+   84|      4|        let y = (s / 5) * ((i as i32) + 1);
+   85|      4|        if x < s {
+   86|      3|            img[(x as usize, y as usize)] = *col;
+   87|      3|        }
+                      ^1
+   88|       |    }
+   89|      1|}
+   90|       |
+   91|      2|fn rocket(img: &mut egui::ColorImage, size: usize, body: C, flame: C) {
+   92|      2|    let s = size as i32;
+   93|       |    // body
+   94|     44|    for y in s / 4..s * 3 / 4 {
+                           ^2     ^2
+   95|    768|        for x in s / 3..s * 2 / 3 {
+                               ^44    ^44
+   96|    768|            img[(x as usize, y as usize)] = body;
+   97|    768|        }
+   98|       |    }
+   99|       |    // nose
+  100|     14|    for i in 0..s / 6 {
+                              ^2
+  101|    116|        for x in s / 2 - i..=s / 2 + i {
+                               ^14         ^14
+  102|    116|            let y = s / 4 - i;
+  103|    116|            img[(x as usize, y as usize)] = body;
+  104|    116|        }
+  105|       |    }
+  106|       |    // flame
+  107|     14|    for i in 0..s / 6 {
+                              ^2
+  108|    116|        for x in s / 2 - i..=s / 2 + i {
+                               ^14         ^14
+  109|    116|            let y = s * 3 / 4 + i;
+  110|    116|            img[(x as usize, y as usize)] = flame;
+  111|    116|        }
+  112|       |    }
+  113|      2|}
+  114|       |
+  115|      8|fn heart(img: &mut egui::ColorImage, size: usize, color: C) {
+  116|      8|    let s = size as i32;
+  117|    432|    for y in 0..s {
+                              ^8
+  118|  25.7k|        for x in 0..s {
+                                  ^432
+  119|  25.7k|            let dx = x - s / 2;
+  120|  25.7k|            let dy = y - s / 3;
+  121|  25.7k|            let a = (dx * dx + dy * dy - s * s / 16) < 0;
+  122|  25.7k|            let b = x > s / 4 && x < 3 * s / 4 && y > s / 3 && y < s * 3 / 4;
+                                               ^18.8k           ^12.4k       ^8.14k
+  123|  25.7k|            if a || b {
+                                  ^20.7k
+  124|  7.62k|                img[(x as usize, y as usize)] = color;
+  125|  18.1k|            }
+  126|       |        }
+  127|       |    }
+  128|      8|}
+  129|       |
+  130|      1|fn star(img: &mut egui::ColorImage, size: usize, color: C) {
+  131|      1|    let s = size as i32;
+  132|     24|    for i in 0..s {
+                              ^1
+  133|     24|        let y = i;
+  134|     24|        let x1 = s / 2;
+  135|     24|        let x2 = s / 2 - i / 2;
+  136|     24|        let x3 = s / 2 + i / 2;
+  137|     24|        img[(x2 as usize, y as usize)] = color;
+  138|     24|        img[(x1 as usize, y as usize)] = color;
+  139|     24|        img[(x3 as usize, y as usize)] = color;
+  140|     24|    }
+  141|      1|}
+  142|       |
+  143|      1|fn flame(img: &mut egui::ColorImage, size: usize) {
+  144|      1|    let s = size as i32;
+  145|      1|    let base = C::from_rgb(255, 140, 0);
+  146|      1|    let tip = C::from_rgb(255, 220, 120);
+  147|     24|    for y in 0..s {
+                              ^1
+  148|    576|        for x in 0..s {
+                                  ^24
+  149|    576|            let dx = (x - s / 2) as f32 / (s as f32 / 3.5);
+  150|    576|            let dy = (y - s) as f32 / (s as f32 / 1.5);
+  151|    576|            let v = (dx * dx + dy * dy).sqrt();
+  152|    576|            if v < 1.0 {
+  153|    161|                let t = 1.0 - v;
+  154|    161|                img[(x as usize, y as usize)] = C::from_rgb(
+  155|    161|                    (base.r() as f32 * t + tip.r() as f32 * (1.0 - t)) as u8,
+  156|    161|                    (base.g() as f32 * t + tip.g() as f32 * (1.0 - t)) as u8,
+  157|    161|                    (base.b() as f32 * t + tip.b() as f32 * (1.0 - t)) as u8,
+  158|    161|                );
+  159|    415|            }
+  160|       |        }
+  161|       |    }
+  162|      1|}
+  163|       |
+  164|       |#[cfg(test)]
+  165|       |mod tests {
+  166|       |    use super::*;
+  167|       |
+  168|      7|    fn has_non_transparent_pixel(img: &egui::ColorImage) -> bool {
+  169|    587|        img.pixels.iter().any(|p| p.a() != 0)
+                      ^7                ^7
+  170|      7|    }
+  171|       |
+  172|       |    #[test]
+  173|      1|    fn test_make_image_known_emojis_produce_pixels() {
+  174|      1|        let emojis = [
+  175|      1|            "\u{2705}",
+  176|      1|            "\u{1f389}",
+  177|      1|            "\u{1f680}",
+  178|      1|            "\u{2764}",
+  179|      1|            "\u{1f496}",
+  180|      1|            "\u{2b50}",
+  181|      1|            "\u{1f525}",
+  182|      1|        ];
+  183|       |
+  184|      8|        for emoji in emojis {
+                          ^7
+  185|      7|            let img = make_image(emoji, 24).expect("expected fallback image");
+  186|      7|            assert!(has_non_transparent_pixel(&img));
+  187|       |        }
+  188|      1|    }
+  189|       |
+  190|       |    #[test]
+  191|      1|    fn test_make_image_unknown_returns_none() {
+  192|      1|        assert!(make_image("\u{1f47d}", 24).is_none());
+  193|      1|    }
+  194|       |}
+

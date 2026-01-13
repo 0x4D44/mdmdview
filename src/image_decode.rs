@@ -8,6 +8,8 @@ thread_local! {
     static FORCED_ZERO_SVG_DIMENSIONS: RefCell<bool> = const { RefCell::new(false) };
     static FORCED_RASTER_DIMENSIONS: RefCell<Option<(u32, u32)>> = const { RefCell::new(None) };
     static FORCED_SVG_DIMENSIONS: RefCell<Option<(u32, u32)>> = const { RefCell::new(None) };
+    static FORCED_PIXMAP_ALLOC_FAIL: RefCell<bool> = const { RefCell::new(false) };
+    static FORCED_GUESS_FORMAT_ERROR: RefCell<bool> = const { RefCell::new(false) };
 }
 
 #[cfg(test)]
@@ -25,6 +27,16 @@ fn take_forced_svg_dimensions() -> Option<(u32, u32)> {
     FORCED_SVG_DIMENSIONS.with(|dims| dims.borrow_mut().take())
 }
 
+#[cfg(test)]
+fn take_forced_pixmap_alloc_fail() -> bool {
+    FORCED_PIXMAP_ALLOC_FAIL.with(|flag| flag.replace(false))
+}
+
+#[cfg(test)]
+fn take_forced_guess_format_error() -> bool {
+    FORCED_GUESS_FORMAT_ERROR.with(|flag| flag.replace(false))
+}
+
 const MAX_IMAGE_SIDE: u32 = 4096;
 const MAX_IMAGE_PIXELS: u64 = MAX_IMAGE_SIDE as u64 * MAX_IMAGE_SIDE as u64;
 const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
@@ -34,10 +46,16 @@ pub(crate) fn svg_bytes_to_color_image(bytes: &[u8]) -> Option<(ColorImage, u32,
     svg_bytes_to_color_image_with_bg(bytes, None)
 }
 
+fn guessed_format_for_test(bytes: &[u8]) -> std::io::Result<image::io::Reader<Cursor<&[u8]>>> {
+    #[cfg(test)]
+    if take_forced_guess_format_error() {
+        return Err(std::io::Error::other("forced guess format error"));
+    }
+    image::io::Reader::new(Cursor::new(bytes)).with_guessed_format()
+}
+
 fn raster_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    let reader = image::io::Reader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?;
+    let reader = guessed_format_for_test(bytes).ok()?;
     reader.into_dimensions().ok()
 }
 
@@ -50,6 +68,14 @@ fn raster_exceeds_limits(w: u32, h: u32) -> bool {
     }
     let pixels = (w as u64).saturating_mul(h as u64);
     pixels > MAX_IMAGE_PIXELS
+}
+
+fn pixmap_new_for_test(w: u32, h: u32) -> Option<tiny_skia::Pixmap> {
+    #[cfg(test)]
+    if take_forced_pixmap_alloc_fail() {
+        return None;
+    }
+    tiny_skia::Pixmap::new(w, h)
 }
 
 pub(crate) fn raster_bytes_to_color_image_with_bg(
@@ -122,7 +148,7 @@ pub(crate) fn svg_bytes_to_color_image_with_bg(
         w = (w as f32 * scale) as u32;
         h = (h as f32 * scale) as u32;
     }
-    let mut pixmap = tiny_skia::Pixmap::new(w, h)?;
+    let mut pixmap = pixmap_new_for_test(w, h)?;
     if let Some([r, g, b, a]) = bg {
         let color = tiny_skia::Color::from_rgba8(r, g, b, a);
         pixmap.fill(color);
@@ -145,6 +171,7 @@ pub(crate) fn bytes_to_color_image_guess(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use image::{ImageOutputFormat, RgbaImage};
@@ -197,6 +224,36 @@ mod tests {
         }
     }
 
+    struct ForcedPixmapAllocFail;
+
+    impl ForcedPixmapAllocFail {
+        fn new() -> Self {
+            FORCED_PIXMAP_ALLOC_FAIL.with(|flag| flag.replace(true));
+            Self
+        }
+    }
+
+    impl Drop for ForcedPixmapAllocFail {
+        fn drop(&mut self) {
+            FORCED_PIXMAP_ALLOC_FAIL.with(|flag| flag.replace(false));
+        }
+    }
+
+    struct ForcedGuessFormatError;
+
+    impl ForcedGuessFormatError {
+        fn new() -> Self {
+            FORCED_GUESS_FORMAT_ERROR.with(|flag| flag.replace(true));
+            Self
+        }
+    }
+
+    impl Drop for ForcedGuessFormatError {
+        fn drop(&mut self) {
+            FORCED_GUESS_FORMAT_ERROR.with(|flag| flag.replace(false));
+        }
+    }
+
     fn encode_png(rgba: &RgbaImage) -> Vec<u8> {
         let mut bytes = Vec::new();
         let mut cursor = Cursor::new(&mut bytes);
@@ -204,6 +261,29 @@ mod tests {
             .write_to(&mut cursor, ImageOutputFormat::Png)
             .expect("encode png");
         bytes
+    }
+
+    #[test]
+    fn test_raster_dimensions_invalid_bytes_returns_none() {
+        assert!(raster_dimensions(&[]).is_none());
+    }
+
+    #[test]
+    fn test_raster_dimensions_valid_png_returns_some() {
+        let mut rgba = RgbaImage::new(2, 1);
+        rgba.put_pixel(0, 0, image::Rgba([0, 0, 0, 255]));
+        rgba.put_pixel(1, 0, image::Rgba([255, 255, 255, 255]));
+        let bytes = encode_png(&rgba);
+        assert_eq!(raster_dimensions(&bytes), Some((2, 1)));
+    }
+
+    #[test]
+    fn test_raster_dimensions_forced_guess_error_returns_none() {
+        let _guard = ForcedGuessFormatError::new();
+        let mut rgba = RgbaImage::new(1, 1);
+        rgba.put_pixel(0, 0, image::Rgba([0, 0, 0, 255]));
+        let bytes = encode_png(&rgba);
+        assert!(raster_dimensions(&bytes).is_none());
     }
 
     #[test]
@@ -226,8 +306,8 @@ mod tests {
     #[test]
     fn test_svg_bytes_to_color_image_scales_and_fills_bg() {
         let svg = r#"<svg width="5000" height="3000" xmlns="http://www.w3.org/2000/svg">
-<rect width="5000" height="3000" fill="red"/>
-</svg>"#;
+ <rect width="5000" height="3000" fill="red"/>
+ </svg>"#;
         let bg = Some([1, 2, 3, 255]);
         let (_img, w, h) =
             svg_bytes_to_color_image_with_bg(svg.as_bytes(), bg).expect("svg decode");
@@ -235,6 +315,15 @@ mod tests {
         assert!(h > 0);
         assert!(w <= 4096);
         assert!(h <= 4096);
+    }
+
+    #[test]
+    fn test_svg_bytes_to_color_image_forced_pixmap_fail_returns_none() {
+        let _guard = ForcedPixmapAllocFail::new();
+        let svg = r#"<svg width="10" height="10" xmlns="http://www.w3.org/2000/svg">
+ <rect width="10" height="10" fill="red"/>
+</svg>"#;
+        assert!(svg_bytes_to_color_image_with_bg(svg.as_bytes(), None).is_none());
     }
 
     #[test]

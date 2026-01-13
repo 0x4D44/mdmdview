@@ -1,0 +1,309 @@
+Coverage Report
+Created: 2026-01-13 12:48
+C:\language\mdmdview\src\table_support\metrics.rs:
+    1|       |use std::collections::HashMap;
+    2|       |
+    3|       |#[allow(dead_code)]
+    4|       |#[derive(Debug, Default, Clone)]
+    5|       |pub struct RowMetrics {
+    6|       |    pub max_height: f32,
+    7|       |    pub dirty: bool,
+    8|       |}
+    9|       |
+   10|       |#[allow(dead_code)]
+   11|       |#[derive(Debug, Default, Clone)]
+   12|       |pub struct TableMetricEntry {
+   13|       |    pub rows: Vec<RowMetrics>,
+   14|       |    pub rendered_rows: usize,
+   15|       |    pub total_rows: usize,
+   16|       |    pub header_height: f32,
+   17|       |    pub resolved_widths: Vec<f32>,
+   18|       |    pub last_width_frame: u64,
+   19|       |    pub last_discard_frame: Option<u64>,
+   20|       |    pub persisted_column_widths: HashMap<u64, f32>,
+   21|       |    pub pending_user_resize: Option<PendingResize>,
+   22|       |    /// Font size when widths were last persisted. Used to invalidate
+   23|       |    /// persisted widths when zoom level changes.
+   24|       |    pub persisted_font_size: Option<f32>,
+   25|       |}
+   26|       |
+   27|       |#[derive(Debug, Clone, Copy)]
+   28|       |pub struct PendingResize {
+   29|       |    pub column_hash: u64,
+   30|       |    pub width: f32,
+   31|       |}
+   32|       |
+   33|       |#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+   34|       |pub enum WidthChange {
+   35|       |    None,
+   36|       |    Small,
+   37|       |    Large,
+   38|       |}
+   39|       |
+   40|       |const WIDTH_EPSILON: f32 = 0.15;
+   41|       |const WIDTH_LARGE_DELTA: f32 = 0.75;
+   42|       |
+   43|       |impl TableMetricEntry {
+   44|     29|    pub fn ensure_row(&mut self, index: usize) -> &mut RowMetrics {
+   45|     29|        if index >= self.rows.len() {
+   46|     28|            self.rows.resize_with(index + 1, RowMetrics::default);
+   47|     28|        }
+                      ^1
+   48|     29|        &mut self.rows[index]
+   49|     29|    }
+   50|       |
+   51|     31|    pub fn row(&self, index: usize) -> Option<&RowMetrics> {
+   52|     31|        self.rows.get(index)
+   53|     31|    }
+   54|       |
+   55|     22|    pub fn begin_pass(&mut self, total_rows: usize) {
+   56|     22|        self.total_rows = total_rows;
+   57|     22|        self.rendered_rows = 0;
+   58|     22|    }
+   59|       |
+   60|     32|    pub fn note_row_rendered(&mut self) {
+   61|     32|        self.rendered_rows += 1;
+   62|     32|    }
+   63|       |
+   64|    100|    pub fn persisted_width(&self, key: u64) -> Option<f32> {
+   65|    100|        self.persisted_column_widths.get(&key).copied()
+   66|    100|    }
+   67|       |
+   68|     29|    pub fn set_persisted_width(&mut self, key: u64, width: f32) {
+   69|     29|        self.persisted_column_widths.insert(key, width);
+   70|     29|    }
+   71|       |
+   72|      1|    pub fn remove_persisted_width(&mut self, key: u64) {
+   73|      1|        self.persisted_column_widths.remove(&key);
+   74|      1|    }
+   75|       |
+   76|     25|    pub fn update_widths(&mut self, widths: &[f32], frame_id: u64) -> WidthChange {
+   77|     25|        if widths.is_empty() {
+   78|      1|            self.resolved_widths.clear();
+   79|      1|            self.last_width_frame = frame_id;
+   80|      1|            return WidthChange::None;
+   81|     24|        }
+   82|       |
+   83|     24|        let first_update = self.resolved_widths.is_empty();
+   84|     24|        let mut change = WidthChange::None;
+   85|     24|        if !first_update && self.resolved_widths.len() != widths.len() {
+                                          ^4                   ^4
+   86|      1|            change = WidthChange::Large;
+   87|      1|        } else {
+   88|     23|            for (old, new) in self.resolved_widths.iter().zip(widths.iter()) {
+                               ^8   ^8
+   89|      8|                let delta = (old - new).abs();
+   90|      8|                if delta > WIDTH_LARGE_DELTA {
+   91|      1|                    change = WidthChange::Large;
+   92|      1|                    break;
+   93|      7|                }
+   94|      7|                if delta > WIDTH_EPSILON {
+   95|      2|                    change = WidthChange::Small;
+   96|      5|                }
+   97|       |            }
+   98|       |        }
+   99|       |
+  100|     24|        self.resolved_widths.clear();
+  101|     24|        self.resolved_widths.extend_from_slice(widths);
+  102|     24|        self.last_width_frame = frame_id;
+  103|       |
+  104|     24|        change
+  105|     25|    }
+  106|       |
+  107|     22|    pub fn header_height(&self) -> Option<f32> {
+  108|     22|        if self.header_height > 0.0 {
+  109|      3|            Some(self.header_height)
+  110|       |        } else {
+  111|     19|            None
+  112|       |        }
+  113|     22|    }
+  114|       |
+  115|     22|    pub fn update_header_height(&mut self, height: f32) -> bool {
+  116|     22|        let clamped = height.max(0.0);
+  117|     22|        if (self.header_height - clamped).abs() > 0.5 {
+  118|     20|            self.header_height = clamped;
+  119|     20|            true
+  120|       |        } else {
+  121|      2|            false
+  122|       |        }
+  123|     22|    }
+  124|       |
+  125|     22|    pub fn current_widths(&self) -> &[f32] {
+  126|     22|        &self.resolved_widths
+  127|     22|    }
+  128|       |
+  129|       |    /// Check if font size has changed since widths were last persisted.
+  130|       |    /// If so, clear all persisted widths and update the stored font size.
+  131|       |    /// Returns true if widths were cleared.
+  132|     32|    pub fn check_font_size_change(&mut self, current_font_size: f32) -> bool {
+  133|       |        const FONT_SIZE_EPSILON: f32 = 0.5;
+  134|     32|        if let Some(stored_font) = self.persisted_font_size {
+                                  ^7
+  135|      7|            if (stored_font - current_font_size).abs() > FONT_SIZE_EPSILON {
+  136|      2|                self.persisted_column_widths.clear();
+  137|      2|                self.persisted_font_size = Some(current_font_size);
+  138|      2|                return true;
+  139|      5|            }
+  140|     25|        } else {
+  141|     25|            self.persisted_font_size = Some(current_font_size);
+  142|     25|        }
+  143|     30|        false
+  144|     32|    }
+  145|       |}
+  146|       |
+  147|       |#[allow(dead_code)]
+  148|       |#[derive(Debug, Default, Clone)]
+  149|       |pub struct TableMetrics {
+  150|       |    tables: HashMap<u64, TableMetricEntry>,
+  151|       |}
+  152|       |
+  153|       |impl TableMetrics {
+  154|    169|    pub fn entry_mut(&mut self, table_id: u64) -> &mut TableMetricEntry {
+  155|    169|        self.tables.entry(table_id).or_default()
+  156|    169|    }
+  157|       |
+  158|    100|    pub fn entry(&self, table_id: u64) -> Option<&TableMetricEntry> {
+  159|    100|        self.tables.get(&table_id)
+  160|    100|    }
+  161|       |
+  162|      3|    pub fn totals(&self) -> (usize, usize) {
+  163|      3|        self.tables
+  164|      3|            .values()
+  165|      4|            .fold((0, 0), |(rendered, total), entry| {
+                           ^3   ^3
+  166|      4|                (rendered + entry.rendered_rows, total + entry.total_rows)
+  167|      4|            })
+  168|      3|    }
+  169|       |
+  170|    254|    pub fn clear(&mut self) {
+  171|    254|        self.tables.clear();
+  172|    254|    }
+  173|       |}
+  174|       |
+  175|       |#[allow(dead_code)]
+  176|       |#[derive(Debug, Default, Clone)]
+  177|       |pub struct CacheStats {
+  178|       |    pub hits: u64,
+  179|       |    pub misses: u64,
+  180|       |}
+  181|       |
+  182|       |impl CacheStats {
+  183|      2|    pub fn record_hit(&mut self) {
+  184|      2|        self.hits += 1;
+  185|      2|    }
+  186|       |
+  187|      1|    pub fn record_miss(&mut self) {
+  188|      1|        self.misses += 1;
+  189|      1|    }
+  190|       |}
+  191|       |
+  192|       |#[cfg(test)]
+  193|       |mod tests {
+  194|       |    use super::*;
+  195|       |
+  196|       |    #[test]
+  197|      1|    fn update_widths_detects_large_change() {
+  198|      1|        let mut entry = TableMetricEntry::default();
+  199|      1|        assert_eq!(entry.update_widths(&[100.0, 120.0], 1), WidthChange::None);
+  200|      1|        assert_eq!(entry.update_widths(&[100.2, 120.6], 2), WidthChange::Small);
+  201|      1|        assert_eq!(entry.update_widths(&[140.0, 120.6], 3), WidthChange::Large);
+  202|      1|    }
+  203|       |
+  204|       |    #[test]
+  205|      1|    fn font_size_change_clears_persisted_widths() {
+  206|      1|        let mut entry = TableMetricEntry::default();
+  207|       |
+  208|       |        // Set some persisted widths at font size 14.0
+  209|      1|        entry.set_persisted_width(1, 100.0);
+  210|      1|        entry.set_persisted_width(2, 150.0);
+  211|      1|        assert!(!entry.check_font_size_change(14.0)); // First call sets baseline
+  212|      1|        assert_eq!(entry.persisted_width(1), Some(100.0));
+  213|      1|        assert_eq!(entry.persisted_width(2), Some(150.0));
+  214|       |
+  215|       |        // Small font size change (within epsilon) should NOT clear
+  216|      1|        assert!(!entry.check_font_size_change(14.3));
+  217|      1|        assert_eq!(entry.persisted_width(1), Some(100.0));
+  218|       |
+  219|       |        // Large font size change should clear all persisted widths
+  220|      1|        assert!(entry.check_font_size_change(16.0));
+  221|      1|        assert_eq!(entry.persisted_width(1), None);
+  222|      1|        assert_eq!(entry.persisted_width(2), None);
+  223|      1|        assert_eq!(entry.persisted_font_size, Some(16.0));
+  224|      1|    }
+  225|       |
+  226|       |    #[test]
+  227|      1|    fn row_management_tracks_rows_and_rendered_counts() {
+  228|      1|        let mut entry = TableMetricEntry::default();
+  229|      1|        entry.begin_pass(3);
+  230|      1|        assert_eq!(entry.total_rows, 3);
+  231|      1|        assert_eq!(entry.rendered_rows, 0);
+  232|       |
+  233|      1|        let row = entry.ensure_row(2);
+  234|      1|        row.max_height = 12.0;
+  235|      1|        row.dirty = true;
+  236|       |
+  237|      1|        assert_eq!(entry.row(2).map(|r| r.max_height), Some(12.0));
+  238|      1|        assert_eq!(entry.row(2).map(|r| r.dirty), Some(true));
+  239|      1|        assert!(entry.row(5).is_none());
+  240|       |
+  241|      1|        entry.note_row_rendered();
+  242|      1|        entry.note_row_rendered();
+  243|      1|        assert_eq!(entry.rendered_rows, 2);
+  244|      1|    }
+  245|       |
+  246|       |    #[test]
+  247|      1|    fn persisted_widths_can_be_added_and_removed() {
+  248|      1|        let mut entry = TableMetricEntry::default();
+  249|      1|        assert!(entry.persisted_width(10).is_none());
+  250|      1|        entry.set_persisted_width(10, 123.0);
+  251|      1|        assert_eq!(entry.persisted_width(10), Some(123.0));
+  252|      1|        entry.remove_persisted_width(10);
+  253|      1|        assert!(entry.persisted_width(10).is_none());
+  254|      1|    }
+  255|       |
+  256|       |    #[test]
+  257|      1|    fn update_widths_handles_empty_and_length_change() {
+  258|      1|        let mut entry = TableMetricEntry::default();
+  259|      1|        assert_eq!(entry.update_widths(&[], 1), WidthChange::None);
+  260|      1|        assert!(entry.current_widths().is_empty());
+  261|       |
+  262|      1|        assert_eq!(entry.update_widths(&[50.0, 60.0], 2), WidthChange::None);
+  263|      1|        assert_eq!(entry.update_widths(&[50.0], 3), WidthChange::Large);
+  264|      1|    }
+  265|       |
+  266|       |    #[test]
+  267|      1|    fn header_height_updates_when_changed() {
+  268|      1|        let mut entry = TableMetricEntry::default();
+  269|      1|        assert!(entry.header_height().is_none());
+  270|      1|        assert!(entry.update_header_height(24.0));
+  271|      1|        assert_eq!(entry.header_height(), Some(24.0));
+  272|      1|        assert!(!entry.update_header_height(24.2));
+  273|      1|        assert!(entry.update_header_height(30.0));
+  274|      1|        assert_eq!(entry.header_height(), Some(30.0));
+  275|      1|    }
+  276|       |
+  277|       |    #[test]
+  278|      1|    fn table_metrics_totals_and_clear() {
+  279|      1|        let mut metrics = TableMetrics::default();
+  280|      1|        metrics.entry_mut(1).begin_pass(2);
+  281|      1|        metrics.entry_mut(1).note_row_rendered();
+  282|      1|        metrics.entry_mut(2).begin_pass(3);
+  283|      1|        metrics.entry_mut(2).note_row_rendered();
+  284|      1|        metrics.entry_mut(2).note_row_rendered();
+  285|       |
+  286|      1|        assert_eq!(metrics.totals(), (3, 5));
+  287|      1|        metrics.clear();
+  288|      1|        assert!(metrics.entry(1).is_none());
+  289|      1|    }
+  290|       |
+  291|       |    #[test]
+  292|      1|    fn cache_stats_counts_hits_and_misses() {
+  293|      1|        let mut stats = CacheStats::default();
+  294|      1|        stats.record_hit();
+  295|      1|        stats.record_hit();
+  296|      1|        stats.record_miss();
+  297|      1|        assert_eq!(stats.hits, 2);
+  298|      1|        assert_eq!(stats.misses, 1);
+  299|      1|    }
+  300|       |}
+
