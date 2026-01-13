@@ -16,6 +16,8 @@ use rfd::FileDialog;
 use std::cell::RefCell;
 #[cfg(test)]
 use std::collections::HashSet;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::VecDeque;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -37,6 +39,9 @@ thread_local! {
     static FORCED_LOAD_ERROR: RefCell<bool> = const { RefCell::new(false) };
     static FORCED_SCAN_ERROR: RefCell<bool> = const { RefCell::new(false) };
 }
+
+#[cfg(test)]
+static FORCE_THREAD_SPAWN_ERROR: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
 fn app_action_triggered(triggered: bool, action: &'static str) -> bool {
@@ -554,9 +559,7 @@ impl MarkdownViewerApp {
             screenshot: None,
         };
         // Load welcome content by default
-        if let Some(welcome) = SAMPLE_FILES.iter().find(|f| f.name == "welcome.md") {
-            app.load_content(welcome.content, Some("Welcome".to_string()));
-        }
+        app.load_welcome_from_samples(SAMPLE_FILES, false);
 
         app
     }
@@ -810,22 +813,38 @@ impl MarkdownViewerApp {
         }
     }
 
+    fn spawn_named_thread(
+        name: &str,
+        f: impl FnOnce() + Send + 'static,
+    ) -> std::io::Result<std::thread::JoinHandle<()>> {
+        #[cfg(test)]
+        if FORCE_THREAD_SPAWN_ERROR.swap(false, Ordering::Relaxed) {
+            return Err(std::io::Error::new(
+                ErrorKind::Other,
+                "forced thread spawn failure",
+            ));
+        }
+        std::thread::Builder::new().name(name.to_string()).spawn(f)
+    }
+
+    #[cfg(test)]
+    fn force_thread_spawn_error_for_test() {
+        FORCE_THREAD_SPAWN_ERROR.store(true, Ordering::Relaxed);
+    }
+
     fn spawn_file_loader() -> (Sender<FileLoadRequest>, Receiver<FileLoadResult>) {
         let (request_tx, request_rx) = unbounded::<FileLoadRequest>();
         let (result_tx, result_rx) = unbounded::<FileLoadResult>();
-        if let Err(err) = std::thread::Builder::new()
-            .name("mdmdview-file-loader".to_string())
-            .spawn(move || {
-                for request in request_rx.iter() {
-                    let content = MarkdownViewerApp::read_file_lossy(&request.path)
-                        .map_err(|err| err.to_string());
-                    let _ = result_tx.send(FileLoadResult {
-                        id: request.id,
-                        content,
-                    });
-                }
-            })
-        {
+        if let Err(err) = Self::spawn_named_thread("mdmdview-file-loader", move || {
+            for request in request_rx.iter() {
+                let content = MarkdownViewerApp::read_file_lossy(&request.path)
+                    .map_err(|err| err.to_string());
+                let _ = result_tx.send(FileLoadResult {
+                    id: request.id,
+                    content,
+                });
+            }
+        }) {
             eprintln!("Failed to start file loader thread: {err}");
         }
         (request_tx, result_rx)
@@ -1113,13 +1132,20 @@ impl MarkdownViewerApp {
         self.pending_scroll_to_element = Some(0);
     }
 
-    /// Close the current file and return to welcome screen
-    pub fn close_current_file(&mut self) {
-        self.current_file = None;
-        self.renderer.set_base_dir(None);
-        if let Some(welcome) = SAMPLE_FILES.iter().find(|f| f.name == "welcome.md") {
+    fn load_sample_by_name(&mut self, samples: &[SampleFile], name: &str) -> bool {
+        if let Some(sample) = samples.iter().find(|sample| sample.name == name) {
+            self.load_sample(sample);
+            return true;
+        }
+        false
+    }
+
+    fn load_welcome_from_samples(&mut self, samples: &[SampleFile], scroll_to_top: bool) {
+        if let Some(welcome) = samples.iter().find(|sample| sample.name == "welcome.md") {
             self.load_content(welcome.content, Some("Welcome".to_string()));
-            self.pending_scroll_to_element = Some(0);
+            if scroll_to_top {
+                self.pending_scroll_to_element = Some(0);
+            }
         } else {
             // Fallback if welcome file is missing
             self.current_content.clear();
@@ -1127,6 +1153,13 @@ impl MarkdownViewerApp {
             self.title = APP_TITLE_PREFIX.to_string();
             self.error_message = None;
         }
+    }
+
+    /// Close the current file and return to welcome screen
+    pub fn close_current_file(&mut self) {
+        self.current_file = None;
+        self.renderer.set_base_dir(None);
+        self.load_welcome_from_samples(SAMPLE_FILES, true);
     }
 
     #[cfg(not(test))]
@@ -1254,17 +1287,18 @@ impl MarkdownViewerApp {
             }
 
             // F3 navigation: next / previous
-            if i.consume_key(egui::Modifiers::NONE, egui::Key::F3) {
-                self.find_next();
-            }
-            if i.consume_shortcut(&egui::KeyboardShortcut::new(
+            let prev_shift = i.consume_shortcut(&egui::KeyboardShortcut::new(
                 egui::Modifiers::SHIFT,
                 egui::Key::F3,
-            )) || i.consume_shortcut(&egui::KeyboardShortcut::new(
+            ));
+            let prev_alt = i.consume_shortcut(&egui::KeyboardShortcut::new(
                 egui::Modifiers::ALT,
                 egui::Key::F3,
-            )) {
+            ));
+            if prev_shift || prev_alt {
                 self.find_previous();
+            } else if i.consume_key(egui::Modifiers::NONE, egui::Key::F3) {
+                self.find_next();
             }
 
             // Ctrl+Plus - Zoom in
@@ -1318,7 +1352,7 @@ impl MarkdownViewerApp {
                 if total.abs() > 0.0 {
                     if total > 0.0 {
                         self.renderer.zoom_in();
-                    } else if total < 0.0 {
+                    } else {
                         self.renderer.zoom_out();
                     }
                 }
@@ -1736,9 +1770,7 @@ impl MarkdownViewerApp {
                 )))
                 .clicked();
             if app_action_triggered(clicked, "menu_help_usage") {
-                if let Some(usage) = SAMPLE_FILES.iter().find(|f| f.name == "usage.md") {
-                    self.load_sample(usage);
-                }
+                let _ = self.load_sample_by_name(SAMPLE_FILES, "usage.md");
                 ui.close_menu();
             }
         });
@@ -1754,9 +1786,7 @@ impl MarkdownViewerApp {
                 )))
                 .clicked();
             if app_action_triggered(clicked, "menu_help_about") {
-                if let Some(welcome) = SAMPLE_FILES.iter().find(|f| f.name == "welcome.md") {
-                    self.load_sample(welcome);
-                }
+                let _ = self.load_sample_by_name(SAMPLE_FILES, "welcome.md");
                 ui.close_menu();
             }
         });
@@ -2396,11 +2426,8 @@ impl MarkdownViewerApp {
                 .unwrap_or("Unknown")
                 .to_string();
             self.current_file = Some(path);
-            if let Some(parent) = self.current_file.as_ref().and_then(|p| p.parent()) {
-                self.renderer.set_base_dir(Some(parent));
-            } else {
-                self.renderer.set_base_dir(None);
-            }
+            let parent = self.current_file.as_ref().and_then(|p| p.parent());
+            self.renderer.set_base_dir(parent);
             self.title = format!("{APP_TITLE_PREFIX} - {}", filename);
             Ok(())
         } else {
@@ -2413,7 +2440,6 @@ impl MarkdownViewerApp {
         if !self.show_search {
             return;
         }
-        let prev_open = self.show_search;
         let mut open = self.show_search;
         let prev_query = self.search_query.clone();
         egui::Window::new("Find")
@@ -2432,7 +2458,10 @@ impl MarkdownViewerApp {
                         resp.request_focus();
                         self.search_focus_requested = false;
                     }
-                    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if Self::should_submit_search(
+                        resp.lost_focus(),
+                        ui.input(|i| i.key_pressed(egui::Key::Enter)),
+                    ) {
                         submitted_next = true;
                     }
                     let next_clicked = ui.button("Next (F3)").clicked();
@@ -2450,10 +2479,14 @@ impl MarkdownViewerApp {
         }
         self.update_search_results(&prev_query);
         // If dialog closed via close button, clear before hiding
-        if prev_open && !open {
+        if !open {
             self.clear_search_state();
         }
         self.show_search = open;
+    }
+
+    fn should_submit_search(lost_focus: bool, enter_pressed: bool) -> bool {
+        lost_focus && enter_pressed
     }
 
     fn update_search_results(&mut self, prev_query: &str) {
@@ -2521,9 +2554,8 @@ impl MarkdownViewerApp {
         if let Err(err) = Self::save_screenshot_image(&image, &snapshot) {
             eprintln!("Failed to save screenshot: {err}");
         }
-        if let Some(state) = self.screenshot.as_mut() {
-            state.done = true;
-        }
+        let state = self.screenshot.as_mut().expect("screenshot state");
+        state.done = true;
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
@@ -2566,8 +2598,12 @@ impl MarkdownViewerApp {
         state.pending_renders = pending;
         let elapsed = state.started.elapsed();
         let timed_out = elapsed >= Duration::from_millis(state.config.wait_ms);
-        let stable =
-            state.scroll_ready() && state.stable_frames >= state.config.settle_frames && !pending;
+        let stable = Self::screenshot_is_stable(
+            state.scroll_ready(),
+            state.stable_frames,
+            state.config.settle_frames,
+            pending,
+        );
 
         if stable || timed_out {
             if timed_out && !stable {
@@ -2587,6 +2623,15 @@ impl MarkdownViewerApp {
         if state.requested && !state.done {
             ctx.request_repaint();
         }
+    }
+
+    fn screenshot_is_stable(
+        scroll_ready: bool,
+        stable_frames: u32,
+        settle_frames: u32,
+        pending: bool,
+    ) -> bool {
+        scroll_ready && stable_frames >= settle_frames && !pending
     }
 
     fn save_screenshot_image(image: &egui::ColorImage, state: &ScreenshotSnapshot) -> Result<()> {
@@ -3031,6 +3076,23 @@ mod tests {
     }
 
     #[test]
+    fn test_toggle_view_mode_with_state_without_cursor_range() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_mode = ViewMode::Raw;
+        app.write_enabled = true;
+        let ctx = egui::Context::default();
+        let editor_id = egui::Id::new("raw_editor");
+        let mut state = egui::text_edit::TextEditState::default();
+        state.cursor.set_char_range(None);
+        state.store(&ctx, editor_id);
+
+        app.toggle_view_mode(&ctx);
+
+        assert!(matches!(app.view_mode, ViewMode::Rendered));
+        assert!(app.raw_cursor.is_none());
+    }
+
+    #[test]
     fn test_load_sample() {
         let mut app = MarkdownViewerApp::new();
         let sample = &SAMPLE_FILES[0]; // First sample file
@@ -3041,6 +3103,66 @@ mod tests {
         assert!(app.title.contains(sample.title));
         assert!(!app.parsed_elements.is_empty());
         assert!(app.current_file.is_none()); // Sample files don't set file path
+    }
+
+    #[test]
+    fn test_load_sample_by_name_reports_missing() {
+        let mut app = MarkdownViewerApp::new();
+        app.current_content = "keep".to_string();
+
+        let loaded = app.load_sample_by_name(&[], "missing.md");
+
+        assert!(!loaded);
+        assert_eq!(app.current_content, "keep");
+    }
+
+    #[test]
+    fn test_load_sample_by_name_loads_content() {
+        let mut app = MarkdownViewerApp::new();
+        let sample = SAMPLE_FILES
+            .iter()
+            .find(|sample| sample.name == "welcome.md")
+            .expect("welcome sample");
+
+        let loaded = app.load_sample_by_name(SAMPLE_FILES, "welcome.md");
+
+        assert!(loaded);
+        assert_eq!(app.current_content, sample.content);
+        assert_eq!(app.pending_scroll_to_element, Some(0));
+    }
+
+    #[test]
+    fn test_load_welcome_from_samples_missing_clears_state() {
+        let mut app = MarkdownViewerApp::new();
+        app.current_content = "content".to_string();
+        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+            "content".to_string(),
+        )])];
+        app.title = "Custom".to_string();
+        app.error_message = Some("error".to_string());
+
+        app.load_welcome_from_samples(&[], false);
+
+        assert!(app.current_content.is_empty());
+        assert!(app.parsed_elements.is_empty());
+        assert_eq!(app.title, APP_TITLE_PREFIX);
+        assert!(app.error_message.is_none());
+    }
+
+    #[test]
+    fn test_load_welcome_from_samples_sets_scroll_when_requested() {
+        let mut app = MarkdownViewerApp::new();
+        app.pending_scroll_to_element = None;
+
+        app.load_welcome_from_samples(SAMPLE_FILES, true);
+
+        assert_eq!(app.pending_scroll_to_element, Some(0));
+    }
+
+    #[test]
+    fn test_spawn_file_loader_handles_error_path() {
+        MarkdownViewerApp::force_thread_spawn_error_for_test();
+        let _ = MarkdownViewerApp::spawn_file_loader();
     }
 
     #[test]
@@ -3168,6 +3290,27 @@ mod tests {
             .send(FileLoadResult {
                 id: 1,
                 content: Ok(("loaded".to_string(), true)),
+            })
+            .expect("send match");
+        app.poll_file_loads();
+        assert!(app.pending_file_load.is_none());
+        assert_eq!(app.current_file, Some(path));
+    }
+
+    #[test]
+    fn test_poll_file_loads_handles_match_non_lossy() {
+        let mut app = MarkdownViewerApp::new();
+        let (result_tx, result_rx) = unbounded::<FileLoadResult>();
+        app.file_load_rx = result_rx;
+
+        let temp = NamedTempFile::new().expect("temp");
+        let path = temp.path().to_path_buf();
+        app.pending_file_load = Some(PendingFileLoad { id: 1, path: path.clone() });
+
+        result_tx
+            .send(FileLoadResult {
+                id: 1,
+                content: Ok(("loaded".to_string(), false)),
             })
             .expect("send match");
         app.poll_file_loads();
@@ -3791,19 +3934,21 @@ The end.
 
         let ctx = egui::Context::default();
         let mut input = default_input();
-        if let Some(vp) = input.viewports.get_mut(&egui::ViewportId::ROOT) {
-            vp.monitor_size = Some(egui::vec2(1024.0, 768.0));
-            vp.outer_rect = Some(egui::Rect::from_min_size(
-                egui::pos2(1200.0, 900.0),
-                egui::vec2(800.0, 600.0),
-            ));
-            vp.inner_rect = Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(800.0, 600.0),
-            ));
-            vp.fullscreen = Some(false);
-            vp.maximized = Some(false);
-        }
+        let vp = input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("root viewport");
+        vp.monitor_size = Some(egui::vec2(1024.0, 768.0));
+        vp.outer_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(1200.0, 900.0),
+            egui::vec2(800.0, 600.0),
+        ));
+        vp.inner_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(800.0, 600.0),
+        ));
+        vp.fullscreen = Some(false);
+        vp.maximized = Some(false);
         input.hovered_files.push(egui::HoveredFile {
             path: Some(temp_file.path().to_path_buf()),
             ..Default::default()
@@ -3827,19 +3972,21 @@ The end.
         let mut app = MarkdownViewerApp::new();
         let ctx = egui::Context::default();
         let mut input = default_input();
-        if let Some(vp) = input.viewports.get_mut(&egui::ViewportId::ROOT) {
-            vp.monitor_size = Some(egui::vec2(800.0, 600.0));
-            vp.outer_rect = Some(egui::Rect::from_min_size(
-                egui::pos2(10.0, 10.0),
-                egui::vec2(800.0, 600.0),
-            ));
-            vp.inner_rect = Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(200.0, 100.0),
-            ));
-            vp.fullscreen = Some(false);
-            vp.maximized = Some(false);
-        }
+        let vp = input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("root viewport");
+        vp.monitor_size = Some(egui::vec2(800.0, 600.0));
+        vp.outer_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(10.0, 10.0),
+            egui::vec2(800.0, 600.0),
+        ));
+        vp.inner_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(200.0, 100.0),
+        ));
+        vp.fullscreen = Some(false);
+        vp.maximized = Some(false);
 
         run_app_frame(&mut app, &ctx, input);
 
@@ -4010,6 +4157,57 @@ The end.
     }
 
     #[test]
+    fn test_update_screenshot_state_stable_without_timeout() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = ScreenshotConfig {
+            output_path: temp_dir.path().join("shot.png"),
+            viewport_width: 120.0,
+            viewport_height: 80.0,
+            content_only: false,
+            scroll_ratio: None,
+            wait_ms: 10_000,
+            settle_frames: 0,
+            zoom: 1.0,
+            theme: ScreenshotTheme::Light,
+            font_source: None,
+        };
+        let mut app = MarkdownViewerApp::new();
+        app.screenshot = Some(ScreenshotState::new(config));
+
+        let ctx = egui::Context::default();
+        app.update_screenshot_state(&ctx, Some(1), None);
+
+        let state = app.screenshot.as_ref().expect("screenshot state");
+        assert!(state.requested);
+        assert!(!state.timed_out);
+    }
+
+    #[test]
+    fn test_update_screenshot_state_times_out_before_stable() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = ScreenshotConfig {
+            output_path: temp_dir.path().join("shot.png"),
+            viewport_width: 120.0,
+            viewport_height: 80.0,
+            content_only: false,
+            scroll_ratio: Some(0.5),
+            wait_ms: 0,
+            settle_frames: 5,
+            zoom: 1.0,
+            theme: ScreenshotTheme::Light,
+            font_source: None,
+        };
+        let mut app = MarkdownViewerApp::new();
+        app.screenshot = Some(ScreenshotState::new(config));
+
+        let ctx = egui::Context::default();
+        app.update_screenshot_state(&ctx, None, None);
+
+        let state = app.screenshot.as_ref().expect("screenshot state");
+        assert!(state.timed_out);
+    }
+
+    #[test]
     fn test_save_persists_window_state_when_no_screenshot() {
         let _lock = env_lock();
         let temp_dir = TempDir::new().expect("temp dir");
@@ -4155,6 +4353,103 @@ The end.
         assert_eq!(saved.width(), 10);
         assert_eq!(saved.height(), 10);
         Ok(())
+    }
+
+    #[test]
+    fn test_save_screenshot_image_content_only_without_rect() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let output_path = temp_dir.path().join("shot.png");
+        let config = ScreenshotConfig {
+            output_path: output_path.clone(),
+            viewport_width: 100.0,
+            viewport_height: 80.0,
+            content_only: true,
+            scroll_ratio: None,
+            wait_ms: 0,
+            settle_frames: 0,
+            zoom: 1.0,
+            theme: ScreenshotTheme::Light,
+            font_source: None,
+        };
+        let snapshot = ScreenshotSnapshot {
+            config,
+            content_rect: None,
+            pixels_per_point: 1.0,
+            stable_frames: 0,
+            timed_out: false,
+            pending_renders: false,
+            last_scroll_offset: None,
+            started: std::time::Instant::now(),
+        };
+        let image = egui::ColorImage::new([10, 10], Color32::from_rgb(10, 20, 30));
+        MarkdownViewerApp::save_screenshot_image(&image, &snapshot)?;
+        assert!(output_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_screenshot_image_height_zero_skips_crop() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let output_path = temp_dir.path().join("shot.png");
+        let config = ScreenshotConfig {
+            output_path: output_path.clone(),
+            viewport_width: 100.0,
+            viewport_height: 80.0,
+            content_only: true,
+            scroll_ratio: None,
+            wait_ms: 0,
+            settle_frames: 0,
+            zoom: 1.0,
+            theme: ScreenshotTheme::Light,
+            font_source: None,
+        };
+        let snapshot = ScreenshotSnapshot {
+            config,
+            content_rect: Some(egui::Rect::from_min_max(
+                egui::pos2(2.0, 2.0),
+                egui::pos2(8.0, 2.0),
+            )),
+            pixels_per_point: 1.0,
+            stable_frames: 0,
+            timed_out: false,
+            pending_renders: false,
+            last_scroll_offset: None,
+            started: std::time::Instant::now(),
+        };
+        let image = egui::ColorImage::new([10, 10], Color32::from_rgb(10, 20, 30));
+        MarkdownViewerApp::save_screenshot_image(&image, &snapshot)?;
+        let saved = image::open(&output_path)?;
+        assert_eq!(saved.width(), 10);
+        assert_eq!(saved.height(), 10);
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_screenshot_image_empty_output_path_errors() {
+        let config = ScreenshotConfig {
+            output_path: PathBuf::new(),
+            viewport_width: 100.0,
+            viewport_height: 80.0,
+            content_only: false,
+            scroll_ratio: None,
+            wait_ms: 0,
+            settle_frames: 0,
+            zoom: 1.0,
+            theme: ScreenshotTheme::Light,
+            font_source: None,
+        };
+        let snapshot = ScreenshotSnapshot {
+            config,
+            content_rect: None,
+            pixels_per_point: 1.0,
+            stable_frames: 0,
+            timed_out: false,
+            pending_renders: false,
+            last_scroll_offset: None,
+            started: std::time::Instant::now(),
+        };
+        let image = egui::ColorImage::new([10, 10], Color32::from_rgb(10, 20, 30));
+        assert!(MarkdownViewerApp::save_screenshot_image(&image, &snapshot).is_err());
     }
 
     #[test]
@@ -4510,13 +4805,48 @@ The end.
     }
 
     #[test]
+    fn test_update_search_results_no_match_leaves_index_clear() {
+        let mut app = MarkdownViewerApp::new();
+        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+            "Alpha".to_string(),
+        )])];
+        app.search_query = "Beta".to_string();
+        app.pending_scroll_to_element = None;
+
+        app.update_search_results("");
+
+        assert!(app.last_match_index.is_none());
+        assert!(app.pending_scroll_to_element.is_none());
+    }
+
+    #[test]
     fn test_handle_shortcuts_ctrl_mouse_wheel_zoom() {
+        let mut app = MarkdownViewerApp::new();
+        let ctx = egui::Context::default();
+        for delta in [20.0, -20.0] {
+            let mut input = default_input();
+            input.modifiers = egui::Modifiers::CTRL;
+            input.events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, delta),
+                modifiers: egui::Modifiers::CTRL,
+            });
+            let _ = ctx.run(input, |ctx| {
+                app.handle_shortcuts(ctx);
+            });
+        }
+    }
+
+    #[test]
+    fn test_handle_shortcuts_ctrl_mouse_wheel_no_wheel_events() {
         let mut app = MarkdownViewerApp::new();
         let mut input = default_input();
         input.modifiers = egui::Modifiers::CTRL;
-        input.events.push(egui::Event::MouseWheel {
-            unit: egui::MouseWheelUnit::Point,
-            delta: egui::vec2(0.0, 20.0),
+        input.events.push(egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
             modifiers: egui::Modifiers::CTRL,
         });
 
@@ -4649,6 +4979,18 @@ The end.
         assert!(app.title.contains("save_forced.md"));
         let saved = std::fs::read_to_string(&file_path)?;
         assert_eq!(saved, "Forced save");
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_current_document_no_path_no_dialog() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let _forced = ForcedDialogPaths::new(None, None);
+        app.current_content = "No save".to_string();
+
+        app.save_current_document()?;
+
+        assert!(app.current_file.is_none());
         Ok(())
     }
 
@@ -5053,6 +5395,115 @@ The end.
     }
 
     #[test]
+    fn test_render_search_dialog_stays_open() {
+        let mut app = MarkdownViewerApp::new();
+        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+            "Alpha".to_string(),
+        )])];
+        app.show_search = true;
+        app.search_query = "Alpha".to_string();
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            app.render_search_dialog(ctx);
+        });
+
+        assert!(app.show_search);
+        assert_eq!(app.search_query, "Alpha");
+    }
+
+    #[test]
+    fn test_render_search_dialog_close_clears_state() {
+        let mut app = MarkdownViewerApp::new();
+        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+            "Alpha".to_string(),
+        )])];
+        app.show_search = true;
+        app.search_query = "Alpha".to_string();
+        app.last_query = "Alpha".to_string();
+        app.last_match_index = Some(0);
+        app.pending_scroll_to_element = Some(1);
+        let _actions = ForcedAppActions::new(&["search_close"]);
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            app.render_search_dialog(ctx);
+        });
+
+        assert!(!app.show_search);
+        assert!(app.search_query.is_empty());
+        assert!(app.last_query.is_empty());
+        assert!(app.last_match_index.is_none());
+        assert!(app.pending_scroll_to_element.is_none());
+    }
+
+    #[test]
+    fn test_render_search_dialog_submitted_next_on_enter() {
+        let mut app = MarkdownViewerApp::new();
+        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+            "Alpha".to_string(),
+        )])];
+        app.show_search = true;
+        app.search_query = "Alpha".to_string();
+        app.search_focus_requested = true;
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            app.render_search_dialog(ctx);
+        });
+
+        let mut input = default_input();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run(input, |ctx| {
+            app.render_search_dialog(ctx);
+        });
+
+        assert!(app.last_match_index.is_some());
+    }
+
+    #[test]
+    fn test_should_submit_search_requires_focus_and_enter() {
+        assert!(MarkdownViewerApp::should_submit_search(true, true));
+        assert!(!MarkdownViewerApp::should_submit_search(false, true));
+        assert!(!MarkdownViewerApp::should_submit_search(true, false));
+    }
+
+    #[test]
+    fn test_render_main_context_menu_no_actions() {
+        let mut app = MarkdownViewerApp::new();
+        app.current_content = "Hello".to_string();
+        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+            "Hello".to_string(),
+        )])];
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            CentralPanel::default().show(ctx, |ui| {
+                app.render_main_context_menu(ui);
+            });
+        });
+
+        assert!(app.nav_request.is_none());
+    }
+
+    #[test]
+    fn test_render_menu_bar_light_mode() {
+        let mut app = MarkdownViewerApp::new();
+        let ctx = egui::Context::default();
+        ctx.set_visuals(egui::Visuals::light());
+
+        let _ = ctx.run(default_input(), |ctx| {
+            app.render_menu_bar(ctx);
+        });
+    }
+
+    #[test]
     fn test_handle_file_drop_empty_and_missing() {
         let mut app = MarkdownViewerApp::new();
         app.handle_file_drop(Vec::new());
@@ -5254,6 +5705,21 @@ The end.
     }
 
     #[test]
+    fn test_render_status_bar_pending_load_and_queue() {
+        let mut app = MarkdownViewerApp::new();
+        app.pending_file_load = Some(PendingFileLoad {
+            id: 1,
+            path: PathBuf::from("pending.md"),
+        });
+        app.pending_files.push_back(PathBuf::from("queued.md"));
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            app.render_status_bar(ctx);
+        });
+    }
+
+    #[test]
     fn test_update_impl_welcome_open_button() -> Result<()> {
         let mut app = MarkdownViewerApp::new();
         app.parsed_elements.clear();
@@ -5271,6 +5737,32 @@ The end.
 
         assert_eq!(app.current_file, Some(file_path));
         Ok(())
+    }
+
+    #[test]
+    fn test_update_impl_welcome_screen_no_open() {
+        let mut app = MarkdownViewerApp::new();
+        app.parsed_elements.clear();
+        app.current_content.clear();
+        app.error_message = None;
+
+        let ctx = egui::Context::default();
+        run_app_frame(&mut app, &ctx, default_input());
+
+        assert!(app.current_file.is_none());
+    }
+
+    #[test]
+    fn test_update_impl_welcome_screen_with_error_message() {
+        let mut app = MarkdownViewerApp::new();
+        app.parsed_elements.clear();
+        app.current_content.clear();
+        app.error_message = Some("Load failed".to_string());
+
+        let ctx = egui::Context::default();
+        run_app_frame(&mut app, &ctx, default_input());
+
+        assert!(app.error_message.is_some());
     }
 
     #[test]
@@ -5319,6 +5811,39 @@ The end.
     }
 
     #[test]
+    fn test_update_impl_search_highlight_empty_query_prefers_last() {
+        let mut app = MarkdownViewerApp::new();
+        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+            "Find me".to_string(),
+        )])];
+        app.current_content = "Find me".to_string();
+        app.show_search = true;
+        app.search_query.clear();
+        app.last_query = "Find".to_string();
+
+        let ctx = egui::Context::default();
+        run_app_frame(&mut app, &ctx, default_input());
+    }
+
+    #[test]
+    fn test_update_impl_missing_anchor_and_scroll_target() {
+        let mut app = MarkdownViewerApp::new();
+        app.parsed_elements = vec![MarkdownElement::Header {
+            level: 1,
+            spans: vec![InlineSpan::Text("Known".to_string())],
+            id: "known".to_string(),
+        }];
+        app.current_content = "# Known".to_string();
+        app.renderer.trigger_link("#missing");
+        app.pending_scroll_to_element = Some(99);
+
+        let ctx = egui::Context::default();
+        run_app_frame(&mut app, &ctx, default_input());
+
+        assert!(app.pending_scroll_to_element.is_none());
+    }
+
+    #[test]
     fn test_update_impl_raw_cursor_restore_without_state() {
         let mut app = MarkdownViewerApp::new();
         app.view_mode = ViewMode::Raw;
@@ -5329,6 +5854,25 @@ The end.
 
         let ctx = egui::Context::default();
         run_app_frame(&mut app, &ctx, default_input());
+    }
+
+    #[test]
+    fn test_update_impl_raw_cursor_without_char_range() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_mode = ViewMode::Raw;
+        app.write_enabled = true;
+        app.raw_buffer = "Line".to_string();
+        app.current_content = app.raw_buffer.clone();
+
+        let ctx = egui::Context::default();
+        let editor_id = egui::Id::new("raw_editor");
+        let mut state = egui::text_edit::TextEditState::default();
+        state.cursor.set_char_range(None);
+        state.store(&ctx, editor_id);
+
+        run_app_frame(&mut app, &ctx, default_input());
+
+        assert!(app.raw_cursor.is_none());
     }
 
     #[test]
@@ -5370,9 +5914,8 @@ The end.
         };
         let mut app = MarkdownViewerApp::new();
         app.screenshot = Some(ScreenshotState::new(config));
-        if let Some(state) = app.screenshot.as_mut() {
-            state.scroll_offset = Some(10.0);
-        }
+        let state = app.screenshot.as_mut().expect("screenshot state");
+        state.scroll_offset = Some(10.0);
 
         let ctx = egui::Context::default();
         run_app_frame(&mut app, &ctx, default_input());
@@ -5452,9 +5995,8 @@ The end.
             font_source: None,
         };
         app.screenshot = Some(ScreenshotState::new(config));
-        if let Some(state) = app.screenshot.as_mut() {
-            state.done = true;
-        }
+        let state = app.screenshot.as_mut().expect("screenshot state");
+        state.done = true;
         let image = egui::ColorImage::new([10, 10], Color32::WHITE);
         let mut input = default_input();
         input.events.push(egui::Event::Screenshot {
@@ -5494,6 +6036,14 @@ The end.
         state.update_stability(None, None);
         state.last_scroll_offset = Some(0.0);
         state.update_stability(Some(1), Some(10.0));
+    }
+
+    #[test]
+    fn test_screenshot_is_stable_requires_no_pending() {
+        assert!(MarkdownViewerApp::screenshot_is_stable(true, 2, 2, false));
+        assert!(!MarkdownViewerApp::screenshot_is_stable(true, 2, 2, true));
+        assert!(!MarkdownViewerApp::screenshot_is_stable(false, 2, 2, false));
+        assert!(!MarkdownViewerApp::screenshot_is_stable(true, 1, 2, false));
     }
 
     #[test]
@@ -5695,6 +6245,21 @@ The end.
     }
 
     #[test]
+    fn test_compute_window_adjustment_invalid_pos_y_only() {
+        let outer = egui::Rect::from_min_size(egui::pos2(0.0, f32::NAN), egui::vec2(800.0, 600.0));
+        let inner =
+            egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(800.0, 600.0));
+        let adjusted = MarkdownViewerApp::compute_window_adjustment(
+            Some(outer),
+            Some(inner),
+            Some(egui::vec2(1200.0, 900.0)),
+        )
+        .expect("adjustment");
+        assert!(adjusted.pos.is_some());
+        assert!(adjusted.size.is_none());
+    }
+
+    #[test]
     fn test_compute_window_adjustment_invalid_size_only() {
         let outer = egui::Rect::from_min_size(
             egui::pos2(10.0, 20.0),
@@ -5817,6 +6382,7 @@ The end.
         app.search_query = "Nav".to_string();
 
         let mut input = default_input();
+        input.modifiers = egui::Modifiers::SHIFT;
         input.events.push(egui::Event::Key {
             key: egui::Key::F3,
             physical_key: None,
@@ -5861,12 +6427,17 @@ The end.
     #[test]
     fn test_handle_shortcuts_alt_f3_triggers_previous() {
         let mut app = MarkdownViewerApp::new();
-        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
-            "Nav".to_string(),
-        )])];
-        app.search_query = "Nav".to_string();
+        app.parsed_elements = vec![
+            MarkdownElement::Paragraph(vec![InlineSpan::Text("Match".to_string())]),
+            MarkdownElement::Paragraph(vec![InlineSpan::Text("Match".to_string())]),
+            MarkdownElement::Paragraph(vec![InlineSpan::Text("Match".to_string())]),
+        ];
+        app.search_query = "Match".to_string();
+        app.last_match_index = Some(1);
+        app.pending_scroll_to_element = None;
 
         let mut input = default_input();
+        input.modifiers = egui::Modifiers::ALT;
         input.events.push(egui::Event::Key {
             key: egui::Key::F3,
             physical_key: None,
@@ -5881,6 +6452,7 @@ The end.
         });
 
         assert_eq!(app.last_match_index, Some(0));
+        assert_eq!(app.pending_scroll_to_element, Some(0));
     }
 
     #[test]
@@ -5920,6 +6492,13 @@ The end.
     }
 
     #[test]
+    fn test_menu_text_with_mnemonic_missing_character() {
+        let job =
+            MarkdownViewerApp::menu_text_with_mnemonic(None, "Save", 'Z', true, Color32::WHITE);
+        assert!(!job.sections.is_empty());
+    }
+
+    #[test]
     fn test_persist_window_state_no_change_returns_early() {
         let mut app = MarkdownViewerApp::new();
         app.last_window_pos = Some([10.0, 10.0]);
@@ -5933,6 +6512,31 @@ The end.
 
         app.persist_window_state();
         assert!(app.last_persisted_state.is_some());
+    }
+
+    #[test]
+    fn test_persist_window_state_without_window_state() {
+        let mut app = MarkdownViewerApp::new();
+        app.last_window_pos = None;
+        app.last_window_size = None;
+
+        app.persist_window_state();
+        assert!(app.last_persisted_state.is_none());
+    }
+
+    #[test]
+    fn test_persist_window_state_save_failure() {
+        let _lock = env_lock();
+        let temp_file = NamedTempFile::new().expect("temp file");
+        let _guard = EnvGuard::set("APPDATA", temp_file.path().to_string_lossy().as_ref());
+
+        let mut app = MarkdownViewerApp::new();
+        app.last_window_pos = Some([10.0, 10.0]);
+        app.last_window_size = Some([800.0, 600.0]);
+        app.last_window_maximized = false;
+
+        app.persist_window_state();
+        assert!(app.last_persisted_state.is_none());
     }
 
     #[test]
@@ -5970,6 +6574,97 @@ The end.
         app.last_persist_instant =
             std::time::Instant::now() - std::time::Duration::from_secs(2);
         assert!(!app.should_persist_window_state());
+    }
+
+    #[test]
+    fn test_should_persist_window_state_when_changed() {
+        let mut app = MarkdownViewerApp::new();
+        app.last_window_pos = Some([10.0, 10.0]);
+        app.last_window_size = Some([800.0, 600.0]);
+        app.last_persist_instant =
+            std::time::Instant::now() - std::time::Duration::from_secs(2);
+
+        assert!(app.should_persist_window_state());
+    }
+
+    #[test]
+    fn test_update_impl_persists_window_state_when_due() {
+        let _lock = env_lock();
+        let temp_dir = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp_dir.path().to_string_lossy().as_ref());
+
+        let mut app = MarkdownViewerApp::new();
+        app.last_persist_instant =
+            std::time::Instant::now() - std::time::Duration::from_secs(2);
+
+        let ctx = egui::Context::default();
+        let mut input = default_input();
+        let vp = input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("root viewport");
+        vp.monitor_size = Some(egui::vec2(1024.0, 768.0));
+        vp.outer_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(10.0, 10.0),
+            egui::vec2(800.0, 600.0),
+        ));
+        vp.inner_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(20.0, 20.0),
+            egui::vec2(780.0, 580.0),
+        ));
+        vp.fullscreen = Some(false);
+        vp.maximized = Some(false);
+
+        run_app_frame(&mut app, &ctx, input);
+
+        let path = temp_dir.path().join("MarkdownView").join("window_state.txt");
+        assert!(path.exists());
+        assert!(app.last_persisted_state.is_some());
+    }
+
+    #[test]
+    fn test_update_impl_fullscreen_skips_size_persist() {
+        let mut app = MarkdownViewerApp::new();
+        app.last_window_size = None;
+
+        let ctx = egui::Context::default();
+        let mut input = default_input();
+        let vp = input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("root viewport");
+        vp.monitor_size = Some(egui::vec2(1024.0, 768.0));
+        vp.outer_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(10.0, 10.0),
+            egui::vec2(800.0, 600.0),
+        ));
+        vp.inner_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(20.0, 20.0),
+            egui::vec2(780.0, 580.0),
+        ));
+        vp.fullscreen = Some(true);
+        vp.maximized = Some(false);
+
+        run_app_frame(&mut app, &ctx, input);
+
+        assert!(app.last_window_size.is_none());
+    }
+
+    #[test]
+    fn test_update_impl_reload_with_file_succeeds() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let mut temp_file = tempfile::Builder::new().suffix(".md").tempfile()?;
+        temp_file.write_all(b"# Reloaded")?;
+        temp_file.flush()?;
+        app.current_file = Some(temp_file.path().to_path_buf());
+        app.reload_requested = true;
+
+        let ctx = egui::Context::default();
+        let input = default_input();
+        run_app_frame(&mut app, &ctx, input);
+
+        assert!(app.error_message.is_none());
+        Ok(())
     }
 
     #[test]
@@ -6051,6 +6746,36 @@ The end.
 
         let ctx = egui::Context::default();
         app.update_screenshot_state(&ctx, None, None);
+    }
+
+    #[test]
+    fn test_update_screenshot_state_requested_done_skips_repaint() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let config = ScreenshotConfig {
+            output_path: temp_dir.path().join("shot.png"),
+            viewport_width: 200.0,
+            viewport_height: 100.0,
+            content_only: false,
+            scroll_ratio: None,
+            wait_ms: 1000,
+            settle_frames: 0,
+            zoom: 1.0,
+            theme: ScreenshotTheme::Light,
+            font_source: None,
+        };
+        let mut state = ScreenshotState::new(config);
+        state.requested = true;
+        state.done = true;
+
+        let mut app = MarkdownViewerApp::new();
+        app.screenshot = Some(state);
+
+        let ctx = egui::Context::default();
+        app.update_screenshot_state(&ctx, None, None);
+
+        let state = app.screenshot.as_ref().expect("screenshot state");
+        assert!(state.requested);
+        assert!(state.done);
     }
 
     #[test]
