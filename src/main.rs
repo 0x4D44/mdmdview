@@ -757,14 +757,15 @@ mod tests {
     #[test]
     fn test_env_guard_restores_previous_value() {
         let key = "MDMDVIEW_MERMAID_MAIN_BKG";
+        let _lock = env_lock();
+        std::env::set_var(key, "preexisting");
         let previous = std::env::var(key).ok();
         {
-            let lock = env_lock();
             std::env::set_var(key, "orig");
             let guard = EnvGuard {
                 key,
                 original: Some("orig".to_string()),
-                _lock: lock,
+                _lock,
             };
             std::env::set_var(key, "new");
             drop(guard);
