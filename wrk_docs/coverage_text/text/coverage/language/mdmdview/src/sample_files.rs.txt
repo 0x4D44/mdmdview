@@ -1,0 +1,541 @@
+Coverage Report
+Created: 2026-01-13 12:48
+C:\language\mdmdview\src\sample_files.rs:
+    1|       |//! Sample markdown files embedded in the application
+    2|       |//!
+    3|       |//! These files demonstrate the markdown viewer capabilities and provide
+    4|       |//! usage instructions. They are built into the executable for easy access.
+    5|       |
+    6|       |/// Represents a sample markdown file with metadata
+    7|       |#[derive(Debug, Clone)]
+    8|       |pub struct SampleFile {
+    9|       |    pub name: &'static str,
+   10|       |    pub title: &'static str,
+   11|       |    pub content: &'static str,
+   12|       |}
+   13|       |
+   14|       |/// Collection of all embedded sample files
+   15|       |pub const SAMPLE_FILES: &[SampleFile] = &[
+   16|       |    SampleFile {
+   17|       |        name: "welcome.md",
+   18|       |        title: "Welcome to MarkdownView",
+   19|       |        content: WELCOME_CONTENT,
+   20|       |    },
+   21|       |    SampleFile {
+   22|       |        name: "formatting.md",
+   23|       |        title: "Formatting Examples",
+   24|       |        content: FORMATTING_CONTENT,
+   25|       |    },
+   26|       |    SampleFile {
+   27|       |        name: "code.md",
+   28|       |        title: "Code Examples",
+   29|       |        content: CODE_CONTENT,
+   30|       |    },
+   31|       |    SampleFile {
+   32|       |        name: "usage.md",
+   33|       |        title: "Usage Instructions",
+   34|       |        content: USAGE_CONTENT,
+   35|       |    },
+   36|       |    SampleFile {
+   37|       |        name: "search.md",
+   38|       |        title: "Search Tips & Examples",
+   39|       |        content: SEARCH_GUIDE_CONTENT,
+   40|       |    },
+   41|       |    SampleFile {
+   42|       |        name: "images.md",
+   43|       |        title: "Inline Images & Diagrams",
+   44|       |        content: IMAGES_CONTENT,
+   45|       |    },
+   46|       |];
+   47|       |
+   48|       |/// Welcome content with basic introduction
+   49|       |const WELCOME_CONTENT: &str = r#"# Welcome to MarkdownView
+   50|       |
+   51|       |A simple, fast markdown viewer for Windows built with Rust and egui.
+   52|       |
+   53|       |## Features
+   54|       |
+   55|       |- **Pure Rust Implementation** - Single executable, no dependencies
+   56|       |- **Fast Rendering** - Efficient markdown parsing with pulldown-cmark
+   57|       |- **Syntax Highlighting** - Code blocks with proper syntax coloring
+   58|       |- **Native File Dialogs** - Seamless Windows integration
+   59|       |- **Embedded Examples** - Built-in sample files to explore
+   60|       |
+   61|       |## Quick Start
+   62|       |
+   63|       |1. **Open a File**: Use `File → Open` or `Ctrl+O` to load a markdown file
+   64|       |2. **Browse Samples**: Use `File → Samples` to explore built-in examples
+   65|       |3. **Navigate**: Scroll to read through documents
+   66|       |
+   67|       |Enjoy reading your markdown files with this lightweight, efficient viewer!
+   68|       |
+   69|       |---
+   70|       |
+   71|       |*Built with ❤️ using Rust, egui, and pulldown-cmark*
+   72|       |"#;
+   73|       |
+   74|       |const FORMATTING_CONTENT: &str = r#"# Markdown Formatting Guide
+   75|       |
+   76|       |This document demonstrates the various formatting options supported by MarkdownView.
+   77|       |
+   78|       |## Table of Contents
+   79|       |
+   80|       |- [Text Formatting](#text-formatting)
+   81|       |- [Headers](#headers)
+   82|       |- [Lists](#lists)
+   83|       |- [Links and Images](#links-and-images)
+   84|       |- [Emojis](#emojis)
+   85|       |- [Blockquotes](#blockquotes)
+   86|       |- [Horizontal Rules](#horizontal-rules)
+   87|       |- [Tables](#tables)
+   88|       |
+   89|       |Quick jump: [Go to Lists](#lists) | [Go to Tables](#tables)
+   90|       |
+   91|       |## Text Formatting
+   92|       |
+   93|       |**Bold text** and *italic text* are supported, as well as ***bold italic***.
+   94|       |
+   95|       |You can also use `inline code` and ~~strikethrough~~ text.
+   96|       |
+   97|       |## Headers
+   98|       |
+   99|       |# Header 1
+  100|       |## Header 2  
+  101|       |### Header 3
+  102|       |#### Header 4
+  103|       |##### Header 5
+  104|       |###### Header 6
+  105|       |
+  106|       |## Lists
+  107|       |
+  108|       |### Unordered Lists
+  109|       |
+  110|       |- First item
+  111|       |- Second item
+  112|       |  - Nested item
+  113|       |  - Another nested item
+  114|       |- Third item
+  115|       |- Inline code in bullets works: use `--help` or `cargo run`
+  116|       |- Styled + emoji in bullets: **:rocket:** launch, *:tada:* celebration, and ~~:fire:~~ warning
+  117|       |- Tight list check: this item has :rocket: and `code` without blank lines between items
+  118|       |
+  119|       |### Ordered Lists
+  120|       |
+  121|       |1. First item
+  122|       |2. Second item
+  123|       |   1. Nested numbered item
+  124|       |   2. Another nested item
+  125|       |3. Third item
+  126|       |
+  127|       |## Links and Images
+  128|       |
+  129|       |[Visit Rust's website](https://rust-lang.org)
+  130|       |
+  131|       |Internal anchors let you jump within this document:
+  132|       |- [Jump to Headers](#headers)
+  133|       |- [Jump to Tables](#tables)
+  134|       |- [Back to top](#markdown-formatting-guide)
+  135|       |
+  136|       |Links are clickable and will open in your default browser.
+  137|       |
+  138|       |## Emojis
+  139|       |
+  140|       |Unicode emojis render as normal text if your font supports them.
+  141|       |Examples: Thanks! ≡ƒÄë  Status: Γ£à  Ship it ≡ƒÜÇ
+  142|       |
+  143|       |Shortcodes like `:rocket:` and `:tada:` are expanded to emoji images in normal text, headers, and list items.
+  144|       |
+  145|       |## Blockquotes
+  146|       |
+  147|       |> This is a blockquote.
+  148|       |> It can span multiple lines.
+  149|       |> 
+  150|       |> > Nested blockquotes are also supported.
+  151|       |
+  152|       |## Horizontal Rules
+  153|       |
+  154|       |---
+  155|       |
+  156|       |## Tables
+  157|       |
+  158|       || Feature | Supported | Notes |
+  159|       ||---------|-----------|-------|
+  160|       || Headers | Yes | All levels 1-6 |
+  161|       || Lists | Yes | Ordered and unordered |
+  162|       || Code blocks | Yes | With syntax highlighting |
+  163|       || Tables | Yes | Basic table support |
+  164|       || Links | Yes | Opens in browser; internal anchors scroll in document |
+  165|       |
+  166|       |---
+  167|       |
+  168|       |*This covers most of the formatting features available in MarkdownView.*  
+  169|       |[Back to top](#markdown-formatting-guide)
+  170|       |"#;
+  171|       |
+  172|       |/// Code examples with syntax highlighting
+  173|       |const SEARCH_GUIDE_CONTENT: &str = concat!(
+  174|       |    "# Search Tips & Examples\n\n",
+  175|       |    "MarkdownView's search panel is accent-aware and case-insensitive. A single query matches multiple spellings automatically.\n\n",
+  176|       |    "## Accent Folding\n\n",
+  177|       |    "- Typing `resume` highlights `r\u{00e9}sum\u{00e9}`, `RESUME`, and `re\u{0301}sume` (precomposed vs. combining accent).\n",
+  178|       |    "- `istanbul` matches both `\u{0130}stanbul` (Turkish dotted capital I) and `ISTANBUL`.\n",
+  179|       |    "- `sao` finds `S\u{00e3}o`, `SAO`, and `Sao` regardless of combining marks.\n",
+  180|       |    "- `nino` finds `Ni\u{00f1}o`, `NINO`, and `nin\u{0303}o`.\n\n",
+  181|       |    "Try opening this sample, pressing `Ctrl+F`, and searching for the words below:\n\n",
+  182|       |    "| Query | Matches in this document |\n",
+  183|       |    "|-------|-------------------------|\n",
+  184|       |    "| `resume` | r\u{00e9}sum\u{00e9}, RESUME, re\u{0301}sume |\n",
+  185|       |    "| `istanbul` | \u{0130}stanbul, ISTANBUL |\n",
+  186|       |    "| `sao` | S\u{00e3}o, SAO, Sao |\n",
+  187|       |    "| `nino` | Ni\u{00f1}o, NINO, nin\u{0303}o |\n\n",
+  188|       |    "> Tip: Use `Enter` / `Shift+Enter` to cycle through matches. The highlight respects grapheme clusters, so emoji and combined characters stay intact.\n\n",
+  189|       |);
+  190|       |const IMAGES_CONTENT: &str = r#"# Inline Images & Diagrams
+  191|       |
+  192|       |This sample demonstrates inline images and Mermaid code blocks.
+  193|       |
+  194|       |## PNG Image
+  195|       |
+  196|       |Below is a PNG image using an embedded emoji asset.
+  197|       |
+  198|       |![Smiley PNG](assets/emoji/1f600.png "PNG emoji sample")
+  199|       |
+  200|       |## SVG Image
+  201|       |
+  202|       |An SVG logo rendered via resvg/tiny-skia.
+  203|       |
+  204|       |![SVG Logo](assets/samples/logo.svg "SVG sample logo")
+  205|       |
+  206|       |## WEBP Image
+  207|       |
+  208|       |A small WEBP sample is bundled for testing.
+  209|       |
+  210|       |![WEBP Sample](assets/samples/webp_sample.webp "WEBP sample")
+  211|       |
+  212|       |## Mermaid Diagram (embedded)
+  213|       |
+  214|       |Mermaid code blocks are rendered as diagrams by default.
+  215|       |Build with `--no-default-features` or set `MDMDVIEW_MERMAID_RENDERER=off` to show the source instead.
+  216|       |
+  217|       |```mermaid
+  218|       |graph TD;
+  219|       |    A[Start] --> B{Is SVG supported?};
+  220|       |    B -- Yes --> C[Rasterize via resvg];
+  221|       |    B -- No  --> D[Show placeholder];
+  222|       |    C --> E[Display egui texture];
+  223|       |    D --> E;
+  224|       |```
+  225|       |
+  226|       |## Notes
+  227|       |
+  228|       |- The WEBP sample is at `assets/samples/webp_sample.webp`. See `examples/webp_test.md` for a standalone test file.
+  229|       |
+  230|       |"#;
+  231|       |
+  232|       |const CODE_CONTENT: &str = r#"# Code Examples
+  233|       |
+  234|       |MarkdownView supports syntax highlighting for many programming languages.
+  235|       |
+  236|       |## Rust Code
+  237|       |
+  238|       |```rust
+  239|       |fn main() {
+  240|       |    println!("Hello, world!");
+  241|       |    
+  242|       |    let mut vector = vec![1, 2, 3, 4, 5];
+  243|       |    vector.iter()
+  244|       |        .filter(|&x| x % 2 == 0)
+  245|       |        .for_each(|x| println!("Even number: {}", x));
+  246|       |}
+  247|       |
+  248|       |// Struct definition with lifetimes
+  249|       |struct Config<'a> {
+  250|       |    name: &'a str,
+  251|       |    version: u32,
+  252|       |}
+  253|       |
+  254|       |impl<'a> Config<'a> {
+  255|       |    fn new(name: &'a str) -> Self {
+  256|       |        Config { name, version: 1 }
+  257|       |    }
+  258|       |}
+  259|       |```
+  260|       |
+  261|       |## Python Code
+  262|       |
+  263|       |```python
+  264|       |def fibonacci(n):
+  265|       |    """Generate fibonacci sequence up to n"""
+  266|       |    if n <= 0:
+  267|       |        return []
+  268|       |    elif n == 1:
+  269|       |        return [0]
+  270|       |    
+  271|       |    sequence = [0, 1]
+  272|       |    while len(sequence) < n:
+  273|       |        sequence.append(sequence[-1] + sequence[-2])
+  274|       |    
+  275|       |    return sequence
+  276|       |
+  277|       |# List comprehension example
+  278|       |squares = [x**2 for x in range(10) if x % 2 == 0]
+  279|       |print(f"Even squares: {squares}")
+  280|       |```
+  281|       |
+  282|       |## JavaScript Code
+  283|       |
+  284|       |```javascript
+  285|       |// Modern JavaScript with async/await
+  286|       |async function fetchUserData(userId) {
+  287|       |    try {
+  288|       |        const response = await fetch(`/api/users/${userId}`);
+  289|       |        const userData = await response.json();
+  290|       |        
+  291|       |        return {
+  292|       |            ...userData,
+  293|       |            lastUpdated: new Date().toISOString()
+  294|       |        };
+  295|       |    } catch (error) {
+  296|       |        console.error('Failed to fetch user data:', error);
+  297|       |        throw error;
+  298|       |    }
+  299|       |}
+  300|       |
+  301|       |// Arrow functions and destructuring
+  302|       |const processData = ({ name, age, email }) => ({
+  303|       |    displayName: name.toUpperCase(),
+  304|       |    isAdult: age >= 18,
+  305|       |    emailDomain: email.split('@')[1]
+  306|       |});
+  307|       |```
+  308|       |
+  309|       |## SQL Code
+  310|       |
+  311|       |```sql
+  312|       |-- Complex query with joins and aggregation
+  313|       |SELECT 
+  314|       |    u.username,
+  315|       |    u.email,
+  316|       |    COUNT(o.id) as total_orders,
+  317|       |    SUM(oi.price * oi.quantity) as total_spent
+  318|       |FROM users u
+  319|       |LEFT JOIN orders o ON u.id = o.user_id
+  320|       |LEFT JOIN order_items oi ON o.id = oi.order_id
+  321|       |WHERE u.created_at >= '2023-01-01'
+  322|       |GROUP BY u.id, u.username, u.email
+  323|       |HAVING COUNT(o.id) > 5
+  324|       |ORDER BY total_spent DESC
+  325|       |LIMIT 20;
+  326|       |```
+  327|       |
+  328|       |## Inline Code
+  329|       |
+  330|       |You can also use `inline code` within paragraphs, like `let x = 42;` or `print("hello")`.
+  331|       |
+  332|       |---
+  333|       |
+  334|       |*Syntax highlighting is powered by the syntect library, supporting dozens of languages.*
+  335|       |"#;
+  336|       |
+  337|       |/// Usage instructions and tips
+  338|       |const USAGE_CONTENT: &str = r#"# Usage Instructions
+  339|       |
+  340|       |## Opening Files
+  341|       |
+  342|       |### File Menu
+  343|       |- Use `File → Open` from the menu bar
+  344|       |- Keyboard shortcut: `Ctrl+O`
+  345|       |- Select any `.md` or `.markdown` file from your system
+  346|       |
+  347|       |### Drag and Drop
+  348|       |- Drag markdown files directly into the application window
+  349|       |- Multiple files can be opened in sequence
+  350|       |
+  351|       |## Viewing Sample Files
+  352|       |
+  353|       |### Built-in Examples
+  354|       |- Use `File → Samples` to browse embedded examples
+  355|       |- These files demonstrate various markdown features
+  356|       |- Perfect for testing and learning
+  357|       |
+  358|       |### Sample File List
+  359|       |- **welcome.md** - Introduction and overview
+  360|       |- **formatting.md** - Text formatting examples  
+  361|       |- **code.md** - Syntax highlighting examples
+  362|       |- **usage.md** - This usage guide
+  363|       |
+  364|       |## Navigation
+  365|       |
+  366|       |### Scrolling
+  367|       |- Use mouse wheel or trackpad to scroll
+  368|       |- Keyboard arrows for line-by-line navigation
+  369|       |- Page Up/Page Down for faster scrolling
+  370|       |
+  371|       |### Window Controls
+  372|       |- Resize the window as needed
+  373|       |- Content automatically reflows
+  374|       |- Minimum window size is enforced
+  375|       |
+  376|       |## Keyboard Shortcuts
+  377|       |
+  378|       || Shortcut | Action |
+  379|       ||----------|--------|
+  380|       || `Ctrl+O` | Open file |
+  381|       || `Ctrl+W` | Close current file |
+  382|       || `F5` | Reload current file |
+  383|       || `Ctrl+Q` | Quit application |
+  384|       || `F11` | Toggle fullscreen |
+  385|       || `Ctrl++` | Zoom in (increase font size) |
+  386|       || `Ctrl+-` | Zoom out (decrease font size) |
+  387|       || `Ctrl` + Mouse Wheel | Zoom in/out |
+  388|       || `Ctrl+0` | Reset zoom to default size |
+  389|       || `Home` | Go to top of document |
+  390|       || `End` | Go to bottom of document |
+  391|       || `Page Up` | Scroll up one page |
+  392|       || `Page Down` | Scroll down one page |
+  393|       |
+  394|       |## File Associations
+  395|       |
+  396|       |### Windows Integration
+  397|       |To make MarkdownView the default for `.md` files:
+  398|       |
+  399|       |1. Right-click any `.md` file
+  400|       |2. Select "Open with → Choose another app"
+  401|       |3. Browse to the MarkdownView executable
+  402|       |4. Check "Always use this app"
+  403|       |
+  404|       |### Supported Extensions
+  405|       |- `.md` - Standard markdown files
+  406|       |- `.markdown` - Alternative markdown extension
+  407|       |- `.mdown` - Another common variation
+  408|       |- `.mkd` - Short markdown extension
+  409|       |
+  410|       |## Performance
+  411|       |
+  412|       |### Large Files
+  413|       |- Files up to several MB render efficiently
+  414|       |- Very large files (>10MB) may take a moment to parse
+  415|       |- Consider breaking up extremely large documents
+  416|       |
+  417|       |### Memory Usage
+  418|       |- Minimal memory footprint
+  419|       |- Parsed content is cached for fast scrolling
+  420|       |- No memory leaks during normal operation
+  421|       |
+  422|       |## Troubleshooting
+  423|       |
+  424|       |### Common Issues
+  425|       |
+  426|       |**File won't open**
+  427|       |- Check file extension is `.md` or `.markdown`
+  428|       |- Ensure file isn't locked by another application
+  429|       |- Verify file contains valid UTF-8 text
+  430|       |
+  431|       |**Display issues**
+  432|       |- Try resizing the window
+  433|       |- Restart the application
+  434|       |- Check if file contains very long lines
+  435|       |
+  436|       |**Performance problems**
+  437|       |- Close and reopen large files
+  438|       |- Ensure adequate system memory
+  439|       |- Consider breaking up large documents
+  440|       |
+  441|       |### Getting Help
+  442|       |
+  443|       |For bugs or feature requests:
+  444|       |1. Check the application works with sample files
+  445|       |2. Try reproducing with a minimal markdown file
+  446|       |3. Note your Windows version and system specs
+  447|       |
+  448|       |---
+  449|       |
+  450|       |*Thank you for using MarkdownView! We hope it serves your markdown reading needs well.*
+  451|       |"#;
+  452|       |
+  453|       |#[cfg(test)]
+  454|       |mod tests {
+  455|       |    use super::*;
+  456|       |
+  457|       |    #[test]
+  458|      1|    fn test_sample_files_exist() {
+  459|      1|        assert_eq!(SAMPLE_FILES.len(), 6);
+  460|       |
+  461|      1|        let names: Vec<&str> = SAMPLE_FILES.iter().map(|f| f.name).collect();
+  462|      1|        assert!(names.contains(&"welcome.md"));
+  463|      1|        assert!(names.contains(&"formatting.md"));
+  464|      1|        assert!(names.contains(&"code.md"));
+  465|      1|        assert!(names.contains(&"usage.md"));
+  466|      1|        assert!(names.contains(&"search.md"));
+  467|      1|        assert!(names.contains(&"images.md"));
+  468|      1|    }
+  469|       |
+  470|       |    #[test]
+  471|      1|    fn test_sample_files_content_not_empty() {
+  472|      7|        for file in SAMPLE_FILES {
+                          ^6
+  473|      6|            assert!(!file.content.is_empty());
+  474|      6|            assert!(!file.title.is_empty());
+  475|      6|            assert!(!file.name.is_empty());
+  476|       |        }
+  477|      1|    }
+  478|       |
+  479|       |    #[test]
+  480|      1|    fn test_sample_files_are_valid_markdown() {
+  481|       |        use pulldown_cmark::{Options, Parser};
+  482|       |
+  483|      7|        for file in SAMPLE_FILES {
+                          ^6
+  484|      6|            let parser = Parser::new_ext(file.content, Options::all());
+  485|      6|            let events: Vec<_> = parser.collect();
+  486|      6|            assert!(!events.is_empty());
+  487|       |        }
+  488|      1|    }
+  489|       |
+  490|       |    #[test]
+  491|      1|    fn test_welcome_content_structure() {
+  492|      1|        assert!(WELCOME_CONTENT.contains("# Welcome"));
+  493|      1|        assert!(WELCOME_CONTENT.contains("## Features"));
+  494|      1|        assert!(WELCOME_CONTENT.contains("## Quick Start"));
+  495|      1|    }
+  496|       |
+  497|       |    #[test]
+  498|      1|    fn test_formatting_content_examples() {
+  499|      1|        assert!(FORMATTING_CONTENT.contains("**Bold text**"));
+  500|      1|        assert!(FORMATTING_CONTENT.contains("*italic text*"));
+  501|      1|        assert!(FORMATTING_CONTENT.contains("`inline code`"));
+  502|      1|        assert!(FORMATTING_CONTENT.contains("| Feature | Supported |"));
+  503|      1|    }
+  504|       |
+  505|       |    #[test]
+  506|      1|    fn test_code_content_languages() {
+  507|      1|        assert!(CODE_CONTENT.contains("```rust"));
+  508|      1|        assert!(CODE_CONTENT.contains("```python"));
+  509|      1|        assert!(CODE_CONTENT.contains("```javascript"));
+  510|      1|        assert!(CODE_CONTENT.contains("```sql"));
+  511|      1|    }
+  512|       |
+  513|       |    #[test]
+  514|      1|    fn test_usage_content_sections() {
+  515|      1|        assert!(USAGE_CONTENT.contains("## Opening Files"));
+  516|      1|        assert!(USAGE_CONTENT.contains("## Keyboard Shortcuts"));
+  517|      1|        assert!(USAGE_CONTENT.contains("## Troubleshooting"));
+  518|      1|    }
+  519|       |
+  520|       |    #[test]
+  521|      1|    fn test_search_guide_examples_present() {
+  522|      1|        assert!(SEARCH_GUIDE_CONTENT.contains("résumé"));
+  523|      1|        assert!(SEARCH_GUIDE_CONTENT.contains("İstanbul"));
+  524|      1|        assert!(SEARCH_GUIDE_CONTENT.contains("São"));
+  525|      1|        assert!(SEARCH_GUIDE_CONTENT.contains("Niño"));
+  526|      1|        assert!(SEARCH_GUIDE_CONTENT.contains("Ctrl+F"));
+  527|      1|    }
+  528|       |
+  529|       |    #[test]
+  530|      1|    fn test_images_content_mentions_samples() {
+  531|      1|        assert!(IMAGES_CONTENT.contains("Inline Images"));
+  532|      1|        assert!(IMAGES_CONTENT.contains("WEBP Sample"));
+  533|      1|        assert!(IMAGES_CONTENT.contains("```mermaid"));
+  534|      1|    }
+  535|       |}
+

@@ -1,0 +1,560 @@
+Coverage Report
+Created: 2026-01-13 12:48
+C:\language\mdmdview\src\window_state.rs:
+    1|       |use std::fs;
+    2|       |use std::io::{Read, Write};
+    3|       |use std::path::PathBuf;
+    4|       |
+    5|       |#[derive(Debug, Clone, Copy)]
+    6|       |pub struct WindowState {
+    7|       |    pub pos: [f32; 2],
+    8|       |    pub size: [f32; 2],
+    9|       |    pub maximized: bool,
+   10|       |}
+   11|       |
+   12|     18|fn config_dir() -> Option<PathBuf> {
+   13|       |    // Cross‑platform config dir without extra deps
+   14|       |    #[cfg(target_os = "windows")]
+   15|       |    {
+   16|     18|        if let Ok(appdata) = std::env::var("APPDATA") {
+                                ^13
+   17|     13|            let mut p = PathBuf::from(appdata);
+   18|     13|            p.push("MarkdownView");
+   19|     13|            return Some(p);
+   20|      5|        }
+   21|       |    }
+   22|       |
+   23|       |    #[cfg(target_os = "macos")]
+   24|       |    {
+   25|       |        if let Ok(home) = std::env::var("HOME") {
+   26|       |            let mut p = PathBuf::from(home);
+   27|       |            p.push("Library/Application Support/MarkdownView");
+   28|       |            return Some(p);
+   29|       |        }
+   30|       |    }
+   31|       |
+   32|       |    // Linux / others: XDG or ~/.config
+   33|      5|    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+                            ^1
+   34|      1|        let mut p = PathBuf::from(xdg);
+   35|      1|        p.push("mdmdview");
+   36|      1|        return Some(p);
+   37|      4|    }
+   38|      4|    if let Ok(home) = std::env::var("HOME") {
+                            ^1
+   39|      1|        let mut p = PathBuf::from(home);
+   40|      1|        p.push(".config/mdmdview");
+   41|      1|        return Some(p);
+   42|      3|    }
+   43|      3|    None
+   44|     18|}
+   45|       |
+   46|      6|fn state_path() -> Option<PathBuf> {
+   47|      6|    config_dir().map(|mut dir| {
+                                             ^5
+   48|      5|        dir.push("window_state.txt");
+   49|      5|        dir
+   50|      5|    })
+   51|      6|}
+   52|       |
+   53|      7|pub fn load_window_state() -> Option<WindowState> {
+   54|       |    #[cfg(windows)]
+   55|       |    {
+   56|      7|        if let Some(ws) = load_window_state_registry() {
+                                  ^1
+   57|      1|            return Some(ws);
+   58|      6|        }
+   59|       |    }
+   60|      6|    let path = state_path()?;
+                      ^5                 ^1
+   61|      5|    let mut f = fs::File::open(path).ok()?;
+                      ^4                               ^1
+   62|      4|    let mut s = String::new();
+   63|      4|    f.read_to_string(&mut s).ok()?;
+                                               ^0
+   64|       |    // expected format: "x y w h max"
+   65|      4|    let parts: Vec<&str> = s.split_whitespace().collect();
+   66|      4|    if parts.len() < 5 {
+   67|      1|        return None;
+   68|      3|    }
+   69|      3|    let x = parts[0].parse::<f32>().ok()?;
+                      ^2                              ^1
+   70|      2|    let y = parts[1].parse::<f32>().ok()?;
+                                                      ^0
+   71|      2|    let w = parts[2].parse::<f32>().ok()?;
+                                                      ^0
+   72|      2|    let h = parts[3].parse::<f32>().ok()?;
+                                                      ^0
+   73|      2|    let max = matches!(parts[4], "1" | "true" | "True");
+                            ^1                                ^1
+   74|      2|    Some(WindowState {
+   75|      2|        pos: [x, y],
+   76|      2|        size: [w, h],
+   77|      2|        maximized: max,
+   78|      2|    })
+   79|      7|}
+   80|       |
+   81|      9|pub fn save_window_state(state: &WindowState) -> std::io::Result<()> {
+   82|       |    #[cfg(windows)]
+   83|       |    {
+   84|      9|        if let Err(e) = save_window_state_registry(state) {
+                                 ^1
+   85|      1|            eprintln!("Failed to write window state to registry: {e}");
+   86|      8|        }
+   87|       |    }
+   88|      9|    if let Some(mut dir) = config_dir() {
+                              ^8
+   89|      8|        if !dir.exists() {
+   90|      7|            fs::create_dir_all(&dir)?;
+                                                  ^1
+   91|      1|        }
+   92|      7|        dir.push("window_state.txt");
+   93|      7|        let mut f = fs::File::create(&dir)?;
+                                                        ^0
+   94|      7|        write_window_state(&mut f, state)?;
+                                                       ^0
+   95|      1|    }
+   96|      8|    Ok(())
+   97|      9|}
+   98|       |
+   99|      8|fn write_window_state<W: Write>(writer: &mut W, state: &WindowState) -> std::io::Result<()> {
+  100|       |    // simple whitespace separated format
+  101|      8|    writeln!(
+  102|      8|        writer,
+  103|      8|        "{} {} {} {} {}",
+  104|      8|        state.pos[0], state.pos[1], state.size[0], state.size[1], state.maximized as u8
+  105|      1|    )?;
+  106|      7|    Ok(())
+  107|      8|}
+  108|       |
+  109|      5|pub fn sanitize_window_state(ws: WindowState) -> Option<WindowState> {
+  110|       |    // Basic sanity: finite values
+  111|      5|    if !ws.pos[0].is_finite()
+  112|      4|        || !ws.pos[1].is_finite()
+  113|      3|        || !ws.size[0].is_finite()
+  114|      2|        || !ws.size[1].is_finite()
+  115|       |    {
+  116|      4|        return None;
+  117|      1|    }
+  118|       |
+  119|       |    // Clamp to reasonable ranges
+  120|      1|    let min_w = 600.0f32;
+  121|      1|    let min_h = 400.0f32;
+  122|      1|    let max_w = 10000.0f32;
+  123|      1|    let max_h = 10000.0f32;
+  124|      1|    let max_pos = 20000.0f32; // avoid absurdly large coordinates
+  125|       |
+  126|      1|    let w = ws.size[0].clamp(min_w, max_w);
+  127|      1|    let h = ws.size[1].clamp(min_h, max_h);
+  128|      1|    let x = ws.pos[0].max(0.0).min(max_pos);
+  129|      1|    let y = ws.pos[1].max(0.0).min(max_pos);
+  130|       |
+  131|      1|    Some(WindowState {
+  132|      1|        pos: [x, y],
+  133|      1|        size: [w, h],
+  134|      1|        maximized: ws.maximized,
+  135|      1|    })
+  136|      5|}
+  137|       |
+  138|       |#[cfg(all(windows, not(test)))]
+  139|       |fn load_window_state_registry() -> Option<WindowState> {
+  140|       |    use winreg::enums::HKEY_CURRENT_USER;
+  141|       |    use winreg::RegKey;
+  142|       |    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+  143|       |    let key = hkcu.open_subkey("Software\\MarkdownView").ok()?;
+  144|       |    let x: u32 = key.get_value("PosX").ok()?;
+  145|       |    let y: u32 = key.get_value("PosY").ok()?;
+  146|       |    let w: u32 = key.get_value("Width").ok()?;
+  147|       |    let h: u32 = key.get_value("Height").ok()?;
+  148|       |    let maximized: u32 = key.get_value("Maximized").unwrap_or(0);
+  149|       |    Some(WindowState {
+  150|       |        pos: [x as f32, y as f32],
+  151|       |        size: [w as f32, h as f32],
+  152|       |        maximized: maximized != 0,
+  153|       |    })
+  154|       |}
+  155|       |
+  156|       |#[cfg(all(windows, not(test)))]
+  157|       |fn save_window_state_registry(state: &WindowState) -> std::io::Result<()> {
+  158|       |    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
+  159|       |    use winreg::RegKey;
+  160|       |    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+  161|       |    let (key, _disp) =
+  162|       |        hkcu.create_subkey_with_flags("Software\\MarkdownView", KEY_READ | KEY_WRITE)?;
+  163|       |    let to_u32 = |v: f32| -> u32 {
+  164|       |        if v.is_finite() {
+  165|       |            v.max(0.0).min(u32::MAX as f32).round() as u32
+  166|       |        } else {
+  167|       |            0
+  168|       |        }
+  169|       |    };
+  170|       |    key.set_value("PosX", &to_u32(state.pos[0]))?;
+  171|       |    key.set_value("PosY", &to_u32(state.pos[1]))?;
+  172|       |    key.set_value("Width", &to_u32(state.size[0]))?;
+  173|       |    key.set_value("Height", &to_u32(state.size[1]))?;
+  174|       |    key.set_value("Maximized", &(state.maximized as u32))?;
+  175|       |    Ok(())
+  176|       |}
+  177|       |
+  178|       |#[cfg(all(windows, test))]
+  179|       |thread_local! {
+  180|       |    static FORCED_REGISTRY_LOAD: std::cell::RefCell<Option<WindowState>> =
+  181|       |        const { std::cell::RefCell::new(None) };
+  182|       |    static FORCED_REGISTRY_SAVE_ERROR: std::cell::RefCell<bool> =
+  183|       |        const { std::cell::RefCell::new(false) };
+  184|       |}
+  185|       |
+  186|       |#[cfg(all(windows, test))]
+  187|      7|fn take_forced_registry_load() -> Option<WindowState> {
+  188|      7|    FORCED_REGISTRY_LOAD.with(|slot| slot.borrow_mut().take())
+  189|      7|}
+  190|       |
+  191|       |#[cfg(all(windows, test))]
+  192|      9|fn take_forced_registry_save_error() -> bool {
+  193|      9|    FORCED_REGISTRY_SAVE_ERROR.with(|flag| flag.replace(false))
+  194|      9|}
+  195|       |
+  196|       |#[cfg(all(windows, test))]
+  197|      1|fn force_registry_load_once(state: WindowState) {
+  198|      1|    FORCED_REGISTRY_LOAD.with(|slot| {
+  199|      1|        *slot.borrow_mut() = Some(state);
+  200|      1|    });
+  201|      1|}
+  202|       |
+  203|       |#[cfg(all(windows, test))]
+  204|      1|fn force_registry_save_error_once() {
+  205|      1|    FORCED_REGISTRY_SAVE_ERROR.with(|flag| {
+  206|      1|        *flag.borrow_mut() = true;
+  207|      1|    });
+  208|      1|}
+  209|       |
+  210|       |#[cfg(all(windows, test))]
+  211|      7|fn load_window_state_registry() -> Option<WindowState> {
+  212|      7|    take_forced_registry_load()
+  213|      7|}
+  214|       |
+  215|       |#[cfg(all(windows, test))]
+  216|      9|fn save_window_state_registry(_state: &WindowState) -> std::io::Result<()> {
+  217|      9|    if take_forced_registry_save_error() {
+  218|      1|        return Err(std::io::Error::other("forced registry error"));
+  219|      8|    }
+  220|      8|    Ok(())
+  221|      9|}
+  222|       |
+  223|       |#[cfg(test)]
+  224|       |mod tests {
+  225|       |    use super::*;
+  226|       |    use std::sync::{Mutex, OnceLock};
+  227|       |    use tempfile::TempDir;
+  228|       |
+  229|     12|    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+  230|       |        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+  231|     12|        ENV_LOCK
+  232|     12|            .get_or_init(|| Mutex::new(()))
+                                          ^1         ^1
+  233|     12|            .lock()
+  234|     12|            .expect("env lock")
+  235|     12|    }
+  236|       |
+  237|       |    struct EnvGuard {
+  238|       |        key: &'static str,
+  239|       |        original: Option<String>,
+  240|       |    }
+  241|       |
+  242|       |    impl EnvGuard {
+  243|     11|        fn set(key: &'static str, value: &str) -> Self {
+  244|     11|            let original = std::env::var(key).ok();
+  245|     11|            std::env::set_var(key, value);
+  246|     11|            Self { key, original }
+  247|     11|        }
+  248|       |
+  249|      7|        fn unset(key: &'static str) -> Self {
+  250|      7|            let original = std::env::var(key).ok();
+  251|      7|            std::env::remove_var(key);
+  252|      7|            Self { key, original }
+  253|      7|        }
+  254|       |    }
+  255|       |
+  256|       |    impl Drop for EnvGuard {
+  257|     18|        fn drop(&mut self) {
+  258|     18|            if let Some(value) = &self.original {
+                                      ^12
+  259|     12|                std::env::set_var(self.key, value);
+  260|     12|            } else {
+  261|      6|                std::env::remove_var(self.key);
+  262|      6|            }
+  263|     18|        }
+  264|       |    }
+  265|       |
+  266|       |    #[test]
+  267|      1|    fn test_sanitize_window_state_clamps_and_rejects_invalid() {
+  268|      1|        let invalid = WindowState {
+  269|      1|            pos: [f32::NAN, 10.0],
+  270|      1|            size: [800.0, 600.0],
+  271|      1|            maximized: false,
+  272|      1|        };
+  273|      1|        assert!(sanitize_window_state(invalid).is_none());
+  274|       |
+  275|      1|        let input = WindowState {
+  276|      1|            pos: [-50.0, 25000.0],
+  277|      1|            size: [100.0, 200.0],
+  278|      1|            maximized: true,
+  279|      1|        };
+  280|      1|        let sanitized = sanitize_window_state(input).expect("expected sanitized state");
+  281|      1|        assert_eq!(sanitized.pos[0], 0.0);
+  282|      1|        assert_eq!(sanitized.pos[1], 20000.0);
+  283|      1|        assert_eq!(sanitized.size[0], 600.0);
+  284|      1|        assert_eq!(sanitized.size[1], 400.0);
+  285|      1|        assert!(sanitized.maximized);
+  286|      1|    }
+  287|       |
+  288|       |    #[test]
+  289|      1|    fn test_sanitize_window_state_rejects_non_finite_components() {
+  290|      1|        let invalid_y = WindowState {
+  291|      1|            pos: [10.0, f32::NAN],
+  292|      1|            size: [800.0, 600.0],
+  293|      1|            maximized: false,
+  294|      1|        };
+  295|      1|        assert!(sanitize_window_state(invalid_y).is_none());
+  296|       |
+  297|      1|        let invalid_w = WindowState {
+  298|      1|            pos: [10.0, 20.0],
+  299|      1|            size: [f32::NAN, 600.0],
+  300|      1|            maximized: false,
+  301|      1|        };
+  302|      1|        assert!(sanitize_window_state(invalid_w).is_none());
+  303|       |
+  304|      1|        let invalid_h = WindowState {
+  305|      1|            pos: [10.0, 20.0],
+  306|      1|            size: [800.0, f32::NAN],
+  307|      1|            maximized: false,
+  308|      1|        };
+  309|      1|        assert!(sanitize_window_state(invalid_h).is_none());
+  310|      1|    }
+  311|       |
+  312|       |    #[test]
+  313|      1|    fn test_save_and_load_window_state_from_file() {
+  314|      1|        let _lock = env_lock();
+  315|      1|        let temp = TempDir::new().expect("temp dir");
+  316|      1|        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+  317|       |
+  318|      1|        let state = WindowState {
+  319|      1|            pos: [120.0, 80.0],
+  320|      1|            size: [1024.0, 768.0],
+  321|      1|            maximized: false,
+  322|      1|        };
+  323|      1|        save_window_state(&state).expect("save");
+  324|       |
+  325|      1|        let loaded = load_window_state().expect("load");
+  326|      1|        assert_eq!(loaded.pos, state.pos);
+  327|      1|        assert_eq!(loaded.size, state.size);
+  328|      1|        assert_eq!(loaded.maximized, state.maximized);
+  329|      1|    }
+  330|       |
+  331|       |    #[test]
+  332|      1|    fn test_save_window_state_creates_dir_and_writes_file() {
+  333|      1|        let _lock = env_lock();
+  334|      1|        let temp = TempDir::new().expect("temp dir");
+  335|      1|        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+  336|       |
+  337|      1|        let config_dir = temp.path().join("MarkdownView");
+  338|      1|        let _ = fs::remove_dir_all(&config_dir);
+  339|       |
+  340|      1|        let state = WindowState {
+  341|      1|            pos: [10.0, 20.0],
+  342|      1|            size: [800.0, 600.0],
+  343|      1|            maximized: true,
+  344|      1|        };
+  345|      1|        save_window_state(&state).expect("save");
+  346|       |
+  347|      1|        let path = config_dir.join("window_state.txt");
+  348|      1|        let contents = fs::read_to_string(&path).expect("read");
+  349|      1|        let mut parts = contents.split_whitespace();
+  350|      1|        let pos_x: f32 = parts.next().expect("pos x").parse().expect("parse pos x");
+  351|      1|        let pos_y: f32 = parts.next().expect("pos y").parse().expect("parse pos y");
+  352|      1|        let size_x: f32 = parts.next().expect("size x").parse().expect("parse size x");
+  353|      1|        let size_y: f32 = parts.next().expect("size y").parse().expect("parse size y");
+  354|      1|        let max_flag = parts.next().expect("max flag");
+  355|      1|        assert_eq!(pos_x, state.pos[0]);
+  356|      1|        assert_eq!(pos_y, state.pos[1]);
+  357|      1|        assert_eq!(size_x, state.size[0]);
+  358|      1|        assert_eq!(size_y, state.size[1]);
+  359|      1|        assert_eq!(max_flag, "1");
+  360|      1|    }
+  361|       |
+  362|       |    #[test]
+  363|      1|    fn test_write_window_state_error_propagates() {
+  364|       |        struct FailingWriter;
+  365|       |
+  366|       |        impl Write for FailingWriter {
+  367|      1|            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+  368|      1|                Err(std::io::Error::new(std::io::ErrorKind::Other, "fail"))
+  369|      1|            }
+  370|       |
+  371|      1|            fn flush(&mut self) -> std::io::Result<()> {
+  372|      1|                Ok(())
+  373|      1|            }
+  374|       |        }
+  375|       |
+  376|      1|        let state = WindowState {
+  377|      1|            pos: [1.0, 2.0],
+  378|      1|            size: [3.0, 4.0],
+  379|      1|            maximized: false,
+  380|      1|        };
+  381|      1|        let mut writer = FailingWriter;
+  382|      1|        let err = write_window_state(&mut writer, &state).expect_err("err");
+  383|      1|        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+  384|      1|        writer.flush().expect("flush");
+  385|      1|    }
+  386|       |
+  387|       |    #[test]
+  388|      1|    fn test_save_window_state_when_dir_exists() {
+  389|      1|        let _lock = env_lock();
+  390|      1|        let temp = TempDir::new().expect("temp dir");
+  391|      1|        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+  392|      1|        let config_dir = temp.path().join("MarkdownView");
+  393|      1|        fs::create_dir_all(&config_dir).expect("create config dir");
+  394|       |
+  395|      1|        let state = WindowState {
+  396|      1|            pos: [5.0, 6.0],
+  397|      1|            size: [700.0, 500.0],
+  398|      1|            maximized: false,
+  399|      1|        };
+  400|      1|        save_window_state(&state).expect("save");
+  401|      1|        let path = config_dir.join("window_state.txt");
+  402|      1|        assert!(path.exists());
+  403|      1|    }
+  404|       |
+  405|       |    #[test]
+  406|      1|    fn test_load_window_state_prefers_registry_when_forced() {
+  407|      1|        let _lock = env_lock();
+  408|      1|        let temp = TempDir::new().expect("temp dir");
+  409|      1|        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+  410|       |
+  411|      1|        let state = WindowState {
+  412|      1|            pos: [42.0, 24.0],
+  413|      1|            size: [800.0, 600.0],
+  414|      1|            maximized: true,
+  415|      1|        };
+  416|      1|        force_registry_load_once(state);
+  417|       |
+  418|      1|        let loaded = load_window_state().expect("load");
+  419|      1|        assert_eq!(loaded.pos, state.pos);
+  420|      1|        assert_eq!(loaded.size, state.size);
+  421|      1|        assert_eq!(loaded.maximized, state.maximized);
+  422|      1|    }
+  423|       |
+  424|       |    #[test]
+  425|      1|    fn test_save_window_state_registry_error_still_writes_file() {
+  426|      1|        let _lock = env_lock();
+  427|      1|        let temp = TempDir::new().expect("temp dir");
+  428|      1|        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+  429|      1|        force_registry_save_error_once();
+  430|       |
+  431|      1|        let state = WindowState {
+  432|      1|            pos: [10.0, 20.0],
+  433|      1|            size: [1024.0, 768.0],
+  434|      1|            maximized: false,
+  435|      1|        };
+  436|      1|        save_window_state(&state).expect("save");
+  437|       |
+  438|      1|        let path = temp.path().join("MarkdownView").join("window_state.txt");
+  439|      1|        assert!(path.exists());
+  440|      1|    }
+  441|       |
+  442|       |    #[test]
+  443|      1|    fn test_load_window_state_rejects_bad_file() {
+  444|      1|        let _lock = env_lock();
+  445|      1|        let temp = TempDir::new().expect("temp dir");
+  446|      1|        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+  447|       |
+  448|      1|        let mut config = temp.path().join("MarkdownView");
+  449|      1|        std::fs::create_dir_all(&config).expect("create config dir");
+  450|      1|        config.push("window_state.txt");
+  451|      1|        std::fs::write(&config, "10 20 30").expect("write bad data");
+  452|       |
+  453|      1|        assert!(load_window_state().is_none());
+  454|      1|    }
+  455|       |
+  456|       |    #[test]
+  457|      1|    fn test_load_window_state_rejects_invalid_numbers() {
+  458|      1|        let _lock = env_lock();
+  459|      1|        let temp = TempDir::new().expect("temp dir");
+  460|      1|        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+  461|       |
+  462|      1|        let mut config = temp.path().join("MarkdownView");
+  463|      1|        std::fs::create_dir_all(&config).expect("create config dir");
+  464|      1|        config.push("window_state.txt");
+  465|      1|        std::fs::write(&config, "x y 10 20 true").expect("write bad data");
+  466|       |
+  467|      1|        assert!(load_window_state().is_none());
+  468|      1|    }
+  469|       |
+  470|       |    #[test]
+  471|      1|    fn test_load_window_state_parses_maximized_true() {
+  472|      1|        let _lock = env_lock();
+  473|      1|        let temp = TempDir::new().expect("temp dir");
+  474|      1|        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+  475|       |
+  476|      1|        let mut config = temp.path().join("MarkdownView");
+  477|      1|        std::fs::create_dir_all(&config).expect("create config dir");
+  478|      1|        config.push("window_state.txt");
+  479|      1|        std::fs::write(&config, "10 20 300 400 true").expect("write data");
+  480|       |
+  481|      1|        let loaded = load_window_state().expect("load");
+  482|      1|        assert!(loaded.maximized);
+  483|      1|    }
+  484|       |
+  485|       |    #[test]
+  486|      1|    fn test_load_window_state_returns_none_when_missing() {
+  487|      1|        let _lock = env_lock();
+  488|      1|        let temp = TempDir::new().expect("temp dir");
+  489|      1|        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+  490|       |
+  491|      1|        assert!(load_window_state().is_none());
+  492|      1|    }
+  493|       |
+  494|       |    #[test]
+  495|      1|    fn test_config_dir_falls_back_to_xdg() {
+  496|      1|        let _lock = env_lock();
+  497|      1|        let temp = TempDir::new().expect("temp dir");
+  498|      1|        let _guard_appdata = EnvGuard::unset("APPDATA");
+  499|      1|        let _guard_home = EnvGuard::unset("HOME");
+  500|      1|        let _guard_xdg = EnvGuard::set("XDG_CONFIG_HOME", temp.path().to_string_lossy().as_ref());
+  501|       |
+  502|      1|        let dir = config_dir().expect("config dir");
+  503|      1|        assert!(dir.starts_with(temp.path()));
+  504|      1|        assert!(dir.ends_with("mdmdview"));
+  505|      1|    }
+  506|       |
+  507|       |    #[test]
+  508|      1|    fn test_config_dir_falls_back_to_home() {
+  509|      1|        let _lock = env_lock();
+  510|      1|        let temp = TempDir::new().expect("temp dir");
+  511|      1|        let _guard_appdata = EnvGuard::unset("APPDATA");
+  512|      1|        let _guard_xdg = EnvGuard::unset("XDG_CONFIG_HOME");
+  513|      1|        let _guard_home = EnvGuard::set("HOME", temp.path().to_string_lossy().as_ref());
+  514|       |
+  515|      1|        let dir = config_dir().expect("config dir");
+  516|      1|        assert!(dir.starts_with(temp.path()));
+  517|      1|        assert!(dir.ends_with(std::path::Path::new(".config").join("mdmdview")));
+  518|      1|    }
+  519|       |
+  520|       |    #[test]
+  521|      1|    fn test_config_dir_none_without_env() {
+  522|      1|        let _lock = env_lock();
+  523|      1|        let _guard_appdata = EnvGuard::unset("APPDATA");
+  524|      1|        let _guard_xdg = EnvGuard::unset("XDG_CONFIG_HOME");
+  525|      1|        let _guard_home = EnvGuard::unset("HOME");
+  526|       |
+  527|      1|        assert!(config_dir().is_none());
+  528|      1|        let state = WindowState {
+  529|      1|            pos: [1.0, 2.0],
+  530|      1|            size: [800.0, 600.0],
+  531|      1|            maximized: false,
+  532|      1|        };
+  533|      1|        save_window_state(&state).expect("save ok");
+  534|      1|        assert!(load_window_state().is_none());
+  535|      1|    }
+  536|       |}
+

@@ -91,13 +91,22 @@ pub fn save_window_state(state: &WindowState) -> std::io::Result<()> {
         }
         dir.push("window_state.txt");
         let mut f = fs::File::create(&dir)?;
-        // simple whitespace separated format
-        writeln!(
-            f,
-            "{} {} {} {} {}",
-            state.pos[0], state.pos[1], state.size[0], state.size[1], state.maximized as u8
-        )?;
+        write_window_state(&mut f, state)?;
     }
+    Ok(())
+}
+
+fn write_window_state(writer: &mut dyn Write, state: &WindowState) -> std::io::Result<()> {
+    // simple whitespace separated format
+    #[cfg(test)]
+    if take_forced_file_write_error() {
+        return Err(std::io::Error::other("forced write error"));
+    }
+    writeln!(
+        writer,
+        "{} {} {} {} {}",
+        state.pos[0], state.pos[1], state.size[0], state.size[1], state.maximized as u8
+    )?;
     Ok(())
 }
 
@@ -170,6 +179,24 @@ fn save_window_state_registry(state: &WindowState) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    static FORCED_FILE_WRITE_ERROR: std::cell::RefCell<bool> =
+        const { std::cell::RefCell::new(false) };
+}
+
+#[cfg(test)]
+fn take_forced_file_write_error() -> bool {
+    FORCED_FILE_WRITE_ERROR.with(|flag| flag.replace(false))
+}
+
+#[cfg(test)]
+fn force_file_write_error_once() {
+    FORCED_FILE_WRITE_ERROR.with(|flag| {
+        *flag.borrow_mut() = true;
+    });
+}
+
 #[cfg(all(windows, test))]
 thread_local! {
     static FORCED_REGISTRY_LOAD: std::cell::RefCell<Option<WindowState>> =
@@ -216,6 +243,7 @@ fn save_window_state_registry(_state: &WindowState) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
@@ -355,6 +383,66 @@ mod tests {
     }
 
     #[test]
+    fn test_write_window_state_error_propagates() {
+        struct FailingWriter;
+
+        impl Write for FailingWriter {
+            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("fail"))
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let state = WindowState {
+            pos: [1.0, 2.0],
+            size: [3.0, 4.0],
+            maximized: false,
+        };
+        let mut writer = FailingWriter;
+        let err = write_window_state(&mut writer, &state).expect_err("err");
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+        writer.flush().expect("flush");
+    }
+
+    #[test]
+    fn test_save_window_state_errors_when_state_path_is_dir() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+
+        let config_dir = temp.path().join("MarkdownView");
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        let state_dir = config_dir.join("window_state.txt");
+        fs::create_dir_all(&state_dir).expect("create state dir");
+
+        let state = WindowState {
+            pos: [1.0, 2.0],
+            size: [3.0, 4.0],
+            maximized: false,
+        };
+        assert!(save_window_state(&state).is_err());
+    }
+
+    #[test]
+    fn test_save_window_state_forced_write_error_propagates() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+
+        force_file_write_error_once();
+        let state = WindowState {
+            pos: [1.0, 2.0],
+            size: [3.0, 4.0],
+            maximized: false,
+        };
+        let err = save_window_state(&state).expect_err("expected error");
+        assert_eq!(err.kind(), std::io::ErrorKind::Other);
+    }
+
+    #[test]
     fn test_save_window_state_when_dir_exists() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
@@ -433,6 +521,40 @@ mod tests {
         std::fs::create_dir_all(&config).expect("create config dir");
         config.push("window_state.txt");
         std::fs::write(&config, "x y 10 20 true").expect("write bad data");
+
+        assert!(load_window_state().is_none());
+    }
+
+    #[test]
+    fn test_load_window_state_rejects_invalid_components() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+
+        let mut config = temp.path().join("MarkdownView");
+        std::fs::create_dir_all(&config).expect("create config dir");
+        config.push("window_state.txt");
+
+        std::fs::write(&config, "10 y 30 40 1").expect("write bad data");
+        assert!(load_window_state().is_none());
+
+        std::fs::write(&config, "10 20 w 40 1").expect("write bad data");
+        assert!(load_window_state().is_none());
+
+        std::fs::write(&config, "10 20 30 h 1").expect("write bad data");
+        assert!(load_window_state().is_none());
+    }
+
+    #[test]
+    fn test_load_window_state_rejects_invalid_utf8() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+
+        let mut config = temp.path().join("MarkdownView");
+        std::fs::create_dir_all(&config).expect("create config dir");
+        config.push("window_state.txt");
+        std::fs::write(&config, [0xFF, 0xFE, 0xFD]).expect("write bad data");
 
         assert!(load_window_state().is_none());
     }

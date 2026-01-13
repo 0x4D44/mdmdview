@@ -1,0 +1,164 @@
+Coverage Report
+Created: 2026-01-13 12:48
+C:\language\mdmdview\src\emoji_catalog.rs:
+    1|       |use std::collections::HashMap;
+    2|       |
+    3|       |// Return embedded emoji sprites keyed by real Unicode emoji characters.
+    4|  4.35k|pub fn image_bytes_for(emoji: &str) -> Option<&'static [u8]> {
+    5|  4.35k|    match emoji {
+    6|  4.35k|        "\u{1f389}" => Some(include_bytes!(concat!(
+    7|      2|            env!("CARGO_MANIFEST_DIR"),
+    8|      2|            "/assets/emoji/1f389.png"
+    9|      2|        ))),
+   10|  4.35k|        "\u{2705}" => Some(include_bytes!(concat!(
+   11|      2|            env!("CARGO_MANIFEST_DIR"),
+   12|      2|            "/assets/emoji/2705.png"
+   13|      2|        ))),
+   14|  4.35k|        "\u{1f680}" => Some(include_bytes!(concat!(
+   15|      7|            env!("CARGO_MANIFEST_DIR"),
+   16|      7|            "/assets/emoji/1f680.png"
+   17|      7|        ))),
+   18|  4.34k|        "\u{1f642}" => Some(include_bytes!(concat!(
+   19|      1|            env!("CARGO_MANIFEST_DIR"),
+   20|      1|            "/assets/emoji/1f642.png"
+   21|      1|        ))),
+   22|  4.34k|        "\u{1f600}" => Some(include_bytes!(concat!(
+   23|      8|            env!("CARGO_MANIFEST_DIR"),
+   24|      8|            "/assets/emoji/1f600.png"
+   25|      8|        ))),
+   26|  4.33k|        "\u{1f609}" => Some(include_bytes!(concat!(
+   27|      1|            env!("CARGO_MANIFEST_DIR"),
+   28|      1|            "/assets/emoji/1f609.png"
+   29|      1|        ))),
+   30|  4.33k|        "\u{2b50}" => Some(include_bytes!(concat!(
+   31|      1|            env!("CARGO_MANIFEST_DIR"),
+   32|      1|            "/assets/emoji/2b50.png"
+   33|      1|        ))),
+   34|  4.33k|        "\u{1f525}" => Some(include_bytes!(concat!(
+   35|      1|            env!("CARGO_MANIFEST_DIR"),
+   36|      1|            "/assets/emoji/1f525.png"
+   37|      1|        ))),
+   38|  4.33k|        "\u{1f44d}" => Some(include_bytes!(concat!(
+   39|      1|            env!("CARGO_MANIFEST_DIR"),
+   40|      1|            "/assets/emoji/1f44d.png"
+   41|      1|        ))),
+   42|  4.33k|        "\u{1f44e}" => Some(include_bytes!(concat!(
+   43|      1|            env!("CARGO_MANIFEST_DIR"),
+   44|      1|            "/assets/emoji/1f44e.png"
+   45|      1|        ))),
+   46|  4.33k|        "\u{1f4a1}" => Some(include_bytes!(concat!(
+   47|      1|            env!("CARGO_MANIFEST_DIR"),
+   48|      1|            "/assets/emoji/1f4a1.png"
+   49|      1|        ))),
+   50|  4.33k|        "\u{2753}" => Some(include_bytes!(concat!(
+   51|      1|            env!("CARGO_MANIFEST_DIR"),
+   52|      1|            "/assets/emoji/2753.png"
+   53|      1|        ))),
+   54|  4.33k|        "\u{2757}" => Some(include_bytes!(concat!(
+   55|      1|            env!("CARGO_MANIFEST_DIR"),
+   56|      1|            "/assets/emoji/2757.png"
+   57|      1|        ))),
+   58|  4.33k|        "\u{1f4dd}" => Some(include_bytes!(concat!(
+   59|      1|            env!("CARGO_MANIFEST_DIR"),
+   60|      1|            "/assets/emoji/1f4dd.png"
+   61|      1|        ))),
+   62|  4.33k|        "\u{1f9e0}" => Some(include_bytes!(concat!(
+   63|      1|            env!("CARGO_MANIFEST_DIR"),
+   64|      1|            "/assets/emoji/1f9e0.png"
+   65|      1|        ))),
+   66|  4.32k|        "\u{1f9ea}" => Some(include_bytes!(concat!(
+   67|      1|            env!("CARGO_MANIFEST_DIR"),
+   68|      1|            "/assets/emoji/1f9ea.png"
+   69|      1|        ))),
+   70|  4.32k|        "\u{1f4e6}" => Some(include_bytes!(concat!(
+   71|      1|            env!("CARGO_MANIFEST_DIR"),
+   72|      1|            "/assets/emoji/1f4e6.png"
+   73|      1|        ))),
+   74|  4.32k|        "\u{1f527}" => Some(include_bytes!(concat!(
+   75|      3|            env!("CARGO_MANIFEST_DIR"),
+   76|      3|            "/assets/emoji/1f527.png"
+   77|      3|        ))),
+   78|  4.32k|        _ => None,
+   79|       |    }
+   80|  4.35k|}
+   81|       |
+   82|     32|pub fn shortcode_map() -> &'static HashMap<&'static str, &'static str> {
+   83|       |    use std::sync::OnceLock;
+   84|       |    static MAP: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+   85|     32|    MAP.get_or_init(|| {
+                                     ^1
+   86|      1|        HashMap::from([
+   87|      1|            (":tada:", "\u{1f389}"),
+   88|      1|            (":white_check_mark:", "\u{2705}"),
+   89|      1|            (":check_mark:", "\u{2705}"),
+   90|      1|            (":rocket:", "\u{1f680}"),
+   91|      1|            (":slightly_smiling_face:", "\u{1f642}"),
+   92|      1|            (":grinning:", "\u{1f600}"),
+   93|      1|            (":wink:", "\u{1f609}"),
+   94|      1|            (":star:", "\u{2b50}"),
+   95|      1|            (":fire:", "\u{1f525}"),
+   96|      1|            (":thumbsup:", "\u{1f44d}"),
+   97|      1|            (":thumbsdown:", "\u{1f44e}"),
+   98|      1|            (":bulb:", "\u{1f4a1}"),
+   99|      1|            (":question:", "\u{2753}"),
+  100|      1|            (":exclamation:", "\u{2757}"),
+  101|      1|            (":memo:", "\u{1f4dd}"),
+  102|      1|            (":brain:", "\u{1f9e0}"),
+  103|      1|            (":test_tube:", "\u{1f9ea}"),
+  104|      1|            (":package:", "\u{1f4e6}"),
+  105|      1|            (":wrench:", "\u{1f527}"),
+  106|      1|        ])
+  107|      1|    })
+  108|     32|}
+  109|       |
+  110|       |#[cfg(test)]
+  111|       |mod tests {
+  112|       |    use super::*;
+  113|       |
+  114|       |    #[test]
+  115|      1|    fn test_image_bytes_for_known_emojis() {
+  116|      1|        let emojis = [
+  117|      1|            "\u{1f389}",
+  118|      1|            "\u{2705}",
+  119|      1|            "\u{1f680}",
+  120|      1|            "\u{1f642}",
+  121|      1|            "\u{1f600}",
+  122|      1|            "\u{1f609}",
+  123|      1|            "\u{2b50}",
+  124|      1|            "\u{1f525}",
+  125|      1|            "\u{1f44d}",
+  126|      1|            "\u{1f44e}",
+  127|      1|            "\u{1f4a1}",
+  128|      1|            "\u{2753}",
+  129|      1|            "\u{2757}",
+  130|      1|            "\u{1f4dd}",
+  131|      1|            "\u{1f9e0}",
+  132|      1|            "\u{1f9ea}",
+  133|      1|            "\u{1f4e6}",
+  134|      1|            "\u{1f527}",
+  135|      1|        ];
+  136|       |
+  137|     19|        for emoji in emojis {
+                          ^18
+  138|     18|            let bytes = image_bytes_for(emoji).expect("expected embedded emoji bytes");
+  139|     18|            assert!(!bytes.is_empty());
+  140|       |        }
+  141|      1|    }
+  142|       |
+  143|       |    #[test]
+  144|      1|    fn test_image_bytes_for_unknown_emoji() {
+  145|      1|        assert!(image_bytes_for("\u{1f47d}").is_none());
+  146|      1|    }
+  147|       |
+  148|       |    #[test]
+  149|      1|    fn test_shortcode_map_contains_expected_entries() {
+  150|      1|        let map = shortcode_map();
+  151|      1|        assert_eq!(map.get(":tada:"), Some(&"\u{1f389}"));
+  152|      1|        assert_eq!(map.get(":white_check_mark:"), Some(&"\u{2705}"));
+  153|      1|        assert_eq!(map.get(":rocket:"), Some(&"\u{1f680}"));
+  154|      1|        assert_eq!(map.get(":fire:"), Some(&"\u{1f525}"));
+  155|      1|        assert_eq!(map.get(":wrench:"), Some(&"\u{1f527}"));
+  156|      1|        assert!(map.get(":does_not_exist:").is_none());
+  157|      1|    }
+  158|       |}
+

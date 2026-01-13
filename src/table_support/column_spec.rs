@@ -276,11 +276,12 @@ pub fn derive_column_specs(ctx: &TableColumnContext) -> Vec<ColumnSpec> {
                 .map(|(idx, _)| *idx);
         }
         if candidate.is_none() {
-            candidate = specs
-                .iter()
-                .enumerate()
-                .find(|(_, spec)| !matches!(spec.policy, ColumnPolicy::Fixed { .. }))
-                .map(|(idx, _)| idx);
+            for (idx, spec) in specs.iter().enumerate() {
+                if !matches!(spec.policy, ColumnPolicy::Fixed { .. }) {
+                    candidate = Some(idx);
+                    break;
+                }
+            }
         }
         if let Some(idx) = candidate {
             let spec = &mut specs[idx];
@@ -560,6 +561,7 @@ fn spans_to_text(spans: &[InlineSpan]) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -651,6 +653,39 @@ mod tests {
         assert!(specs[1..]
             .iter()
             .any(|spec| matches!(spec.policy, ColumnPolicy::Remainder { .. })));
+    }
+
+    #[test]
+    fn derive_column_specs_handles_missing_stats_with_fixed_columns() {
+        let headers = vec![vec![span("Alpha")], vec![span("Status")]];
+        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
+        let stats: Vec<ColumnStat> = Vec::new();
+        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
+        let specs = derive_column_specs(&ctx);
+        assert_eq!(specs.len(), 2);
+        assert!(matches!(specs[0].policy, ColumnPolicy::Fixed { .. }));
+        assert!(matches!(specs[1].policy, ColumnPolicy::Fixed { .. }));
+    }
+
+    #[test]
+    fn derive_column_specs_empty_header_label_uses_fixed_policy() {
+        let headers = vec![Vec::new()];
+        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
+        let stats: Vec<ColumnStat> = Vec::new();
+        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
+        let specs = derive_column_specs(&ctx);
+        assert_eq!(specs.len(), 1);
+        assert!(matches!(specs[0].policy, ColumnPolicy::Fixed { .. }));
+    }
+
+    #[test]
+    fn derive_column_specs_picks_first_non_fixed_when_best_is_fixed() {
+        let headers = vec![vec![span("Notes")], vec![span("Status")]];
+        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
+        let stats: Vec<ColumnStat> = Vec::new();
+        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
+        let specs = derive_column_specs(&ctx);
+        assert!(matches!(specs[0].policy, ColumnPolicy::Remainder { .. }));
     }
 
     #[test]

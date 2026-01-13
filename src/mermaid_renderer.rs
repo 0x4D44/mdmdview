@@ -12,6 +12,8 @@ use std::hash::{Hash, Hasher};
 
 #[cfg(feature = "mermaid-quickjs")]
 use std::path::PathBuf;
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+use std::sync::atomic::AtomicBool;
 #[cfg(feature = "mermaid-quickjs")]
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -36,6 +38,34 @@ static MERMAID_JS_EMPTY_OVERRIDE: std::sync::Mutex<Option<std::thread::ThreadId>
 #[cfg(all(test, feature = "mermaid-quickjs"))]
 static FORCE_RAW_TREE_PARSE_FAIL: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+static FORCE_MERMAID_WORKER_INIT_ERROR: AtomicBool = AtomicBool::new(false);
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+static FORCE_MERMAID_THREAD_SPAWN_ERROR: AtomicBool = AtomicBool::new(false);
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+static FORCE_MERMAID_INIT_ERROR_STAGE: std::sync::Mutex<Option<(std::thread::ThreadId, usize)>> =
+    std::sync::Mutex::new(None);
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+static FORCE_MERMAID_RUNTIME_ERROR: std::sync::Mutex<Option<std::thread::ThreadId>> =
+    std::sync::Mutex::new(None);
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+static FORCE_MERMAID_CONTEXT_ERROR: std::sync::Mutex<Option<std::thread::ThreadId>> =
+    std::sync::Mutex::new(None);
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+static FORCE_MERMAID_UTF8_ERROR: std::sync::Mutex<Option<std::thread::ThreadId>> =
+    std::sync::Mutex::new(None);
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+static FORCE_MERMAID_RENDER_EVAL_ERROR: std::sync::Mutex<Option<std::thread::ThreadId>> =
+    std::sync::Mutex::new(None);
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+static FORCE_MERMAID_RENDER_CALL_ERROR: std::sync::Mutex<Option<std::thread::ThreadId>> =
+    std::sync::Mutex::new(None);
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+static FORCE_MERMAID_PIXMAP_ALLOC_FAIL: std::sync::Mutex<Option<std::thread::ThreadId>> =
+    std::sync::Mutex::new(None);
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+static FORCE_MERMAID_FACE_PARSE_ERROR: std::sync::Mutex<Option<std::thread::ThreadId>> =
+    std::sync::Mutex::new(None);
 
 #[cfg(feature = "mermaid-quickjs")]
 fn mermaid_js_empty() -> bool {
@@ -52,8 +82,10 @@ fn mermaid_js_empty() -> bool {
 
 #[cfg(all(test, feature = "mermaid-quickjs"))]
 fn set_mermaid_js_empty_for_test(value: bool) -> Option<std::thread::ThreadId> {
-    let mut guard = MERMAID_JS_EMPTY_OVERRIDE.lock().expect("mermaid js override lock");
-    let previous = guard.clone();
+    let mut guard = MERMAID_JS_EMPTY_OVERRIDE
+        .lock()
+        .expect("mermaid js override lock");
+    let previous = *guard;
     *guard = if value {
         Some(std::thread::current().id())
     } else {
@@ -66,6 +98,190 @@ fn set_mermaid_js_empty_for_test(value: bool) -> Option<std::thread::ThreadId> {
 fn force_raw_tree_parse_fail_for_test() {
     FORCE_RAW_TREE_PARSE_FAIL.store(true, Ordering::Relaxed);
 }
+
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+fn force_mermaid_worker_init_error_once() {
+    FORCE_MERMAID_WORKER_INIT_ERROR.store(true, Ordering::Relaxed);
+}
+
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+fn force_mermaid_thread_spawn_error_once() {
+    FORCE_MERMAID_THREAD_SPAWN_ERROR.store(true, Ordering::Relaxed);
+}
+
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+fn force_mermaid_init_error_once(stage: usize) {
+    let mut guard = FORCE_MERMAID_INIT_ERROR_STAGE
+        .lock()
+        .expect("mermaid init error lock");
+    *guard = Some((std::thread::current().id(), stage));
+}
+
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+fn take_mermaid_flag(flag: &std::sync::Mutex<Option<std::thread::ThreadId>>) -> bool {
+    let mut guard = flag.lock().expect("mermaid flag lock");
+    if let Some(thread_id) = guard.take() {
+        if thread_id == std::thread::current().id() {
+            return true;
+        }
+        *guard = Some(thread_id);
+    }
+    false
+}
+
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+fn force_mermaid_runtime_error_once() {
+    let mut guard = FORCE_MERMAID_RUNTIME_ERROR
+        .lock()
+        .expect("mermaid runtime error lock");
+    *guard = Some(std::thread::current().id());
+}
+
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+fn force_mermaid_context_error_once() {
+    let mut guard = FORCE_MERMAID_CONTEXT_ERROR
+        .lock()
+        .expect("mermaid context error lock");
+    *guard = Some(std::thread::current().id());
+}
+
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+fn force_mermaid_utf8_error_once() {
+    let mut guard = FORCE_MERMAID_UTF8_ERROR
+        .lock()
+        .expect("mermaid utf8 error lock");
+    *guard = Some(std::thread::current().id());
+}
+
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+fn force_mermaid_render_eval_error_once() {
+    let mut guard = FORCE_MERMAID_RENDER_EVAL_ERROR
+        .lock()
+        .expect("mermaid render eval error lock");
+    *guard = Some(std::thread::current().id());
+}
+
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+fn force_mermaid_render_call_error_once() {
+    let mut guard = FORCE_MERMAID_RENDER_CALL_ERROR
+        .lock()
+        .expect("mermaid render call error lock");
+    *guard = Some(std::thread::current().id());
+}
+
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+fn force_mermaid_pixmap_alloc_fail_once() {
+    let mut guard = FORCE_MERMAID_PIXMAP_ALLOC_FAIL
+        .lock()
+        .expect("mermaid pixmap fail lock");
+    *guard = Some(std::thread::current().id());
+}
+
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+fn force_mermaid_face_parse_error_once() {
+    let mut guard = FORCE_MERMAID_FACE_PARSE_ERROR
+        .lock()
+        .expect("mermaid face parse error lock");
+    *guard = Some(std::thread::current().id());
+}
+
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+fn maybe_force_mermaid_init_error<T>(
+    stage: usize,
+    result: rquickjs::Result<T>,
+) -> rquickjs::Result<T> {
+    if let Ok(mut guard) = FORCE_MERMAID_INIT_ERROR_STAGE.try_lock() {
+        if let Some((thread_id, target_stage)) = guard.take() {
+            if thread_id == std::thread::current().id() && target_stage == stage {
+                return Err(rquickjs::Error::Exception);
+            }
+            *guard = Some((thread_id, target_stage));
+        }
+    }
+    result
+}
+
+#[cfg(not(all(test, feature = "mermaid-quickjs")))]
+fn maybe_force_mermaid_init_error<T>(
+    _stage: usize,
+    result: rquickjs::Result<T>,
+) -> rquickjs::Result<T> {
+    result
+}
+
+#[cfg(feature = "mermaid-quickjs")]
+fn runtime_new_for_test() -> rquickjs::Result<rquickjs::Runtime> {
+    #[cfg(all(test, feature = "mermaid-quickjs"))]
+    if take_mermaid_flag(&FORCE_MERMAID_RUNTIME_ERROR) {
+        return Err(rquickjs::Error::Exception);
+    }
+    rquickjs::Runtime::new()
+}
+
+#[cfg(feature = "mermaid-quickjs")]
+fn context_full_for_test(rt: &rquickjs::Runtime) -> rquickjs::Result<rquickjs::Context> {
+    #[cfg(all(test, feature = "mermaid-quickjs"))]
+    if take_mermaid_flag(&FORCE_MERMAID_CONTEXT_ERROR) {
+        return Err(rquickjs::Error::Exception);
+    }
+    rquickjs::Context::full(rt)
+}
+
+#[cfg(feature = "mermaid-quickjs")]
+fn mermaid_js_str_for_test() -> Result<&'static str, std::str::Utf8Error> {
+    #[cfg(all(test, feature = "mermaid-quickjs"))]
+    if take_mermaid_flag(&FORCE_MERMAID_UTF8_ERROR) {
+        #[allow(invalid_from_utf8)]
+        {
+            static INVALID_UTF8: [u8; 1] = [0xFF];
+            return std::str::from_utf8(&INVALID_UTF8);
+        }
+    }
+    std::str::from_utf8(mermaid_embed::MERMAID_JS)
+}
+
+#[cfg(feature = "mermaid-quickjs")]
+fn face_parse_for_test(data: &[u8], index: u32) -> Option<ttf_parser::Face<'_>> {
+    #[cfg(all(test, feature = "mermaid-quickjs"))]
+    if take_mermaid_flag(&FORCE_MERMAID_FACE_PARSE_ERROR) {
+        return None;
+    }
+    ttf_parser::Face::parse(data, index).ok()
+}
+
+#[cfg(feature = "mermaid-quickjs")]
+fn eval_mermaid_wrapper<'js>(
+    ctx: &rquickjs::Ctx<'js>,
+    wrapper: &str,
+) -> rquickjs::Result<rquickjs::Function<'js>> {
+    #[cfg(all(test, feature = "mermaid-quickjs"))]
+    if take_mermaid_flag(&FORCE_MERMAID_RENDER_EVAL_ERROR) {
+        return Err(rquickjs::Error::Exception);
+    }
+    ctx.eval(wrapper)
+}
+
+#[cfg(feature = "mermaid-quickjs")]
+fn call_mermaid_render<'js>(
+    func: &rquickjs::Function<'js>,
+    args: (&str, &str, &str, u32, u32),
+) -> rquickjs::Result<rquickjs::promise::MaybePromise<'js>> {
+    #[cfg(all(test, feature = "mermaid-quickjs"))]
+    if take_mermaid_flag(&FORCE_MERMAID_RENDER_CALL_ERROR) {
+        return Err(rquickjs::Error::Exception);
+    }
+    func.call(args)
+}
+
+#[cfg(feature = "mermaid-quickjs")]
+fn pixmap_new_for_test(width: u32, height: u32) -> Option<tiny_skia::Pixmap> {
+    #[cfg(all(test, feature = "mermaid-quickjs"))]
+    if take_mermaid_flag(&FORCE_MERMAID_PIXMAP_ALLOC_FAIL) {
+        return None;
+    }
+    tiny_skia::Pixmap::new(width, height)
+}
+
 #[cfg(feature = "mermaid-quickjs")]
 struct MermaidEngine {
     #[allow(dead_code)]
@@ -334,8 +550,7 @@ impl MermaidRenderer {
     pub(crate) fn has_pending(&self) -> bool {
         #[cfg(feature = "mermaid-quickjs")]
         {
-            return self.mermaid_frame_pending.get()
-                || !self.mermaid_pending.borrow().is_empty();
+            return self.mermaid_frame_pending.get() || !self.mermaid_pending.borrow().is_empty();
         }
         #[cfg(not(feature = "mermaid-quickjs"))]
         {
@@ -416,9 +631,9 @@ impl MermaidRenderer {
 
         #[cfg(feature = "mermaid-quickjs")]
         {
-        if mermaid_js_empty() {
-            egui::Frame::none()
-                .fill(Color32::from_rgb(25, 25, 25))
+            if mermaid_js_empty() {
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(25, 25, 25))
                     .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
                     .inner_margin(8.0)
                     .show(ui, |ui| {
@@ -764,6 +979,49 @@ impl MermaidRenderer {
     }
 
     #[cfg(feature = "mermaid-quickjs")]
+    fn spawn_mermaid_worker_thread(
+        worker_idx: usize,
+        worker_rx: MermaidJobReceiver,
+        worker_tx: MermaidResultSender,
+        worker_fontdb: Arc<usvg::fontdb::Database>,
+    ) -> std::io::Result<JoinHandle<()>> {
+        #[cfg(test)]
+        if FORCE_MERMAID_THREAD_SPAWN_ERROR.swap(false, Ordering::Relaxed) {
+            return Err(std::io::Error::other("forced mermaid spawn error"));
+        }
+        std::thread::Builder::new()
+            .name(format!("mdmdview-mermaid-{worker_idx}"))
+            .spawn(move || {
+                let mut worker = MermaidWorker::new(worker_idx, worker_fontdb).map_err(|e| {
+                    eprintln!("Mermaid worker init failed: {}", e);
+                    e
+                });
+                for job in worker_rx.iter() {
+                    let payload = match &mut worker {
+                        Ok(state) => state.process_job(job),
+                        Err(err) => {
+                            let MermaidRequest {
+                                svg_key,
+                                texture_key,
+                                svg,
+                                ..
+                            } = job;
+                            MermaidResult {
+                                svg_key,
+                                texture_key,
+                                svg,
+                                rgba: None,
+                                size: None,
+                                error: Some(err.clone()),
+                            }
+                        }
+                    };
+                    let _ = worker_tx.send(payload);
+                }
+            })
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
     fn spawn_mermaid_workers(
         job_rx: MermaidJobReceiver,
         result_tx: MermaidResultSender,
@@ -777,36 +1035,8 @@ impl MermaidRenderer {
             let worker_rx = job_rx.clone();
             let worker_tx = result_tx.clone();
             let worker_fontdb = Arc::clone(&fontdb);
-            match std::thread::Builder::new()
-                .name(format!("mdmdview-mermaid-{worker_idx}"))
-                .spawn(move || {
-                    let mut worker = MermaidWorker::new(worker_idx, worker_fontdb).map_err(|e| {
-                        eprintln!("Mermaid worker init failed: {}", e);
-                        e
-                    });
-                    for job in worker_rx.iter() {
-                        let payload = match &mut worker {
-                            Ok(state) => state.process_job(job),
-                            Err(err) => {
-                                let MermaidRequest {
-                                    svg_key,
-                                    texture_key,
-                                    svg,
-                                    ..
-                                } = job;
-                                MermaidResult {
-                                    svg_key,
-                                    texture_key,
-                                    svg,
-                                    rgba: None,
-                                    size: None,
-                                    error: Some(err.clone()),
-                                }
-                            }
-                        };
-                        let _ = worker_tx.send(payload);
-                    }
-                }) {
+            match Self::spawn_mermaid_worker_thread(worker_idx, worker_rx, worker_tx, worker_fontdb)
+            {
                 Ok(handle) => handles.push(handle),
                 Err(err) => eprintln!("Failed to start Mermaid worker thread: {}", err),
             }
@@ -1133,7 +1363,7 @@ impl TextMeasurer {
         let face_id = face_id?;
         self.fontdb
             .with_face_data(face_id, |data, index| {
-                let face = ttf_parser::Face::parse(data, index).ok()?;
+                let face = face_parse_for_test(data, index)?;
                 let units_per_em = face.units_per_em().max(1) as f32;
                 let scale = font_size / units_per_em;
                 let fallback_advance = units_per_em * 0.5;
@@ -1325,9 +1555,7 @@ impl MermaidWorker {
         if let rquickjs::Error::Exception = err {
             let value = ctx.catch();
             if let Some(exception) = value.as_exception() {
-                let message = exception
-                    .message()
-                    .filter(|value| !value.trim().is_empty());
+                let message = exception.message().filter(|value| !value.trim().is_empty());
                 let stack = exception.stack().filter(|value| !value.trim().is_empty());
                 if let Some(stack) = stack {
                     if let Some(message) = &message {
@@ -1360,11 +1588,16 @@ impl MermaidWorker {
     }
 
     fn new(worker_idx: usize, fontdb: Arc<usvg::fontdb::Database>) -> Result<Self, String> {
-        use rquickjs::{Context, Function, Runtime};
+        use rquickjs::Function;
         if mermaid_js_empty() {
             return Err("No embedded Mermaid JS".to_string());
         }
-        let rt = Runtime::new().map_err(|e| format!("Mermaid runtime init error: {}", e))?;
+        #[cfg(test)]
+        if FORCE_MERMAID_WORKER_INIT_ERROR.swap(false, Ordering::Relaxed) {
+            return Err("Mermaid worker init forced error".to_string());
+        }
+        let rt =
+            runtime_new_for_test().map_err(|e| format!("Mermaid runtime init error: {}", e))?;
         rt.set_memory_limit(Self::MEMORY_LIMIT_BYTES);
         rt.set_max_stack_size(Self::STACK_LIMIT_BYTES);
         let deadline_ms = Arc::new(AtomicU64::new(0));
@@ -1376,21 +1609,25 @@ impl MermaidWorker {
             }
             Self::now_ms() >= deadline
         })));
-        let ctx = Context::full(&rt).map_err(|e| format!("Mermaid context init error: {}", e))?;
+        let ctx =
+            context_full_for_test(&rt).map_err(|e| format!("Mermaid context init error: {}", e))?;
         let engine = MermaidEngine { rt, ctx };
         let text_measurer = Arc::new(TextMeasurer::new(Arc::clone(&fontdb)));
-        let js = std::str::from_utf8(mermaid_embed::MERMAID_JS)
-            .map_err(|_| "Mermaid JS is not valid UTF-8".to_string())?;
+        let js =
+            mermaid_js_str_for_test().map_err(|_| "Mermaid JS is not valid UTF-8".to_string())?;
         let js = Self::patch_mermaid_js(js);
         let init_result: Result<(), String> = engine.ctx.with(|ctx| {
             let measurer = Arc::clone(&text_measurer);
-            let measure_fn = Function::new(
-                ctx.clone(),
-                move |text: String, font_size: f64, font_weight: Option<f64>| {
-                    let weight = font_weight.map(|value| value as f32);
-                    let (width, height) = measurer.measure_text(&text, font_size as f32, weight);
-                    vec![width as f64, height as f64]
-                },
+            let measure_fn = maybe_force_mermaid_init_error(
+                1,
+                Function::new(
+                    ctx.clone(),
+                    move |text: String, font_size: f64, font_weight: Option<f64>| {
+                        let weight = font_weight.map(|value| value as f32);
+                        let (width, height) = measurer.measure_text(&text, font_size as f32, weight);
+                        vec![width as f64, height as f64]
+                    },
+                ),
             )
             .map_err(|err| {
                 format!(
@@ -1398,22 +1635,22 @@ impl MermaidWorker {
                     MermaidWorker::format_js_error(&ctx, err)
                 )
             })?;
-            ctx.globals()
-                .set("__mdmdview_measure_text_native", measure_fn)
+            maybe_force_mermaid_init_error(2, ctx.globals().set("__mdmdview_measure_text_native", measure_fn))
                 .map_err(|err| {
                     format!(
                         "Mermaid text measure init error: {}",
                         MermaidWorker::format_js_error(&ctx, err)
                     )
                 })?;
-            let eval = |label: &str, source: &str| -> Result<(), String> {
-                ctx.eval::<(), _>(source).map_err(|err| {
+            let eval = |stage: usize, label: &str, source: &str| -> Result<(), String> {
+                let result = maybe_force_mermaid_init_error(stage, ctx.eval::<(), _>(source));
+                result.map_err(|err| {
                     format!("{}: {}", label, MermaidWorker::format_js_error(&ctx, err))
                 })
             };
-            eval("Mermaid DOM shim", MERMAID_DOM_SHIM)?;
-            eval("Mermaid JS", &js)?;
-            eval("Mermaid init", MERMAID_INIT_SNIPPET)?;
+            eval(3, "Mermaid DOM shim", MERMAID_DOM_SHIM)?;
+            eval(4, "Mermaid JS", &js)?;
+            eval(5, "Mermaid init", MERMAID_INIT_SNIPPET)?;
             if std::env::var("MDMDVIEW_MERMAID_DOM_DEBUG").is_ok() {
                 let dom_ok = ctx
                     .eval::<bool, _>(
@@ -1452,20 +1689,21 @@ impl MermaidWorker {
         self.deadline_ms.store(deadline, Ordering::Relaxed);
         let result = self.engine.ctx.with(|ctx| {
             let wrapper = MERMAID_RENDER_WRAPPER;
-            let func: Function = ctx
-                .eval(wrapper)
+            let func: Function = eval_mermaid_wrapper(&ctx, wrapper)
                 .map_err(|err| MermaidWorker::format_js_error(&ctx, err))?;
             let id = format!("m{:016x}", key);
             let site_config = MermaidRenderer::mermaid_site_config_json(key);
-            let maybe: MaybePromise = func
-                .call((
+            let maybe: MaybePromise = call_mermaid_render(
+                &func,
+                (
                     id.as_str(),
                     code,
                     site_config.as_str(),
                     viewport_width,
                     viewport_height,
-                ))
-                .map_err(|err| MermaidWorker::format_js_error(&ctx, err))?;
+                ),
+            )
+            .map_err(|err| MermaidWorker::format_js_error(&ctx, err))?;
             maybe
                 .finish::<String>()
                 .map_err(|err| MermaidWorker::format_js_error(&ctx, err))
@@ -1695,8 +1933,7 @@ impl MermaidWorker {
                 let (inner_before, inner_after) = inner_remaining.split_at(fo_start);
                 inner_out.push_str(inner_before);
                 if let Some(fo_end_rel) = inner_after.find("</foreignObject>") {
-                    inner_remaining =
-                        &inner_after[fo_end_rel + "</foreignObject>".len()..];
+                    inner_remaining = &inner_after[fo_end_rel + "</foreignObject>".len()..];
                 } else {
                     inner_remaining = "";
                     break;
@@ -1708,7 +1945,11 @@ impl MermaidWorker {
             remaining = &after_open[close_rel + "</switch>".len()..];
         }
         out.push_str(remaining);
-        if changed { Some(out) } else { None }
+        if changed {
+            Some(out)
+        } else {
+            None
+        }
     }
 
     fn fix_journey_section_text(svg: &str, fill: &str) -> Option<String> {
@@ -1769,7 +2010,11 @@ impl MermaidWorker {
             remaining = rest;
         }
         out.push_str(remaining);
-        if changed { Some(out) } else { None }
+        if changed {
+            Some(out)
+        } else {
+            None
+        }
     }
 
     fn find_circle_tag(body: &str, class_name: &str) -> Option<(usize, usize, String)> {
@@ -1823,36 +2068,44 @@ impl MermaidWorker {
             let body_end = g_end + close_rel;
             let body = &svg[g_end..body_end];
             let mut body_out = body.to_string();
-            if let (Some((s_start, s_end, state_end_tag)), Some((t_start, t_end, state_start_tag))) =
-                (Self::find_circle_tag(body, "state-end"), Self::find_circle_tag(body, "state-start"))
-            {
-                if let (Some(end_r), Some(start_r)) =
-                    (Self::read_r_value(&state_end_tag), Self::read_r_value(&state_start_tag))
-                {
+            if let (
+                Some((s_start, s_end, state_end_tag)),
+                Some((t_start, t_end, state_start_tag)),
+            ) = (
+                Self::find_circle_tag(body, "state-end"),
+                Self::find_circle_tag(body, "state-start"),
+            ) {
+                if let (Some(end_r), Some(start_r)) = (
+                    Self::read_r_value(&state_end_tag),
+                    Self::read_r_value(&state_start_tag),
+                ) {
                     let end_val = end_r.parse::<f32>().ok();
                     let start_val = start_r.parse::<f32>().ok();
                     if let (Some(end_val), Some(start_val)) = (end_val, start_val) {
                         if end_val < start_val {
                             let end_dim = Self::format_dim(start_val * 2.0);
                             let start_dim = Self::format_dim(end_val * 2.0);
-                            let mut new_end_tag =
-                                Self::replace_attr(&state_end_tag, "r", &start_r);
+                            let mut new_end_tag = Self::replace_attr(&state_end_tag, "r", &start_r);
                             let mut new_start_tag =
                                 Self::replace_attr(&state_start_tag, "r", &end_r);
                             new_end_tag = Self::upsert_attr(&new_end_tag, "width", &end_dim);
                             new_end_tag = Self::upsert_attr(&new_end_tag, "height", &end_dim);
-                            new_start_tag =
-                                Self::upsert_attr(&new_start_tag, "width", &start_dim);
-                            new_start_tag =
-                                Self::upsert_attr(&new_start_tag, "height", &start_dim);
+                            new_start_tag = Self::upsert_attr(&new_start_tag, "width", &start_dim);
+                            new_start_tag = Self::upsert_attr(&new_start_tag, "height", &start_dim);
                             new_start_tag = new_start_tag.replace("state-start", "end-state-inner");
                             let mut rebuilt = String::with_capacity(body.len() + 16);
-                            let (first_start, first_end, first_tag, second_start, second_end, second_tag) =
-                                if s_start <= t_start {
-                                    (s_start, s_end, new_end_tag, t_start, t_end, new_start_tag)
-                                } else {
-                                    (t_start, t_end, new_start_tag, s_start, s_end, new_end_tag)
-                                };
+                            let (
+                                first_start,
+                                first_end,
+                                first_tag,
+                                second_start,
+                                second_end,
+                                second_tag,
+                            ) = if s_start <= t_start {
+                                (s_start, s_end, new_end_tag, t_start, t_end, new_start_tag)
+                            } else {
+                                (t_start, t_end, new_start_tag, s_start, s_end, new_end_tag)
+                            };
                             rebuilt.push_str(&body[..first_start]);
                             rebuilt.push_str(&first_tag);
                             rebuilt.push_str(&body[first_end..second_start]);
@@ -1870,7 +2123,11 @@ impl MermaidWorker {
             cursor = body_end + 4;
         }
         out.push_str(&svg[cursor..]);
-        if changed { Some(out) } else { None }
+        if changed {
+            Some(out)
+        } else {
+            None
+        }
     }
 
     fn fix_er_attribute_fills(svg: &str) -> Option<String> {
@@ -1905,7 +2162,11 @@ impl MermaidWorker {
             remaining = rest;
         }
         out.push_str(remaining);
-        if changed { Some(out) } else { None }
+        if changed {
+            Some(out)
+        } else {
+            None
+        }
     }
 
     fn find_svg_attr(tag: &str, name: &str) -> Option<String> {
@@ -2112,8 +2373,7 @@ impl MermaidWorker {
         w_f: f32,
         h_f: f32,
     ) -> bool {
-        (force_resize && oversize_ok)
-            || (oversize_ok && (bbox_w > w_f * 1.2 || bbox_h > h_f * 1.2))
+        oversize_ok && (force_resize || bbox_w > w_f * 1.2 || bbox_h > h_f * 1.2)
     }
 
     fn rasterize_svg(
@@ -2160,9 +2420,8 @@ impl MermaidWorker {
                 let size_w = w as f32;
                 let size_h = h as f32;
                 let oversize_ok = raw_w <= size_w * oversize_cap && raw_h <= size_h * oversize_cap;
-                let oversized = raw_valid
-                    && oversize_ok
-                    && (raw_w > size_w * 1.2 || raw_h > size_h * 1.2);
+                let oversized =
+                    raw_valid && oversize_ok && (raw_w > size_w * 1.2 || raw_h > size_h * 1.2);
                 if oversized {
                     tree = raw_tree;
                     bbox = raw_bbox;
@@ -2177,14 +2436,8 @@ impl MermaidWorker {
             let w_f = w as f32;
             let h_f = h as f32;
             let oversize_ok = bbox_w <= w_f * oversize_cap && bbox_h <= h_f * oversize_cap;
-            let oversize = Self::should_resize_bbox(
-                force_bbox_resize,
-                oversize_ok,
-                bbox_w,
-                bbox_h,
-                w_f,
-                h_f,
-            );
+            let oversize =
+                Self::should_resize_bbox(force_bbox_resize, oversize_ok, bbox_w, bbox_h, w_f, h_f);
             if oversize {
                 let padding = 4.0_f32;
                 let padded_w = (bbox_w + padding * 2.0).max(1.0);
@@ -2236,7 +2489,7 @@ impl MermaidWorker {
             target_h = (h as f32 * scale).round() as u32;
         }
 
-        let mut pixmap = tiny_skia::Pixmap::new(target_w, target_h)
+        let mut pixmap = pixmap_new_for_test(target_w, target_h)
             .ok_or_else(|| "Pixmap alloc failed".to_string())?;
         if let Some([r, g, b, a]) = bg {
             let color = tiny_skia::Color::from_rgba8(r, g, b, a);
@@ -2263,8 +2516,7 @@ impl MermaidWorker {
     }
 
     fn scale_adjustment_for_svg(svg: &str) -> f32 {
-        if svg.contains("aria-roledescription=\"er\"")
-            || svg.contains("aria-roledescription='er'")
+        if svg.contains("aria-roledescription=\"er\"") || svg.contains("aria-roledescription='er'")
         {
             0.94
         } else {
@@ -4755,6 +5007,7 @@ const MERMAID_RENDER_WRAPPER: &str = r#"
 "#;
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use std::collections::HashSet;
@@ -4882,9 +5135,12 @@ mod tests {
         id_cache.touch_if_present(&missing, &2);
 
         let mut string_cache = LruCache::new(1);
-        string_cache.entries.insert("a".to_string(), "one".to_string());
-        let value = string_cache.entries.get(&"a".to_string()).cloned();
-        string_cache.touch_if_present(&value, &"a".to_string());
+        let string_key = "a".to_string();
+        string_cache
+            .entries
+            .insert(string_key.clone(), "one".to_string());
+        let value = string_cache.entries.get(&string_key).cloned();
+        string_cache.touch_if_present(&value, &string_key);
         let missing: Option<String> = None;
         string_cache.touch_if_present(&missing, &"b".to_string());
 
@@ -4899,9 +5155,12 @@ mod tests {
             size: [1, 1],
         };
         let mut texture_cache = LruCache::new(1);
-        texture_cache.entries.insert("t".to_string(), entry.clone());
-        let value = texture_cache.entries.get(&"t".to_string()).cloned();
-        texture_cache.touch_if_present(&value, &"t".to_string());
+        let texture_key = "t".to_string();
+        texture_cache
+            .entries
+            .insert(texture_key.clone(), entry.clone());
+        let value = texture_cache.entries.get(&texture_key).cloned();
+        texture_cache.touch_if_present(&value, &texture_key);
         let missing: Option<MermaidTextureEntry> = None;
         texture_cache.touch_if_present(&missing, &"missing".to_string());
     }
@@ -4931,7 +5190,9 @@ mod tests {
         let mut string_cache = LruCache::new(1);
         string_cache.insert("a".to_string(), "one".to_string());
         string_cache.insert("b".to_string(), "two".to_string());
-        string_cache.entries.insert("c".to_string(), "three".to_string());
+        string_cache
+            .entries
+            .insert("c".to_string(), "three".to_string());
         string_cache.order.clear();
         string_cache.insert("d".to_string(), "four".to_string());
         assert!(string_cache.evict_oldest());
@@ -5059,7 +5320,9 @@ mod tests {
             assert!(cache.get(&"miss".to_string()).is_none());
             cache.insert("hit".to_string(), "err".to_string());
             assert!(cache.get(&"hit".to_string()).is_some());
-            cache.entries.insert("stale".to_string(), "err2".to_string());
+            cache
+                .entries
+                .insert("stale".to_string(), "err2".to_string());
             cache.order.clear();
             cache.insert("fresh".to_string(), "err3".to_string());
         }
@@ -5110,12 +5373,10 @@ mod tests {
         std::env::remove_var("MDMDVIEW_MERMAID_RENDERER");
         let (default_pref, explicit) = MermaidRenderer::mermaid_renderer_preference();
         assert!(!explicit);
-        let expected = if cfg!(feature = "mermaid-quickjs") {
-            MermaidRenderPreference::Embedded
-        } else {
-            MermaidRenderPreference::Off
-        };
-        assert_eq!(default_pref, expected);
+        #[cfg(feature = "mermaid-quickjs")]
+        assert_eq!(default_pref, MermaidRenderPreference::Embedded);
+        #[cfg(not(feature = "mermaid-quickjs"))]
+        assert_eq!(default_pref, MermaidRenderPreference::Off);
 
         {
             let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "embedded");
@@ -5133,7 +5394,10 @@ mod tests {
             let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "bogus");
             let (pref, explicit) = MermaidRenderer::mermaid_renderer_preference();
             assert!(!explicit);
-            assert_eq!(pref, expected);
+            #[cfg(feature = "mermaid-quickjs")]
+            assert_eq!(pref, MermaidRenderPreference::Embedded);
+            #[cfg(not(feature = "mermaid-quickjs"))]
+            assert_eq!(pref, MermaidRenderPreference::Off);
         }
     }
 
@@ -5387,9 +5651,7 @@ mod tests {
     #[test]
     fn test_mermaid_js_empty_override_lock_busy() {
         let _lock = env_lock();
-        let guard = MERMAID_JS_EMPTY_OVERRIDE
-            .try_lock()
-            .expect("override lock");
+        let guard = MERMAID_JS_EMPTY_OVERRIDE.try_lock().expect("override lock");
         assert_eq!(mermaid_js_empty(), MERMAID_JS_EMPTY);
         drop(guard);
     }
@@ -5441,8 +5703,7 @@ mod tests {
             .expect("ok result");
         assert!(ok.contains("<svg"));
 
-        let err = MermaidWorker::format_render_result(Err("boom".to_string()), 10, 5)
-            .unwrap_err();
+        let err = MermaidWorker::format_render_result(Err("boom".to_string()), 10, 5).unwrap_err();
         assert!(err.contains("Mermaid render error: boom"));
 
         let timeout =
@@ -5627,17 +5888,32 @@ mod tests {
         assert!(!MermaidWorker::bbox_is_valid(f32::NAN, 10.0, 0.0, 0.0));
         assert!(!MermaidWorker::bbox_is_valid(10.0, f32::INFINITY, 0.0, 0.0));
         assert!(!MermaidWorker::bbox_is_valid(10.0, 10.0, f32::NAN, 0.0));
-        assert!(!MermaidWorker::bbox_is_valid(10.0, 10.0, 0.0, f32::INFINITY));
+        assert!(!MermaidWorker::bbox_is_valid(
+            10.0,
+            10.0,
+            0.0,
+            f32::INFINITY
+        ));
     }
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_should_resize_bbox_variants() {
-        assert!(MermaidWorker::should_resize_bbox(true, true, 1.0, 1.0, 10.0, 10.0));
-        assert!(!MermaidWorker::should_resize_bbox(true, false, 50.0, 50.0, 10.0, 10.0));
-        assert!(MermaidWorker::should_resize_bbox(false, true, 20.0, 5.0, 10.0, 10.0));
-        assert!(!MermaidWorker::should_resize_bbox(false, true, 11.0, 11.0, 10.0, 10.0));
-        assert!(!MermaidWorker::should_resize_bbox(false, false, 50.0, 50.0, 10.0, 10.0));
+        assert!(MermaidWorker::should_resize_bbox(
+            true, true, 1.0, 1.0, 10.0, 10.0
+        ));
+        assert!(!MermaidWorker::should_resize_bbox(
+            true, false, 50.0, 50.0, 10.0, 10.0
+        ));
+        assert!(MermaidWorker::should_resize_bbox(
+            false, true, 20.0, 5.0, 10.0, 10.0
+        ));
+        assert!(!MermaidWorker::should_resize_bbox(
+            false, true, 11.0, 11.0, 10.0, 10.0
+        ));
+        assert!(!MermaidWorker::should_resize_bbox(
+            false, false, 50.0, 50.0, 10.0, 10.0
+        ));
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -5816,7 +6092,11 @@ mod tests {
         MermaidWorker::maybe_dump_svg(13, Some("\nrest"), "<svg></svg>");
         MermaidWorker::maybe_dump_error(14, Some("dash-label"), "dash");
         MermaidWorker::maybe_dump_error(14, Some("abcdefghijklmnopqrstuvwxyz0123456789"), "long");
-        MermaidWorker::maybe_dump_svg(16, Some("abcdefghijklmnopqrstuvwxyz0123456789"), "<svg></svg>");
+        MermaidWorker::maybe_dump_svg(
+            16,
+            Some("abcdefghijklmnopqrstuvwxyz0123456789"),
+            "<svg></svg>",
+        );
         MermaidWorker::maybe_dump_svg(16, Some("under_score"), "<svg></svg>");
         MermaidWorker::maybe_dump_error(15, None, "no code");
         MermaidWorker::maybe_dump_svg(17, None, "<svg></svg>");
@@ -5828,8 +6108,12 @@ mod tests {
             .expect("read dir")
             .filter_map(|entry| entry.ok())
             .collect();
-        assert!(entries.iter().any(|entry| entry.path().extension() == Some("svg".as_ref())));
-        assert!(entries.iter().any(|entry| entry.path().extension() == Some("txt".as_ref())));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.path().extension() == Some("svg".as_ref())));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.path().extension() == Some("txt".as_ref())));
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -5837,6 +6121,8 @@ mod tests {
     fn test_mermaid_dump_helpers_empty_dir_env_noop() {
         let _lock = env_lock();
         let dir = tempdir().expect("temp dir");
+        let seed_path = dir.path().join("seed.txt");
+        std::fs::write(&seed_path, "seed").expect("seed write");
         let _guard = EnvGuard::set("MDMDVIEW_MERMAID_DUMP_DIR", "   ");
         MermaidWorker::maybe_dump_svg(20, Some("label"), "<svg></svg>");
         MermaidWorker::maybe_dump_error(21, Some("label"), "err");
@@ -5844,7 +6130,8 @@ mod tests {
             .expect("read dir")
             .filter_map(|entry| entry.ok())
             .collect();
-        assert!(entries.is_empty());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path(), seed_path);
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -6120,7 +6407,7 @@ mod tests {
             let mut guard = MERMAID_JS_EMPTY_OVERRIDE
                 .lock()
                 .expect("mermaid js override lock");
-            *guard = self.previous.clone();
+            *guard = self.previous;
         }
     }
 
@@ -6136,6 +6423,13 @@ mod tests {
             Some([17, 34, 51, 68])
         );
         assert!(MermaidRenderer::parse_hex_color("bad").is_none());
+        assert!(MermaidRenderer::parse_hex_color("GG0000").is_none());
+        assert!(MermaidRenderer::parse_hex_color("00GG00").is_none());
+        assert!(MermaidRenderer::parse_hex_color("0000GG").is_none());
+        assert!(MermaidRenderer::parse_hex_color("GG000000").is_none());
+        assert!(MermaidRenderer::parse_hex_color("00GG0000").is_none());
+        assert!(MermaidRenderer::parse_hex_color("0000GG00").is_none());
+        assert!(MermaidRenderer::parse_hex_color("000000GG").is_none());
 
         {
             let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG_COLOR", "#010203");
@@ -6566,8 +6860,7 @@ mod tests {
         let mut rendered_second = false;
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let rect =
-                    egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 80.0));
+                let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 80.0));
                 ui.allocate_ui_at_rect(rect, |ui| {
                     rendered_first = renderer.render_block(ui, code, 1.0, 14.0);
                     rendered_second = renderer.render_block(ui, code, 1.0, 14.0);
@@ -6720,7 +7013,8 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_fix_state_end_circles_missing_parts_noop() {
-        let missing_start = r#"<svg><g id="state-root_end-0"><circle class="state-end" r="5"></circle></g></svg>"#;
+        let missing_start =
+            r#"<svg><g id="state-root_end-0"><circle class="state-end" r="5"></circle></g></svg>"#;
         assert!(MermaidWorker::fix_state_end_circles(missing_start).is_none());
 
         let missing_r = r#"<svg><g id="state-root_end-0"><circle class="state-end"></circle><circle class="state-start" r="7"></circle></g></svg>"#;
@@ -6728,6 +7022,23 @@ mod tests {
 
         let non_numeric = r#"<svg><g id="state-root_end-0"><circle class="state-end" r="x"></circle><circle class="state-start" r="7"></circle></g></svg>"#;
         assert!(MermaidWorker::fix_state_end_circles(non_numeric).is_none());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_find_circle_tag_missing_parts_returns_none() {
+        let missing_circle = r#"<g class="state-end"></g>"#;
+        assert!(MermaidWorker::find_circle_tag(missing_circle, "state-end").is_none());
+
+        let missing_end = r#"<circle class="state-end""#;
+        assert!(MermaidWorker::find_circle_tag(missing_end, "state-end").is_none());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_read_r_value_missing_quote_returns_none() {
+        let tag = r#"<circle r="10"#;
+        assert!(MermaidWorker::read_r_value(tag).is_none());
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -6753,8 +7064,7 @@ mod tests {
     #[test]
     fn test_flatten_svg_switches_removes_foreignobject() {
         let input = r#"<svg><switch><foreignObject><div>Plan</div></foreignObject><text>Plan</text></switch></svg>"#;
-        let output =
-            MermaidWorker::flatten_svg_switches(input).expect("switch flattened");
+        let output = MermaidWorker::flatten_svg_switches(input).expect("switch flattened");
         assert!(!output.contains("<switch"));
         assert!(!output.contains("foreignObject"));
         assert!(output.contains("<text>Plan</text>"));
@@ -6770,8 +7080,7 @@ mod tests {
     #[test]
     fn test_fix_er_attribute_fills_inlines_colors() {
         let input = r#"<svg><rect class="er attributeBoxOdd"></rect><rect class="er attributeBoxEven"></rect></svg>"#;
-        let output =
-            MermaidWorker::fix_er_attribute_fills(input).expect("er fills updated");
+        let output = MermaidWorker::fix_er_attribute_fills(input).expect("er fills updated");
         assert!(output.contains("attributeBoxOdd\" fill=\"#ffffff\""));
         assert!(output.contains("attributeBoxEven\" fill=\"#f2f2f2\""));
     }
@@ -6780,17 +7089,16 @@ mod tests {
     #[test]
     fn test_fix_er_attribute_fills_handles_even_only() {
         let input = r#"<svg><rect class="er attributeBoxEven"></rect></svg>"#;
-        let output =
-            MermaidWorker::fix_er_attribute_fills(input).expect("er fills updated");
+        let output = MermaidWorker::fix_er_attribute_fills(input).expect("er fills updated");
         assert!(output.contains("attributeBoxEven\" fill=\"#f2f2f2\""));
     }
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_fix_er_attribute_fills_skips_unmatched_rects() {
-        let input = r#"<svg><rect class="er attributeBoxOdd"></rect><rect class="er"></rect></svg>"#;
-        let output =
-            MermaidWorker::fix_er_attribute_fills(input).expect("er fills updated");
+        let input =
+            r#"<svg><rect class="er attributeBoxOdd"></rect><rect class="er"></rect></svg>"#;
+        let output = MermaidWorker::fix_er_attribute_fills(input).expect("er fills updated");
         assert!(output.contains("attributeBoxOdd\" fill=\"#ffffff\""));
         assert!(output.contains("class=\"er\"></rect>"));
     }
@@ -6856,7 +7164,8 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_patch_mermaid_js_applies_mindmap_layout_fallback() {
-        let js = "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run()";
+        let js =
+            "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run()";
         let output = MermaidWorker::patch_mermaid_js(js);
         assert!(output.contains("breadthfirst"));
     }
@@ -6878,7 +7187,8 @@ mod tests {
         let _guard = EnvGuard::set("MDMDVIEW_MERMAID_PATCH_DEBUG", "1");
         let previous = std::env::var("MDMDVIEW_MERMAID_PATCH_DEBUG").ok();
         std::env::remove_var("MDMDVIEW_MERMAID_PATCH_DEBUG");
-        let js = "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run()";
+        let js =
+            "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run()";
         let output = MermaidWorker::patch_mermaid_js(js);
         assert!(output.contains("breadthfirst"));
         restore_env_var("MDMDVIEW_MERMAID_PATCH_DEBUG", previous);
@@ -6890,7 +7200,8 @@ mod tests {
         let _lock = env_lock();
         std::env::remove_var("MDMDVIEW_MERMAID_PATCH_DEBUG");
         let previous = std::env::var("MDMDVIEW_MERMAID_PATCH_DEBUG").ok();
-        let js = "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run()";
+        let js =
+            "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run()";
         let output = MermaidWorker::patch_mermaid_js(js);
         assert!(output.contains("breadthfirst"));
         restore_env_var("MDMDVIEW_MERMAID_PATCH_DEBUG", previous);
@@ -6930,7 +7241,8 @@ mod tests {
     fn test_patch_mermaid_js_debug_paths_with_layout_only() {
         let _lock = env_lock();
         let _guard = EnvGuard::set("MDMDVIEW_MERMAID_PATCH_DEBUG", "1");
-        let js = "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run()";
+        let js =
+            "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run()";
         let output = MermaidWorker::patch_mermaid_js(js);
         assert!(output.contains("breadthfirst"));
     }
@@ -7025,13 +7337,19 @@ mod tests {
     #[test]
     fn test_remove_svg_attr_preserves_spacing_without_double_space() {
         let tag = r#"<svg width="10"height="20">"#;
-        assert_eq!(MermaidWorker::remove_svg_attr(tag, "width"), "<svg height=\"20\">");
+        assert_eq!(
+            MermaidWorker::remove_svg_attr(tag, "width"),
+            "<svg height=\"20\">"
+        );
     }
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_parse_viewbox_dims_and_format_dim() {
-        assert_eq!(MermaidWorker::parse_viewbox_dims("0 0 100 200"), Some((100.0, 200.0)));
+        assert_eq!(
+            MermaidWorker::parse_viewbox_dims("0 0 100 200"),
+            Some((100.0, 200.0))
+        );
         assert_eq!(
             MermaidWorker::parse_viewbox_dims("0,0,100,200"),
             Some((100.0, 200.0))
@@ -7049,6 +7367,21 @@ mod tests {
         let nan = MermaidWorker::format_dim(f32::NAN);
         assert!(!nan.contains('.'));
         assert!(nan.to_lowercase().contains("nan"));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_find_svg_attr_missing_quote_returns_none() {
+        let tag = r#"<svg viewBox="0 0 10 10"#;
+        assert!(MermaidWorker::find_svg_attr(tag, "viewBox").is_none());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_strip_svg_attr_missing_tag_returns_none() {
+        assert!(MermaidWorker::strip_svg_attr("no svg here", "width").is_none());
+        let missing_end = r#"<svg width="10""#;
+        assert!(MermaidWorker::strip_svg_attr(missing_end, "width").is_none());
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -7079,6 +7412,18 @@ mod tests {
         fontdb.load_system_fonts();
         let measurer = TextMeasurer::new(Arc::new(fontdb));
         let (width, height) = measurer.measure_text("\u{10FFFF}", 16.0, None);
+        assert!(width > 0.0);
+        assert!(height > 0.0);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_text_measurer_forced_face_parse_error_falls_back() {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        let measurer = TextMeasurer::new(Arc::new(fontdb));
+        force_mermaid_face_parse_error_once();
+        let (width, height) = measurer.measure_text("abc", 16.0, None);
         assert!(width > 0.0);
         assert!(height > 0.0);
     }
@@ -7146,6 +7491,291 @@ mod tests {
         assert_eq!(
             MermaidWorker::scale_adjustment_for_svg("<svg aria-roledescription='er'></svg>"),
             0.94
+        );
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_enqueue_mermaid_job_disconnected() {
+        let (job_tx, job_rx) = bounded(1);
+        drop(job_rx);
+        let (_result_tx, result_rx) = bounded(1);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+        let request = MermaidRequest {
+            svg_key: 1,
+            texture_key: "t".to_string(),
+            code: Some("graph TD; A-->B;".to_string()),
+            svg: None,
+            width_bucket: 120,
+            scale_bucket: 100,
+            viewport_width: 120,
+            viewport_height: 120,
+            bg: None,
+        };
+        assert_eq!(
+            renderer.enqueue_mermaid_job(request),
+            Err(MermaidEnqueueError::Disconnected)
+        );
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_render_block_enqueues_cached_svg() {
+        let _lock = env_lock();
+        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "embedded");
+        let (job_tx, job_rx) = bounded(1);
+        let (_result_tx, result_rx) = bounded(1);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+        let code = "graph TD; A-->B;";
+        let svg_key = MermaidRenderer::hash_str(code);
+        renderer
+            .mermaid_svg_cache
+            .borrow_mut()
+            .insert(svg_key, "<svg></svg>".to_string());
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(240.0, 120.0),
+            )),
+            ..Default::default()
+        };
+        let mut rendered = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rendered = renderer.render_block(ui, code, 1.0, 14.0);
+            });
+        });
+        assert!(rendered);
+        let request = job_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("request");
+        assert!(request.svg.is_some());
+        assert!(request.code.is_none());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_spawn_mermaid_workers_reports_init_error() {
+        let _lock = env_lock();
+        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_WORKERS", "1");
+        force_mermaid_worker_init_error_once();
+        let (job_tx, job_rx) = bounded(1);
+        let (result_tx, result_rx) = bounded(1);
+        let handles = MermaidRenderer::spawn_mermaid_workers(job_rx, result_tx);
+        let request = MermaidRequest {
+            svg_key: 2,
+            texture_key: "t".to_string(),
+            code: Some("graph TD; A-->B;".to_string()),
+            svg: None,
+            width_bucket: 120,
+            scale_bucket: 100,
+            viewport_width: 120,
+            viewport_height: 120,
+            bg: None,
+        };
+        job_tx.send(request).expect("send");
+        let result = result_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("result");
+        assert!(result.error.is_some());
+        drop(job_tx);
+        for handle in handles {
+            let _ = handle.join();
+        }
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_spawn_mermaid_workers_reports_spawn_error() {
+        let _lock = env_lock();
+        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_WORKERS", "1");
+        force_mermaid_thread_spawn_error_once();
+        let (_job_tx, job_rx) = bounded(1);
+        let (result_tx, _result_rx) = bounded(1);
+        let handles = MermaidRenderer::spawn_mermaid_workers(job_rx, result_tx);
+        assert!(handles.is_empty());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_worker_init_error_stages() {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        let fontdb = Arc::new(fontdb);
+
+        force_mermaid_init_error_once(1);
+        let err = MermaidWorker::new(0, Arc::clone(&fontdb))
+            .err()
+            .expect("stage 1 err");
+        assert!(err.contains("Mermaid text measure init error"));
+
+        force_mermaid_init_error_once(2);
+        let err = MermaidWorker::new(0, Arc::clone(&fontdb))
+            .err()
+            .expect("stage 2 err");
+        assert!(err.contains("Mermaid text measure init error"));
+
+        force_mermaid_init_error_once(3);
+        let err = MermaidWorker::new(0, fontdb).err().expect("stage 3 err");
+        assert!(err.contains("Mermaid DOM shim"));
+
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        let fontdb = Arc::new(fontdb);
+        force_mermaid_init_error_once(4);
+        let err = MermaidWorker::new(0, Arc::clone(&fontdb))
+            .err()
+            .expect("stage 4 err");
+        assert!(err.contains("Mermaid JS"));
+
+        force_mermaid_init_error_once(5);
+        let err = MermaidWorker::new(0, fontdb).err().expect("stage 5 err");
+        assert!(err.contains("Mermaid init"));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_worker_new_runtime_error_forced() {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        let fontdb = Arc::new(fontdb);
+        force_mermaid_runtime_error_once();
+        let err = MermaidWorker::new(0, Arc::clone(&fontdb))
+            .err()
+            .expect("runtime err");
+        assert!(err.contains("Mermaid runtime init error"));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_runtime_flag_mismatch_restores() {
+        let handle = std::thread::spawn(|| {
+            force_mermaid_runtime_error_once();
+        });
+        handle.join().expect("flag thread");
+
+        let _ = runtime_new_for_test().expect("runtime ok");
+
+        let mut guard = FORCE_MERMAID_RUNTIME_ERROR
+            .lock()
+            .expect("mermaid runtime flag lock");
+        *guard = None;
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_worker_new_context_error_forced() {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        let fontdb = Arc::new(fontdb);
+        force_mermaid_context_error_once();
+        let err = MermaidWorker::new(0, Arc::clone(&fontdb))
+            .err()
+            .expect("context err");
+        assert!(err.contains("Mermaid context init error"));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_worker_new_utf8_error_forced() {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        let fontdb = Arc::new(fontdb);
+        force_mermaid_utf8_error_once();
+        let err = MermaidWorker::new(0, Arc::clone(&fontdb))
+            .err()
+            .expect("utf8 err");
+        assert!(err.contains("Mermaid JS is not valid UTF-8"));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_render_svg_forced_eval_error() {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        let fontdb = Arc::new(fontdb);
+        let mut worker = MermaidWorker::new(0, Arc::clone(&fontdb)).expect("worker init");
+        force_mermaid_render_eval_error_once();
+        let err = worker
+            .render_svg(1, "graph TD; A-->B;", 480, 320)
+            .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_render_svg_forced_call_error() {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        let fontdb = Arc::new(fontdb);
+        let mut worker = MermaidWorker::new(0, Arc::clone(&fontdb)).expect("worker init");
+        force_mermaid_render_call_error_once();
+        let err = worker
+            .render_svg(2, "graph TD; A-->B;", 480, 320)
+            .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_parse_raw_svg_tree_invalid_svg_returns_error() {
+        let options = usvg::Options::default();
+        let err = MermaidWorker::parse_raw_svg_tree("<svg", &options).unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_rasterize_svg_forced_pixmap_alloc_error() {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        let fontdb = Arc::new(fontdb);
+        let worker = MermaidWorker::new(0, Arc::clone(&fontdb)).expect("worker init");
+        force_mermaid_pixmap_alloc_fail_once();
+        let err = worker
+            .rasterize_svg(
+                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><rect width=\"10\" height=\"10\"/></svg>",
+                0,
+                100,
+                None,
+            )
+            .unwrap_err();
+        assert!(err.contains("Pixmap alloc failed"));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_svg_helper_early_returns() {
+        assert_eq!(MermaidWorker::normalize_svg_size("<svg"), "<svg");
+        assert_eq!(
+            MermaidWorker::normalize_svg_size("<svg viewBox=\"bad\">"),
+            "<svg viewBox=\"bad\">"
+        );
+        assert_eq!(
+            MermaidWorker::replace_attr("<svg width=\"100", "width", "200"),
+            "<svg width=\"100"
+        );
+        assert_eq!(
+            MermaidWorker::upsert_attr("<svg width=\"100\"", "height", "200"),
+            "<svg width=\"100\""
+        );
+        assert!(MermaidWorker::flatten_svg_switches("<switch").is_none());
+        assert!(MermaidWorker::fix_journey_section_text("<text journey-section", "#fff").is_none());
+        assert!(MermaidWorker::fix_state_end_circles("<svg><g class=\"state-end\"").is_none());
+        assert!(MermaidWorker::fix_state_end_circles("<svg><g class=\"state-end\"></g").is_none());
+        assert!(MermaidWorker::fix_er_attribute_fills("<rect class=\"attributeBoxOdd\"").is_none());
+        assert_eq!(
+            MermaidWorker::replace_svg_attr("<svg>", "width", "1"),
+            "<svg>"
+        );
+        assert_eq!(
+            MermaidWorker::replace_svg_attr("<svg width=\"100>", "width", "1"),
+            "<svg width=\"100>"
+        );
+        assert_eq!(
+            MermaidWorker::insert_svg_attr("no svg", "width", "1"),
+            "no svg"
         );
     }
 }
