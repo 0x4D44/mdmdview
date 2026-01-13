@@ -136,6 +136,25 @@ mdmdview "C:\path\to\my document.md"
 mdmdview ../README.md
 ```
 
+### Screenshot Mode (PNG)
+
+Render a markdown file directly to an image:
+
+```bash
+mdmdview --screenshot document.md --output out.png
+```
+
+Optional flags:
+
+- `--width <px>` / `--height <px>`: viewport size (default 1280x720 in screenshot mode)
+- `--theme light|dark`: override theme for render
+- `--zoom <scale>`: scale factor (e.g., `1.25`)
+- `--content-only`: hide window chrome in the capture
+- `--scroll <ratio>`: scroll ratio from 0.0 (top) to 1.0 (bottom)
+- `--wait-ms <ms>`: delay before capture to allow assets to load
+- `--settle-frames <n>`: extra frames to wait for layout stability
+- `--test-fonts <dir>`: load fonts from a directory (QA/automation use)
+
 ### Windows Shell Integration
 
 Associate mdmdview with `.md` files for double-click opening:
@@ -419,16 +438,16 @@ python tools/regression/runner.py run
 
 ```bash
 # Format code (required before commits)
-cargo fmt
+cargo fmt --all
 
 # Lint with Clippy (zero warnings policy)
-cargo clippy
+cargo clippy --all-targets -- -D warnings
 
 # Check compilation without building
 cargo check
 
 # Run all quality checks
-cargo fmt && cargo clippy && cargo test
+cargo fmt --all && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
 ### Release Process
