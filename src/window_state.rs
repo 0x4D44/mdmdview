@@ -461,6 +461,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn test_load_window_state_prefers_registry_when_forced() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
@@ -480,6 +481,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn test_save_window_state_registry_error_still_writes_file() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
