@@ -286,6 +286,31 @@ mod tests {
         }
     }
 
+    /// Helper to set platform-appropriate config env var and return expected config subdir.
+    /// On Windows: sets APPDATA, returns "MarkdownView"
+    /// On macOS: sets HOME, returns "Library/Application Support/MarkdownView"
+    /// On Linux: sets XDG_CONFIG_HOME, returns "mdmdview"
+    fn set_config_env(temp_path: &std::path::Path) -> (EnvGuard, PathBuf) {
+        #[cfg(target_os = "windows")]
+        {
+            let guard = EnvGuard::set("APPDATA", temp_path.to_string_lossy().as_ref());
+            let subdir = temp_path.join("MarkdownView");
+            (guard, subdir)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let guard = EnvGuard::set("HOME", temp_path.to_string_lossy().as_ref());
+            let subdir = temp_path.join("Library/Application Support/MarkdownView");
+            (guard, subdir)
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            let guard = EnvGuard::set("XDG_CONFIG_HOME", temp_path.to_string_lossy().as_ref());
+            let subdir = temp_path.join("mdmdview");
+            (guard, subdir)
+        }
+    }
+
     #[test]
     fn test_sanitize_window_state_clamps_and_rejects_invalid() {
         let invalid = WindowState {
@@ -336,7 +361,7 @@ mod tests {
     fn test_save_and_load_window_state_from_file() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
-        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+        let (_guard, _config_dir) = set_config_env(temp.path());
 
         let state = WindowState {
             pos: [120.0, 80.0],
@@ -355,9 +380,8 @@ mod tests {
     fn test_save_window_state_creates_dir_and_writes_file() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
-        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+        let (_guard, config_dir) = set_config_env(temp.path());
 
-        let config_dir = temp.path().join("MarkdownView");
         let _ = fs::remove_dir_all(&config_dir);
 
         let state = WindowState {
@@ -411,9 +435,8 @@ mod tests {
     fn test_save_window_state_errors_when_state_path_is_dir() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
-        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+        let (_guard, config_dir) = set_config_env(temp.path());
 
-        let config_dir = temp.path().join("MarkdownView");
         fs::create_dir_all(&config_dir).expect("create config dir");
         let state_dir = config_dir.join("window_state.txt");
         fs::create_dir_all(&state_dir).expect("create state dir");
@@ -430,7 +453,7 @@ mod tests {
     fn test_save_window_state_forced_write_error_propagates() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
-        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+        let (_guard, _config_dir) = set_config_env(temp.path());
 
         force_file_write_error_once();
         let state = WindowState {
@@ -446,8 +469,7 @@ mod tests {
     fn test_save_window_state_when_dir_exists() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
-        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
-        let config_dir = temp.path().join("MarkdownView");
+        let (_guard, config_dir) = set_config_env(temp.path());
         fs::create_dir_all(&config_dir).expect("create config dir");
 
         let state = WindowState {
@@ -503,11 +525,10 @@ mod tests {
     fn test_load_window_state_rejects_bad_file() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
-        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+        let (_guard, config_dir) = set_config_env(temp.path());
 
-        let mut config = temp.path().join("MarkdownView");
-        std::fs::create_dir_all(&config).expect("create config dir");
-        config.push("window_state.txt");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        let config = config_dir.join("window_state.txt");
         std::fs::write(&config, "10 20 30").expect("write bad data");
 
         assert!(load_window_state().is_none());
@@ -517,11 +538,10 @@ mod tests {
     fn test_load_window_state_rejects_invalid_numbers() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
-        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+        let (_guard, config_dir) = set_config_env(temp.path());
 
-        let mut config = temp.path().join("MarkdownView");
-        std::fs::create_dir_all(&config).expect("create config dir");
-        config.push("window_state.txt");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        let config = config_dir.join("window_state.txt");
         std::fs::write(&config, "x y 10 20 true").expect("write bad data");
 
         assert!(load_window_state().is_none());
@@ -531,11 +551,10 @@ mod tests {
     fn test_load_window_state_rejects_invalid_components() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
-        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+        let (_guard, config_dir) = set_config_env(temp.path());
 
-        let mut config = temp.path().join("MarkdownView");
-        std::fs::create_dir_all(&config).expect("create config dir");
-        config.push("window_state.txt");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        let config = config_dir.join("window_state.txt");
 
         std::fs::write(&config, "10 y 30 40 1").expect("write bad data");
         assert!(load_window_state().is_none());
@@ -551,11 +570,10 @@ mod tests {
     fn test_load_window_state_rejects_invalid_utf8() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
-        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+        let (_guard, config_dir) = set_config_env(temp.path());
 
-        let mut config = temp.path().join("MarkdownView");
-        std::fs::create_dir_all(&config).expect("create config dir");
-        config.push("window_state.txt");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        let config = config_dir.join("window_state.txt");
         std::fs::write(&config, [0xFF, 0xFE, 0xFD]).expect("write bad data");
 
         assert!(load_window_state().is_none());
@@ -565,11 +583,10 @@ mod tests {
     fn test_load_window_state_parses_maximized_true() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
-        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+        let (_guard, config_dir) = set_config_env(temp.path());
 
-        let mut config = temp.path().join("MarkdownView");
-        std::fs::create_dir_all(&config).expect("create config dir");
-        config.push("window_state.txt");
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        let config = config_dir.join("window_state.txt");
         std::fs::write(&config, "10 20 300 400 true").expect("write data");
 
         let loaded = load_window_state().expect("load");
@@ -580,7 +597,7 @@ mod tests {
     fn test_load_window_state_returns_none_when_missing() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
-        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+        let (_guard, _config_dir) = set_config_env(temp.path());
 
         assert!(load_window_state().is_none());
     }
