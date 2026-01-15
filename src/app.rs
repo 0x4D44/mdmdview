@@ -5944,7 +5944,8 @@ The end.
     #[test]
     fn test_handle_shortcuts_ctrl_save_error() {
         let mut app = MarkdownViewerApp::new();
-        app.current_file = Some(PathBuf::from("missing_dir\\save.md"));
+        // Use a path that doesn't exist on any platform
+        app.current_file = Some(PathBuf::from("/nonexistent/dir/save.md"));
         app.current_content = "Data".to_string();
 
         let mut input = default_input();
@@ -6863,7 +6864,8 @@ The end.
     #[test]
     fn test_render_file_menu_save_error_sets_message() {
         let mut app = MarkdownViewerApp::new();
-        app.current_file = Some(PathBuf::from("missing_dir\\save.md"));
+        // Use a path that doesn't exist on any platform
+        app.current_file = Some(PathBuf::from("/nonexistent/dir/save.md"));
         app.current_content = "Data".to_string();
         let _actions = ForcedAppActions::new(&["menu_save"]);
 
@@ -6995,7 +6997,7 @@ The end.
     fn test_update_impl_persists_window_state_when_due() {
         let _lock = env_lock();
         let temp_dir = TempDir::new().expect("temp dir");
-        let (_guard, _config_dir) = set_config_env(temp_dir.path());
+        let (_guard, config_dir) = set_config_env(temp_dir.path());
 
         let mut app = MarkdownViewerApp::new();
         app.last_persist_instant = std::time::Instant::now() - std::time::Duration::from_secs(2);
@@ -7020,10 +7022,7 @@ The end.
 
         run_app_frame(&mut app, &ctx, input);
 
-        let path = temp_dir
-            .path()
-            .join("MarkdownView")
-            .join("window_state.txt");
+        let path = config_dir.join("window_state.txt");
         assert!(path.exists());
         assert!(app.last_persisted_state.is_some());
     }
