@@ -1,5 +1,4 @@
 /// Build script for Windows metadata and icon resources
-use std::env;
 fn main() {
     let build_timestamp = build_timestamp_string();
     println!(
@@ -11,6 +10,7 @@ fn main() {
     // Only build Windows resources on Windows
     #[cfg(windows)]
     {
+        use std::env;
         let mut res = winres::WindowsResource::new();
 
         let pkg_name = env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "mdmdview".to_string());
@@ -99,6 +99,7 @@ fn generate_mermaid_js() {
     println!("cargo:rerun-if-changed=assets/vendor/mermaid.min.js");
 }
 
+#[cfg(any(windows, test))]
 fn parse_version_components(version: &str) -> (u16, u16, u16, u16) {
     let parts: Vec<u16> = version
         .split(['.', '-'])
@@ -112,6 +113,7 @@ fn parse_version_components(version: &str) -> (u16, u16, u16, u16) {
     )
 }
 
+#[cfg(any(windows, test))]
 fn encode_windows_version(major: u16, minor: u16, patch: u16, build: u16) -> u64 {
     ((major as u64) << 48) | ((minor as u64) << 32) | ((patch as u64) << 16) | (build as u64)
 }
@@ -144,6 +146,7 @@ fn powershell_iso_timestamp() -> Option<String> {
     Some(s.trim().to_string())
 }
 
+#[cfg(any(windows, test))]
 fn first_author(authors: &str) -> String {
     authors
         .split(';')
@@ -166,6 +169,7 @@ fn first_author(authors: &str) -> String {
         .unwrap_or_else(|| "Unknown".to_string())
 }
 
+#[cfg(any(windows, test))]
 fn extract_year(timestamp: &str) -> Option<String> {
     let digits: String = timestamp
         .chars()
