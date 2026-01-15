@@ -2867,6 +2867,28 @@ mod tests {
         }
     }
 
+    /// Helper to set platform-appropriate config env var and return expected config subdir.
+    fn set_config_env(temp_path: &std::path::Path) -> (EnvGuard, std::path::PathBuf) {
+        #[cfg(target_os = "windows")]
+        {
+            let guard = EnvGuard::set("APPDATA", temp_path.to_string_lossy().as_ref());
+            let subdir = temp_path.join("MarkdownView");
+            (guard, subdir)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let guard = EnvGuard::set("HOME", temp_path.to_string_lossy().as_ref());
+            let subdir = temp_path.join("Library/Application Support/MarkdownView");
+            (guard, subdir)
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            let guard = EnvGuard::set("XDG_CONFIG_HOME", temp_path.to_string_lossy().as_ref());
+            let subdir = temp_path.join("mdmdview");
+            (guard, subdir)
+        }
+    }
+
     #[derive(Default)]
     struct DummyStorage;
 
@@ -4466,7 +4488,7 @@ The end.
     fn test_save_persists_window_state_when_no_screenshot() {
         let _lock = env_lock();
         let temp_dir = TempDir::new().expect("temp dir");
-        let _guard = EnvGuard::set("APPDATA", temp_dir.path().to_string_lossy().as_ref());
+        let (_guard, config_dir) = set_config_env(temp_dir.path());
 
         let mut app = MarkdownViewerApp::new();
         app.last_window_pos = Some([10.0, 20.0]);
@@ -4474,10 +4496,7 @@ The end.
         let mut storage = DummyStorage;
         app.save(&mut storage);
 
-        let path = temp_dir
-            .path()
-            .join("MarkdownView")
-            .join("window_state.txt");
+        let path = config_dir.join("window_state.txt");
         assert!(path.exists());
     }
 
@@ -4485,7 +4504,7 @@ The end.
     fn test_save_skips_persist_when_screenshot_active() {
         let _lock = env_lock();
         let temp_dir = TempDir::new().expect("temp dir");
-        let _guard = EnvGuard::set("APPDATA", temp_dir.path().to_string_lossy().as_ref());
+        let (_guard, _config_dir) = set_config_env(temp_dir.path());
 
         let mut app = MarkdownViewerApp::new();
         let config = ScreenshotConfig {
@@ -5617,7 +5636,7 @@ The end.
     fn test_persist_window_state_updates_cache() {
         let _lock = env_lock();
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
-        let _guard = EnvGuard::set("APPDATA", temp_dir.path().to_string_lossy().as_ref());
+        let (_guard, _config_dir) = set_config_env(temp_dir.path());
         let mut app = MarkdownViewerApp::new();
         app.last_window_pos = Some([10.0, 20.0]);
         app.last_window_size = Some([800.0, 600.0]);
@@ -6911,6 +6930,7 @@ The end.
     }
 
     #[test]
+    #[cfg(windows)]
     fn test_persist_window_state_save_failure() {
         let _lock = env_lock();
         let temp_file = NamedTempFile::new().expect("temp file");
@@ -6975,7 +6995,7 @@ The end.
     fn test_update_impl_persists_window_state_when_due() {
         let _lock = env_lock();
         let temp_dir = TempDir::new().expect("temp dir");
-        let _guard = EnvGuard::set("APPDATA", temp_dir.path().to_string_lossy().as_ref());
+        let (_guard, _config_dir) = set_config_env(temp_dir.path());
 
         let mut app = MarkdownViewerApp::new();
         app.last_persist_instant = std::time::Instant::now() - std::time::Duration::from_secs(2);
