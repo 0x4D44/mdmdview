@@ -430,6 +430,7 @@ impl ImageCache {
     }
 }
 
+#[derive(Clone)]
 struct ImageFailure {
     last_attempt: Instant,
 }
@@ -461,10 +462,10 @@ pub struct MarkdownRenderer {
     font_sizes: FontSizes,
     syntax_set: SyntaxSet,
     theme_set: ThemeSet,
-    emoji_textures: RefCell<HashMap<String, egui::TextureHandle>>,
+    emoji_textures: RefCell<LruCache<String, egui::TextureHandle>>,
     image_textures: RefCell<ImageCache>,
     image_pending: RefCell<HashSet<String>>,
-    image_failures: RefCell<HashMap<String, ImageFailure>>,
+    image_failures: RefCell<LruCache<String, ImageFailure>>,
     image_job_tx: Sender<ImageLoadRequest>,
     image_result_rx: Receiver<ImageLoadResult>,
     // Mapping of header id -> last rendered rect (for in-document navigation)
@@ -843,10 +844,10 @@ impl MarkdownRenderer {
             font_sizes: FontSizes::default(),
             syntax_set: SyntaxSet::load_defaults_newlines(),
             theme_set: ThemeSet::load_defaults(),
-            emoji_textures: RefCell::new(HashMap::new()),
+            emoji_textures: RefCell::new(LruCache::new(EMOJI_TEXTURE_CACHE_CAPACITY)),
             image_textures: RefCell::new(ImageCache::new(IMAGE_TEXTURE_CACHE_CAPACITY)),
             image_pending: RefCell::new(HashSet::new()),
-            image_failures: RefCell::new(HashMap::new()),
+            image_failures: RefCell::new(LruCache::new(IMAGE_FAILURE_CACHE_CAPACITY)),
             image_job_tx,
             image_result_rx,
             header_rects: RefCell::new(HashMap::new()),
@@ -3095,8 +3096,9 @@ impl MarkdownRenderer {
     }
 
     fn get_or_make_emoji_texture(&self, ui: &mut egui::Ui, emoji: &str) -> egui::TextureHandle {
-        if let Some(tex) = self.emoji_textures.borrow().get(emoji) {
-            return tex.clone();
+        let key = emoji.to_string();
+        if let Some(tex) = self.emoji_textures.borrow().get(&key) {
+            return tex;
         }
 
         let img = if let Some(bytes) = emoji_catalog::image_bytes_for(emoji) {
@@ -3137,9 +3139,7 @@ impl MarkdownRenderer {
             img,
             egui::TextureOptions::LINEAR,
         );
-        self.emoji_textures
-            .borrow_mut()
-            .insert(emoji.to_string(), handle.clone());
+        self.emoji_textures.borrow_mut().insert(key, handle.clone());
         handle
     }
 
@@ -5101,13 +5101,14 @@ impl MarkdownRenderer {
     }
 
     fn should_retry_image(&self, key: &str) -> bool {
+        let key_string = key.to_string();
         let mut failures = self.image_failures.borrow_mut();
-        if let Some(failure) = failures.get(key) {
+        if let Some(failure) = failures.get(&key_string) {
             if failure.last_attempt.elapsed() < IMAGE_FAILURE_BACKOFF {
                 return false;
             }
         }
-        failures.remove(key);
+        failures.remove(&key_string);
         true
     }
 
@@ -9575,7 +9576,7 @@ fn main() {}
             renderer.note_image_failure("missing.png");
             let loaded = renderer.get_or_load_image_texture(ui, "missing.png");
             assert!(loaded.is_none());
-            assert!(renderer.image_failures.borrow().contains_key("missing.png"));
+            assert!(renderer.image_failures.borrow().contains_key(&"missing.png".to_string()));
         });
     }
 
@@ -10163,7 +10164,7 @@ contexts:
             .expect("send");
         let ctx = egui::Context::default();
         renderer.poll_image_results(&ctx);
-        assert!(renderer.image_failures.borrow().contains_key("failed.png"));
+        assert!(renderer.image_failures.borrow().contains_key(&"failed.png".to_string()));
         assert!(!renderer.image_pending.borrow().contains("failed.png"));
     }
 
