@@ -750,6 +750,7 @@ impl MarkdownViewerApp {
                                  // Ensure scroll resets to top on new content
         self.pending_scroll_to_element = Some(0);
         self.renderer.clear_table_layout_cache();
+        self.renderer.clear_image_failure_cache();
 
         match self.renderer.parse(content) {
             Ok(elements) => {
