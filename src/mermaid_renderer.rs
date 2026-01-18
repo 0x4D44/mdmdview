@@ -382,6 +382,88 @@ where
     }
 }
 
+/// LRU cache for Mermaid SVG strings with both entry count and size limits.
+/// Prevents excessive memory usage from large SVG strings (Stage 9).
+#[cfg(feature = "mermaid-quickjs")]
+struct SvgCache {
+    entries: HashMap<u64, String>,
+    order: VecDeque<u64>,
+    capacity: usize,
+    max_bytes: usize,
+    current_bytes: usize,
+}
+
+#[cfg(feature = "mermaid-quickjs")]
+impl SvgCache {
+    fn new(capacity: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            capacity: capacity.max(1),
+            max_bytes,
+            current_bytes: 0,
+        }
+    }
+
+    fn get(&mut self, key: &u64) -> Option<String> {
+        let value = self.entries.get(key).cloned();
+        if value.is_some() {
+            self.touch(key);
+        }
+        value
+    }
+
+    fn insert(&mut self, key: u64, svg: String) {
+        let svg_bytes = svg.len();
+
+        // If key exists, update and adjust size tracking
+        if let Some(old_svg) = self.entries.get(&key) {
+            self.current_bytes = self.current_bytes.saturating_sub(old_svg.len());
+            self.entries.insert(key, svg);
+            self.current_bytes += svg_bytes;
+            self.touch(&key);
+            return;
+        }
+
+        // Evict if adding this SVG would exceed byte limit
+        while self.current_bytes + svg_bytes > self.max_bytes && !self.order.is_empty() {
+            self.evict_oldest();
+        }
+
+        // Also respect entry count limit
+        while self.entries.len() >= self.capacity && !self.order.is_empty() {
+            self.evict_oldest();
+        }
+
+        self.order.push_back(key);
+        self.entries.insert(key, svg);
+        self.current_bytes += svg_bytes;
+    }
+
+    fn evict_oldest(&mut self) {
+        if let Some(old_key) = self.order.pop_front() {
+            if let Some(old_svg) = self.entries.remove(&old_key) {
+                self.current_bytes = self.current_bytes.saturating_sub(old_svg.len());
+            }
+        }
+    }
+
+    fn touch(&mut self, key: &u64) {
+        self.order.retain(|k| k != key);
+        self.order.push_back(*key);
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    fn current_bytes(&self) -> usize {
+        self.current_bytes
+    }
+}
+
 #[cfg(feature = "mermaid-quickjs")]
 struct MermaidRequest {
     svg_key: u64,
@@ -446,7 +528,7 @@ pub(crate) struct MermaidRenderer {
     #[cfg(feature = "mermaid-quickjs")]
     mermaid_frame_pending: Cell<bool>,
     #[cfg(feature = "mermaid-quickjs")]
-    mermaid_svg_cache: RefCell<LruCache<u64, String>>,
+    mermaid_svg_cache: RefCell<SvgCache>,
     #[cfg(feature = "mermaid-quickjs")]
     mermaid_errors: RefCell<LruCache<u64, String>>,
     #[cfg(feature = "mermaid-quickjs")]
@@ -475,6 +557,10 @@ impl MermaidRenderer {
     const MAX_MERMAID_JOBS: usize = 4;
     #[cfg(feature = "mermaid-quickjs")]
     const MERMAID_SVG_CACHE_CAPACITY: usize = 64;
+    /// Maximum total bytes for SVG cache (100MB). Large SVGs (100KB-10MB each)
+    /// could use 640MB at 64 entries. Size limit ensures bounded memory usage.
+    #[cfg(feature = "mermaid-quickjs")]
+    const MERMAID_SVG_CACHE_MAX_BYTES: usize = 100 * 1024 * 1024;
     #[cfg(feature = "mermaid-quickjs")]
     const MERMAID_ERROR_CACHE_CAPACITY: usize = 64;
     #[cfg(feature = "mermaid-quickjs")]
@@ -507,7 +593,10 @@ impl MermaidRenderer {
             #[cfg(feature = "mermaid-quickjs")]
             mermaid_frame_pending: Cell::new(false),
             #[cfg(feature = "mermaid-quickjs")]
-            mermaid_svg_cache: RefCell::new(LruCache::new(Self::MERMAID_SVG_CACHE_CAPACITY)),
+            mermaid_svg_cache: RefCell::new(SvgCache::new(
+                Self::MERMAID_SVG_CACHE_CAPACITY,
+                Self::MERMAID_SVG_CACHE_MAX_BYTES,
+            )),
             #[cfg(feature = "mermaid-quickjs")]
             mermaid_errors: RefCell::new(LruCache::new(Self::MERMAID_ERROR_CACHE_CAPACITY)),
             #[cfg(feature = "mermaid-quickjs")]
@@ -5040,7 +5129,7 @@ mod tests {
             mermaid_textures: RefCell::new(LruCache::new(4)),
             mermaid_pending: RefCell::new(HashSet::new()),
             mermaid_frame_pending: Cell::new(false),
-            mermaid_svg_cache: RefCell::new(LruCache::new(4)),
+            mermaid_svg_cache: RefCell::new(SvgCache::new(4, 1024 * 1024)),
             mermaid_errors: RefCell::new(LruCache::new(4)),
             mermaid_texture_errors: RefCell::new(LruCache::new(4)),
             mermaid_job_tx: job_tx,
@@ -5269,6 +5358,94 @@ mod tests {
         texture_cache.entries.insert("c".to_string(), entry.clone());
         texture_cache.order.clear();
         texture_cache.insert("d".to_string(), entry);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_svg_cache_size_based_eviction() {
+        // Test that SvgCache evicts based on size, not just count
+        let mut cache = SvgCache::new(10, 100); // 10 entries max, 100 bytes max
+
+        // Insert small entries that fit within size limit
+        cache.insert(1, "abc".to_string()); // 3 bytes
+        cache.insert(2, "def".to_string()); // 3 bytes
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.current_bytes(), 6);
+
+        // Insert large entry that exceeds size limit - should evict oldest
+        let large_svg = "x".repeat(95); // 95 bytes
+        cache.insert(3, large_svg);
+        // current=6, adding 95 -> 101 > 100, so evict entry 1 (oldest)
+        // After evicting entry 1: current=3, 3+95=98 <= 100, so stop evicting
+        assert!(cache.get(&1).is_none()); // Entry 1 was evicted
+        assert!(cache.get(&2).is_some()); // Entry 2 still present (3+95=98 <= 100)
+        assert!(cache.get(&3).is_some());
+        assert_eq!(cache.current_bytes(), 98); // 3 (entry 2) + 95 (entry 3)
+
+        // Now insert another large entry to force more eviction
+        let another_large = "y".repeat(50); // 50 bytes
+        cache.insert(4, another_large);
+        // current=98, adding 50 -> 148 > 100, evict entry 2 (now oldest)
+        // After evicting 2: current=95, 95+50=145 > 100, evict entry 3
+        // After evicting 3: current=0, 0+50=50 <= 100, insert
+        assert!(cache.get(&2).is_none());
+        assert!(cache.get(&3).is_none());
+        assert!(cache.get(&4).is_some());
+        assert_eq!(cache.current_bytes(), 50);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_svg_cache_count_based_eviction() {
+        // Test that SvgCache still respects entry count limit
+        let mut cache = SvgCache::new(2, 1000); // 2 entries max, 1000 bytes max
+
+        cache.insert(1, "a".to_string());
+        cache.insert(2, "b".to_string());
+        assert_eq!(cache.len(), 2);
+
+        // Insert third entry - should evict oldest (entry 1)
+        cache.insert(3, "c".to_string());
+        assert!(cache.get(&1).is_none());
+        assert!(cache.get(&2).is_some());
+        assert!(cache.get(&3).is_some());
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_svg_cache_update_existing_key() {
+        let mut cache = SvgCache::new(10, 1000);
+
+        cache.insert(1, "short".to_string()); // 5 bytes
+        assert_eq!(cache.current_bytes(), 5);
+
+        // Update with longer value
+        cache.insert(1, "much longer string".to_string()); // 18 bytes
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.current_bytes(), 18);
+
+        // Update with shorter value
+        cache.insert(1, "x".to_string()); // 1 byte
+        assert_eq!(cache.current_bytes(), 1);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_svg_cache_touch_on_get() {
+        let mut cache = SvgCache::new(2, 1000);
+
+        cache.insert(1, "a".to_string());
+        cache.insert(2, "b".to_string());
+
+        // Access entry 1 to move it to back of LRU order
+        let _ = cache.get(&1);
+
+        // Insert third entry - should evict entry 2 (now oldest)
+        cache.insert(3, "c".to_string());
+        assert!(cache.get(&1).is_some()); // Entry 1 survived because it was accessed
+        assert!(cache.get(&2).is_none()); // Entry 2 was evicted
+        assert!(cache.get(&3).is_some());
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -6164,7 +6341,7 @@ mod tests {
             mermaid_textures: RefCell::new(LruCache::new(4)),
             mermaid_pending: RefCell::new(std::collections::HashSet::new()),
             mermaid_frame_pending: std::cell::Cell::new(false),
-            mermaid_svg_cache: RefCell::new(LruCache::new(4)),
+            mermaid_svg_cache: RefCell::new(SvgCache::new(4, 1024 * 1024)),
             mermaid_errors: RefCell::new(LruCache::new(4)),
             mermaid_texture_errors: RefCell::new(LruCache::new(4)),
             mermaid_job_tx: None,
