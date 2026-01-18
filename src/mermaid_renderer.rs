@@ -284,7 +284,6 @@ fn pixmap_new_for_test(width: u32, height: u32) -> Option<tiny_skia::Pixmap> {
 
 #[cfg(feature = "mermaid-quickjs")]
 struct MermaidEngine {
-    #[allow(dead_code)]
     rt: rquickjs::Runtime,
     ctx: rquickjs::Context,
 }
@@ -1447,7 +1446,7 @@ struct MermaidWorker {
 
 #[cfg(feature = "mermaid-quickjs")]
 impl MermaidWorker {
-    const MEMORY_LIMIT_BYTES: usize = 2 * 1024 * 1024 * 1024;
+    const MEMORY_LIMIT_BYTES: usize = 256 * 1024 * 1024; // 256MB (reduced from 2GB)
     const STACK_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
     // DOMPurify expects a real browser DOM; stub sanitize for the QuickJS shim.
@@ -1708,6 +1707,8 @@ impl MermaidWorker {
                 .finish::<String>()
                 .map_err(|err| MermaidWorker::format_js_error(&ctx, err))
         });
+        // Trigger explicit GC to reclaim memory from render temporaries
+        self.engine.rt.run_gc();
         self.deadline_ms.store(0, Ordering::Relaxed);
         Self::format_render_result(result, deadline, Self::now_ms())
     }

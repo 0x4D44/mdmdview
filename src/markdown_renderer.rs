@@ -4998,6 +4998,12 @@ impl MarkdownRenderer {
         self.column_stats_cache.borrow_mut().clear();
     }
 
+    /// Clear the image failure cache. Called on file load to allow retry of
+    /// previously failed images which may now be available.
+    pub fn clear_image_failure_cache(&self) {
+        self.image_failures.borrow_mut().clear();
+    }
+
     pub fn table_layout_cache_stats(&self) -> (u64, u64) {
         self.table_layout_cache.borrow().stats()
     }
