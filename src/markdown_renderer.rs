@@ -5012,6 +5012,28 @@ impl MarkdownRenderer {
         self.table_metrics.borrow().totals()
     }
 
+    /// Get texture cache statistics for debugging.
+    ///
+    /// Returns (emoji_cache_len, image_cache_len).
+    ///
+    /// # Texture Memory Management (Stage 7 Research)
+    ///
+    /// egui's TextureHandle uses reference counting via `Arc<RwLock<TextureManager>>`.
+    /// When all TextureHandles for a texture are dropped, egui automatically frees
+    /// the GPU texture. Our LruCache eviction correctly drops TextureHandles,
+    /// triggering this cleanup.
+    ///
+    /// Note: `ctx.forget_image(uri)` is for URI-based image loaders, not for
+    /// TextureHandle-based textures created via `ctx.load_texture()`. No additional
+    /// explicit cleanup API is needed for our use case.
+    #[cfg(test)]
+    pub fn texture_cache_stats(&self) -> (usize, usize) {
+        (
+            self.emoji_textures.borrow().len(),
+            self.image_textures.borrow().entries.len(),
+        )
+    }
+
     /// Get a plain-text representation of a markdown element (for search)
     pub fn element_plain_text(element: &MarkdownElement) -> String {
         match element {
