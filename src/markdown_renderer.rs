@@ -193,6 +193,7 @@ where
     }
 
     /// Checks if the cache contains the given key.
+    #[allow(dead_code)] // Used in tests
     fn contains_key(&self, key: &K) -> bool {
         self.entries.contains_key(key)
     }
@@ -234,17 +235,20 @@ where
     }
 
     /// Clears all entries from the cache.
+    #[allow(dead_code)] // Used in tests and Stage 6
     fn clear(&mut self) {
         self.entries.clear();
         self.order.clear();
     }
 
     /// Returns the number of entries in the cache.
+    #[allow(dead_code)] // Used in tests and Stage 8 logging
     fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Marks a key as recently used, moving it to the back of the eviction order.
+    #[allow(dead_code)] // Used in tests
     fn touch(&mut self, key: &K) {
         if self.entries.contains_key(key) {
             self.order.retain(|k| k != key);
@@ -9576,7 +9580,10 @@ fn main() {}
             renderer.note_image_failure("missing.png");
             let loaded = renderer.get_or_load_image_texture(ui, "missing.png");
             assert!(loaded.is_none());
-            assert!(renderer.image_failures.borrow().contains_key(&"missing.png".to_string()));
+            assert!(renderer
+                .image_failures
+                .borrow()
+                .contains_key(&"missing.png".to_string()));
         });
     }
 
@@ -10164,7 +10171,10 @@ contexts:
             .expect("send");
         let ctx = egui::Context::default();
         renderer.poll_image_results(&ctx);
-        assert!(renderer.image_failures.borrow().contains_key(&"failed.png".to_string()));
+        assert!(renderer
+            .image_failures
+            .borrow()
+            .contains_key(&"failed.png".to_string()));
         assert!(!renderer.image_pending.borrow().contains("failed.png"));
     }
 
