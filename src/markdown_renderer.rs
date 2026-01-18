@@ -159,6 +159,99 @@ const PIPE_SENTINEL: char = '\u{1F}';
 const IMAGE_TEXTURE_CACHE_CAPACITY: usize = 256;
 const IMAGE_MAX_PENDING: usize = 64;
 const IMAGE_FAILURE_BACKOFF: Duration = Duration::from_secs(5);
+const EMOJI_TEXTURE_CACHE_CAPACITY: usize = 512;
+const IMAGE_FAILURE_CACHE_CAPACITY: usize = 256;
+
+/// Generic LRU (Least Recently Used) cache with configurable capacity.
+///
+/// This cache evicts the least recently accessed entries when capacity is exceeded.
+/// Used for `emoji_textures` and `image_failures` to prevent unbounded memory growth.
+struct LruCache<K, V> {
+    entries: HashMap<K, V>,
+    order: VecDeque<K>,
+    capacity: usize,
+}
+
+impl<K, V> LruCache<K, V>
+where
+    K: Eq + std::hash::Hash + Clone,
+    V: Clone,
+{
+    /// Creates a new LRU cache with the specified capacity.
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    /// Gets a value by key, returning a clone if found.
+    /// Does not update access order (use `touch` for that).
+    fn get(&self, key: &K) -> Option<V> {
+        self.entries.get(key).cloned()
+    }
+
+    /// Checks if the cache contains the given key.
+    fn contains_key(&self, key: &K) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    /// Inserts a key-value pair, evicting oldest entries if at capacity.
+    fn insert(&mut self, key: K, value: V) {
+        // Zero capacity means no storage
+        if self.capacity == 0 {
+            return;
+        }
+
+        // If key already exists, update value and move to back of order
+        if self.entries.contains_key(&key) {
+            self.entries.insert(key.clone(), value);
+            self.order.retain(|k| k != &key);
+            self.order.push_back(key);
+            return;
+        }
+
+        // Evict oldest entries if at capacity
+        while self.entries.len() >= self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+
+        // Insert new entry
+        self.entries.insert(key.clone(), value);
+        self.order.push_back(key);
+    }
+
+    /// Removes an entry by key.
+    fn remove(&mut self, key: &K) {
+        if self.entries.remove(key).is_some() {
+            self.order.retain(|k| k != key);
+        }
+    }
+
+    /// Clears all entries from the cache.
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    /// Returns the number of entries in the cache.
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Marks a key as recently used, moving it to the back of the eviction order.
+    fn touch(&mut self, key: &K) {
+        if self.entries.contains_key(key) {
+            self.order.retain(|k| k != key);
+            self.order.push_back(key.clone());
+        }
+    }
+}
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct CellLayoutKey {
@@ -5591,6 +5684,144 @@ mod tests {
         );
         assert!(cache.contains_key("b"));
         assert!(!cache.contains_key("a"));
+    }
+
+    // --- LruCache Tests ---
+
+    #[test]
+    fn test_lru_cache_basic_insert_and_get() {
+        let mut cache: LruCache<String, i32> = LruCache::new(10);
+        cache.insert("a".to_string(), 1);
+        cache.insert("b".to_string(), 2);
+        cache.insert("c".to_string(), 3);
+
+        assert_eq!(cache.get(&"a".to_string()), Some(1));
+        assert_eq!(cache.get(&"b".to_string()), Some(2));
+        assert_eq!(cache.get(&"c".to_string()), Some(3));
+        assert_eq!(cache.get(&"d".to_string()), None);
+        assert_eq!(cache.len(), 3);
+    }
+
+    #[test]
+    fn test_lru_cache_evicts_oldest_entry() {
+        let mut cache: LruCache<String, i32> = LruCache::new(2);
+        cache.insert("a".to_string(), 1);
+        cache.insert("b".to_string(), 2);
+        // Cache is now full at capacity 2
+
+        // Insert third entry, should evict "a" (oldest)
+        cache.insert("c".to_string(), 3);
+
+        assert!(!cache.contains_key(&"a".to_string())); // "a" evicted
+        assert!(cache.contains_key(&"b".to_string()));
+        assert!(cache.contains_key(&"c".to_string()));
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn test_lru_cache_touch_updates_order() {
+        let mut cache: LruCache<String, i32> = LruCache::new(2);
+        cache.insert("a".to_string(), 1);
+        cache.insert("b".to_string(), 2);
+
+        // Touch "a" to make it recently used
+        cache.touch(&"a".to_string());
+
+        // Insert third entry, should evict "b" now (oldest after touch)
+        cache.insert("c".to_string(), 3);
+
+        assert!(cache.contains_key(&"a".to_string())); // "a" preserved by touch
+        assert!(!cache.contains_key(&"b".to_string())); // "b" evicted
+        assert!(cache.contains_key(&"c".to_string()));
+    }
+
+    #[test]
+    fn test_lru_cache_insert_existing_updates_value_and_order() {
+        let mut cache: LruCache<String, i32> = LruCache::new(2);
+        cache.insert("a".to_string(), 1);
+        cache.insert("b".to_string(), 2);
+
+        // Re-insert "a" with new value
+        cache.insert("a".to_string(), 100);
+
+        assert_eq!(cache.get(&"a".to_string()), Some(100));
+
+        // Insert third entry, should evict "b" (oldest after "a" was updated)
+        cache.insert("c".to_string(), 3);
+
+        assert!(cache.contains_key(&"a".to_string()));
+        assert!(!cache.contains_key(&"b".to_string())); // "b" evicted
+        assert!(cache.contains_key(&"c".to_string()));
+    }
+
+    #[test]
+    fn test_lru_cache_remove() {
+        let mut cache: LruCache<String, i32> = LruCache::new(10);
+        cache.insert("a".to_string(), 1);
+        cache.insert("b".to_string(), 2);
+
+        cache.remove(&"a".to_string());
+
+        assert!(!cache.contains_key(&"a".to_string()));
+        assert!(cache.contains_key(&"b".to_string()));
+        assert_eq!(cache.len(), 1);
+
+        // Removing non-existent key should be safe
+        cache.remove(&"nonexistent".to_string());
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn test_lru_cache_clear() {
+        let mut cache: LruCache<String, i32> = LruCache::new(10);
+        cache.insert("a".to_string(), 1);
+        cache.insert("b".to_string(), 2);
+        cache.insert("c".to_string(), 3);
+
+        cache.clear();
+
+        assert_eq!(cache.len(), 0);
+        assert!(!cache.contains_key(&"a".to_string()));
+        assert!(!cache.contains_key(&"b".to_string()));
+        assert!(!cache.contains_key(&"c".to_string()));
+    }
+
+    #[test]
+    fn test_lru_cache_capacity_enforcement() {
+        let mut cache: LruCache<String, i32> = LruCache::new(3);
+        for i in 0..10 {
+            cache.insert(format!("key{}", i), i);
+        }
+
+        // Only last 3 entries should remain
+        assert_eq!(cache.len(), 3);
+        assert!(cache.contains_key(&"key7".to_string()));
+        assert!(cache.contains_key(&"key8".to_string()));
+        assert!(cache.contains_key(&"key9".to_string()));
+        assert!(!cache.contains_key(&"key0".to_string()));
+        assert!(!cache.contains_key(&"key6".to_string()));
+    }
+
+    #[test]
+    fn test_lru_cache_touch_nonexistent_key() {
+        let mut cache: LruCache<String, i32> = LruCache::new(10);
+        cache.insert("a".to_string(), 1);
+
+        // Touching non-existent key should be safe (no-op)
+        cache.touch(&"nonexistent".to_string());
+
+        assert_eq!(cache.len(), 1);
+        assert!(cache.contains_key(&"a".to_string()));
+    }
+
+    #[test]
+    fn test_lru_cache_zero_capacity() {
+        let mut cache: LruCache<String, i32> = LruCache::new(0);
+        cache.insert("a".to_string(), 1);
+
+        // With zero capacity, nothing should be stored
+        assert_eq!(cache.len(), 0);
+        assert!(!cache.contains_key(&"a".to_string()));
     }
 
     #[test]
