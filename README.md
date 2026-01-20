@@ -594,6 +594,7 @@ Try breaking large documents into smaller files.
 - JavaScript sandboxed in QuickJS runtime
 - No network access during rendering
 - Default security level is strict; set `MDMDVIEW_MERMAID_SECURITY=loose` to relax
+- Strict mode still allows inline Mermaid label tags: `<i>`, `<b>`, `<em>`, `<strong>`, `<br>`
 - Recommended for sensitive/confidential content
 
 ---
