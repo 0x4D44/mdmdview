@@ -1213,6 +1213,56 @@ impl MermaidRenderer {
     }
 
     #[cfg(any(test, feature = "mermaid-quickjs"))]
+    fn should_allow_html_labels(code: &str) -> bool {
+        const SAFE_TAGS: [&str; 5] = ["i", "b", "em", "strong", "br"];
+        let bytes = code.as_bytes();
+        let mut idx = 0;
+        let mut found = false;
+        while idx < bytes.len() {
+            if bytes[idx] != b'<' {
+                idx += 1;
+                continue;
+            }
+            let start = idx + 1;
+            if start >= bytes.len() {
+                break;
+            }
+            let next = bytes[start];
+            if !(next.is_ascii_alphabetic() || next == b'/') {
+                idx += 1;
+                continue;
+            }
+            let rest = &code[start..];
+            let end_rel = match rest.find('>') {
+                Some(pos) => pos,
+                None => break,
+            };
+            let mut tag = rest[..end_rel].trim();
+            if tag.starts_with('/') {
+                tag = tag[1..].trim_start();
+            }
+            if tag.is_empty() {
+                idx = start + end_rel + 1;
+                continue;
+            }
+            let first = tag.as_bytes()[0];
+            if !first.is_ascii_alphabetic() {
+                idx = start + end_rel + 1;
+                continue;
+            }
+            let tag_name = tag.split_whitespace().next().unwrap_or("");
+            let tag_name = tag_name.trim_end_matches('/');
+            let tag_name = tag_name.to_ascii_lowercase();
+            if !SAFE_TAGS.iter().any(|allowed| *allowed == tag_name) {
+                return false;
+            }
+            found = true;
+            idx = start + end_rel + 1;
+        }
+        found
+    }
+
+    #[cfg(any(test, feature = "mermaid-quickjs"))]
     fn mermaid_security_level() -> String {
         if let Ok(raw) = std::env::var("MDMDVIEW_MERMAID_SECURITY") {
             let normalized = raw.trim().to_ascii_lowercase();
@@ -1224,7 +1274,7 @@ impl MermaidRenderer {
     }
 
     #[cfg(feature = "mermaid-quickjs")]
-    fn mermaid_site_config_json(svg_key: u64) -> String {
+    fn mermaid_site_config_json(svg_key: u64, allow_html_labels: bool) -> String {
         let theme = Self::mermaid_theme_values();
         let security = Self::mermaid_security_level();
         let seed = format!("m{:016x}", svg_key);
@@ -1241,7 +1291,10 @@ impl MermaidRenderer {
             Self::json_escape(&seed)
         ));
         entries.push(format!("\"maxTextSize\":{}", Self::MERMAID_MAX_TEXT_SIZE));
-        if security == "strict" {
+        if allow_html_labels {
+            entries.push("\"__mdmdviewAllowHtmlLabels\":true".to_string());
+        }
+        if security == "strict" && !allow_html_labels {
             entries.push("\"htmlLabels\":false".to_string());
             entries.push("\"flowchart\":{\"htmlLabels\":false}".to_string());
         }
@@ -1780,7 +1833,8 @@ impl MermaidWorker {
             let func: Function = eval_mermaid_wrapper(&ctx, wrapper)
                 .map_err(|err| MermaidWorker::format_js_error(&ctx, err))?;
             let id = format!("m{:016x}", key);
-            let site_config = MermaidRenderer::mermaid_site_config_json(key);
+            let allow_html_labels = MermaidRenderer::should_allow_html_labels(code);
+            let site_config = MermaidRenderer::mermaid_site_config_json(key, allow_html_labels);
             let maybe: MaybePromise = call_mermaid_render(
                 &func,
                 (
@@ -5035,7 +5089,14 @@ const MERMAID_RENDER_WRAPPER: &str = r#"
   var extracted = window.__mdmdview_extract_init(code);
   var directiveConfig = window.__mdmdview_sanitize_config(extracted.config) || {};
   var merged = window.__mdmdview_merge_config(directiveConfig, siteConfig);
-  if (merged && merged.securityLevel === 'strict') {
+  var allowHtmlLabels = merged && merged.__mdmdviewAllowHtmlLabels === true;
+  if (allowHtmlLabels) {
+    merged.htmlLabels = true;
+    if (!merged.flowchart) { merged.flowchart = {}; }
+    merged.flowchart.htmlLabels = true;
+    delete merged.__mdmdviewAllowHtmlLabels;
+  }
+  if (merged && merged.securityLevel === 'strict' && !allowHtmlLabels) {
     merged.htmlLabels = false;
     if (!merged.flowchart) { merged.flowchart = {}; }
     merged.flowchart.htmlLabels = false;
@@ -5594,6 +5655,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_should_allow_html_labels_safe_tags() {
+        assert!(MermaidRenderer::should_allow_html_labels(
+            "graph TD; A[\"<i>Voice</i>\"]"
+        ));
+        assert!(MermaidRenderer::should_allow_html_labels(
+            "graph TD; A[\"<b>Bold</b>\"]"
+        ));
+        assert!(MermaidRenderer::should_allow_html_labels(
+            "graph TD; A[\"<em>Italic</em>\"]"
+        ));
+        assert!(MermaidRenderer::should_allow_html_labels(
+            "graph TD; A[\"<strong>Strong</strong>\"]"
+        ));
+        assert!(MermaidRenderer::should_allow_html_labels(
+            "graph TD; A[\"Line<br/>Break\"]"
+        ));
+    }
+
+    #[test]
+    fn test_should_allow_html_labels_rejects_unknown_tags() {
+        assert!(!MermaidRenderer::should_allow_html_labels(
+            "graph TD; A[\"<script>bad</script>\"]"
+        ));
+        assert!(!MermaidRenderer::should_allow_html_labels(
+            "graph TD; A[\"<i>ok</i><span>no</span>\"]"
+        ));
+        assert!(!MermaidRenderer::should_allow_html_labels(
+            "graph TD; A[\"1 < 2\"]"
+        ));
+    }
+
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_mermaid_worker_count_clamps_env() {
@@ -5654,14 +5747,14 @@ mod tests {
         let _lock = env_lock();
         {
             std::env::remove_var("MDMDVIEW_MERMAID_SECURITY");
-            let json = MermaidRenderer::mermaid_site_config_json(1);
+            let json = MermaidRenderer::mermaid_site_config_json(1, false);
             assert!(json.contains("\"securityLevel\":\"strict\""));
             assert!(json.contains("\"htmlLabels\":false"));
             assert!(json.contains("\"flowchart\":{\"htmlLabels\":false}"));
         }
         {
             let _guard = EnvGuard::set("MDMDVIEW_MERMAID_SECURITY", "loose");
-            let json = MermaidRenderer::mermaid_site_config_json(2);
+            let json = MermaidRenderer::mermaid_site_config_json(2, false);
             assert!(json.contains("\"securityLevel\":\"loose\""));
             assert!(!json.contains("\"flowchart\":{\"htmlLabels\":false}"));
         }
@@ -5669,10 +5762,20 @@ mod tests {
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
+    fn test_mermaid_site_config_json_allows_safe_html_labels() {
+        let _lock = env_lock();
+        std::env::remove_var("MDMDVIEW_MERMAID_SECURITY");
+        let json = MermaidRenderer::mermaid_site_config_json(4, true);
+        assert!(json.contains("\"__mdmdviewAllowHtmlLabels\":true"));
+        assert!(!json.contains("\"htmlLabels\":false"));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
     fn test_mermaid_site_config_json_includes_font_family() {
         let _lock = env_lock();
         let _guard = EnvGuard::set("MDMDVIEW_MERMAID_FONT_FAMILY", "Test Sans");
-        let json = MermaidRenderer::mermaid_site_config_json(3);
+        let json = MermaidRenderer::mermaid_site_config_json(3, false);
         assert!(json.contains("\"fontFamily\":\"Test Sans\""));
     }
 

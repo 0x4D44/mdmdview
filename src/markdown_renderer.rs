@@ -4110,8 +4110,9 @@ impl MarkdownRenderer {
                             column_spacing,
                         );
                         let style = ui.style().clone();
+                        let estimate_all_rows = rows.len() <= COLUMN_STATS_SAMPLE_ROWS;
                         for (idx, row) in rows.iter().enumerate() {
-                            if self.row_needs_height_estimate(row) {
+                            if estimate_all_rows || self.row_needs_height_estimate(row) {
                                 let estimate = self.estimate_table_row_height(
                                     ui,
                                     &style,
@@ -10444,6 +10445,32 @@ contexts:
             let table_id = renderer.compute_table_id(&headers, &rows, &[], 15);
             renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
         });
+    }
+
+    #[test]
+    fn test_render_table_estimates_wrapped_row_height() {
+        let renderer = MarkdownRenderer::new();
+        let _forced = ForcedTablePolicies::new(vec![ColumnPolicy::Fixed {
+            width: 80.0,
+            clip: false,
+        }]);
+        let headers = vec![vec![InlineSpan::Text("Params".to_string())]];
+        let rows = vec![vec![vec![InlineSpan::Text(
+            "word word word word word word word word".to_string(),
+        )]]];
+        let table_id = renderer.compute_table_id(&headers, &rows, &[], 18);
+
+        with_test_ui(|_, ui| {
+            let layout = *ui.layout();
+            ui.allocate_ui_with_layout(Vec2::new(120.0, 0.0), layout, |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.set_width(120.0);
+                renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
+            });
+        });
+
+        let height = renderer.row_height_hint(table_id, 0);
+        assert!(height > renderer.row_height_fallback() + 0.5);
     }
 
     #[test]
