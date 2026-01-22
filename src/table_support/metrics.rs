@@ -101,6 +101,13 @@ impl TableMetricEntry {
         self.resolved_widths.extend_from_slice(widths);
         self.last_width_frame = frame_id;
 
+        // When widths change significantly, invalidate cached row heights
+        // so they get re-estimated with the new widths. This prevents
+        // scroll position miscalculations caused by stale height estimates.
+        if matches!(change, WidthChange::Large) {
+            self.rows.clear();
+        }
+
         change
     }
 

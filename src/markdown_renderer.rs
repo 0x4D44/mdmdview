@@ -4104,10 +4104,14 @@ impl MarkdownRenderer {
                         .map(|idx| self.row_height_hint(table_id, idx))
                         .collect();
                     if needs_estimate {
-                        let approx_widths = self.estimate_table_column_widths(
+                        let approx_widths = self.estimate_table_row_widths(
                             &column_specs,
-                            max_width,
-                            column_spacing,
+                            &resolved_widths,
+                            &adjusted_widths,
+                            available_for_columns,
+                            min_floor,
+                            use_hscroll,
+                            scaled_down,
                         );
                         let style = ui.style().clone();
                         let estimate_all_rows = rows.len() <= COLUMN_STATS_SAMPLE_ROWS;
@@ -4122,6 +4126,11 @@ impl MarkdownRenderer {
                                     fallback_row_height,
                                 );
                                 row_heights[idx] = row_heights[idx].max(estimate);
+                                // Cache the estimated height immediately so rows that aren't
+                                // rendered on this frame still have accurate height hints on
+                                // subsequent frames. Without this, off-screen rows revert to
+                                // fallback heights, causing scroll position miscalculations.
+                                self.update_row_height(table_id, idx, row_heights[idx]);
                             }
                         }
                     }
@@ -4223,8 +4232,23 @@ impl MarkdownRenderer {
                                     });
                                     row_height = row_height.max(cell_height);
                                 }
-                                if (row_height - row_heights[idx]).abs() > 0.5 {
+                                let height_delta = row_height - row_heights[idx];
+                                if height_delta.abs() > 0.5 {
                                     height_change = true;
+                                    if std::env::var("MDMDVIEW_DEBUG_SCROLL").is_ok() {
+                                        use std::io::Write;
+                                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                                            .create(true)
+                                            .append(true)
+                                            .open(r"c:\tmp\scroll-debug.log")
+                                        {
+                                            let _ = writeln!(
+                                                f,
+                                                "[TABLE] table={} row={} hint={:.1} actual={:.1} delta={:+.1}",
+                                                table_id, idx, row_heights[idx], row_height, height_delta
+                                            );
+                                        }
+                                    }
                                 }
                                 self.update_row_height(table_id, idx, row_height);
                                 self.note_row_rendered(table_id);
@@ -4267,6 +4291,16 @@ impl MarkdownRenderer {
                         column_spacing,
                     );
                     if height_change {
+                        if std::env::var("MDMDVIEW_DEBUG_SCROLL").is_ok() {
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(r"c:\tmp\scroll-debug.log")
+                            {
+                                let _ = writeln!(f, "[REPAINT] table={} triggering repaint", table_id);
+                            }
+                        }
                         ui.ctx().request_repaint();
                     }
                 });
@@ -4401,6 +4435,7 @@ impl MarkdownRenderer {
             .collect()
     }
 
+    #[cfg(test)]
     fn estimate_table_column_widths(
         &self,
         column_specs: &[ColumnSpec],
@@ -4430,6 +4465,56 @@ impl MarkdownRenderer {
             let scale = available / sum;
             for width in &mut widths {
                 *width = (*width * scale).max(1.0);
+            }
+        }
+        widths
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn estimate_table_row_widths(
+        &self,
+        column_specs: &[ColumnSpec],
+        resolved_widths: &[f32],
+        adjusted_widths: &[f32],
+        available_for_columns: f32,
+        min_floor: f32,
+        use_hscroll: bool,
+        scaled_down: bool,
+    ) -> Vec<f32> {
+        if use_hscroll {
+            return resolved_widths.to_vec();
+        }
+
+        let mut widths = adjusted_widths.to_vec();
+        if scaled_down {
+            return widths;
+        }
+
+        let remainder_indices: Vec<usize> = column_specs
+            .iter()
+            .enumerate()
+            .filter(|(_, spec)| matches!(spec.policy, ColumnPolicy::Remainder { .. }))
+            .map(|(idx, _)| idx)
+            .collect();
+        if remainder_indices.is_empty() {
+            return widths;
+        }
+
+        let mut used = 0.0;
+        for (idx, width) in widths.iter().enumerate() {
+            if remainder_indices.contains(&idx) {
+                continue;
+            }
+            used += *width;
+        }
+        let remaining = available_for_columns - used;
+        if remaining <= 0.0 {
+            return widths;
+        }
+        let per = (remaining / remainder_indices.len() as f32).max(min_floor);
+        for idx in remainder_indices {
+            if let Some(width) = widths.get_mut(idx) {
+                *width = per;
             }
         }
         widths
@@ -8354,6 +8439,31 @@ fn main() {}
     }
 
     #[test]
+    fn test_estimate_table_row_widths_distributes_remainder() {
+        let renderer = MarkdownRenderer::new();
+        let min_floor = renderer.table_min_column_width();
+        let specs = vec![
+            ColumnSpec::new(
+                0,
+                "Ord",
+                ColumnPolicy::Fixed {
+                    width: 80.0,
+                    clip: false,
+                },
+                None,
+            ),
+            ColumnSpec::new(1, "Params", ColumnPolicy::Remainder { clip: false }, None),
+        ];
+        let resolved = vec![80.0, min_floor];
+        let adjusted = resolved.clone();
+        let widths = renderer.estimate_table_row_widths(
+            &specs, &resolved, &adjusted, 320.0, min_floor, false, false,
+        );
+        assert!((widths[0] - 80.0).abs() < 0.1);
+        assert!(widths[1] > min_floor + 40.0);
+    }
+
+    #[test]
     fn test_estimate_table_image_height_no_scale_or_title() {
         let renderer = MarkdownRenderer::new();
         let span = InlineSpan::Image {
@@ -8512,6 +8622,9 @@ fn main() {}
     #[test]
     fn test_has_pending_renders_with_mermaid_pending() {
         let renderer = MarkdownRenderer::new();
+        // Give worker threads time to start up under heavy parallel test execution.
+        // Workers need to initialize QuickJS runtime which can be slow under load.
+        std::thread::sleep(std::time::Duration::from_millis(200));
         with_test_ui(|_, ui| {
             renderer.mermaid.begin_frame();
             renderer
