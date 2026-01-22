@@ -2359,6 +2359,37 @@ impl MarkdownViewerApp {
                 inner_rect: scroll_output.inner_rect,
                 offset_y: scroll_output.state.offset.y,
             });
+            // Debug scroll logging - writes to file to track content size changes
+            {
+                use std::io::Write;
+                static DEBUG_SCROLL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                let enabled = *DEBUG_SCROLL.get_or_init(|| {
+                    std::env::var("MDMDVIEW_DEBUG_SCROLL").is_ok()
+                });
+                if enabled {
+                    let max_scroll = (scroll_output.content_size.y - scroll_output.inner_rect.height()).max(0.0);
+                    let scroll_pct = if max_scroll > 0.0 {
+                        (scroll_output.state.offset.y / max_scroll * 100.0) as i32
+                    } else {
+                        0
+                    };
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(r"c:\tmp\scroll-trace.log")
+                    {
+                        let _ = writeln!(
+                            f,
+                            "[SCROLL] content_h={:.0} viewport_h={:.0} offset={:.0} max={:.0} pct={}%",
+                            scroll_output.content_size.y,
+                            scroll_output.inner_rect.height(),
+                            scroll_output.state.offset.y,
+                            max_scroll,
+                            scroll_pct
+                        );
+                    }
+                }
+            }
         });
 
         // Add context menu for the main panel

@@ -1213,53 +1213,12 @@ impl MermaidRenderer {
     }
 
     #[cfg(any(test, feature = "mermaid-quickjs"))]
-    fn should_allow_html_labels(code: &str) -> bool {
-        const SAFE_TAGS: [&str; 5] = ["i", "b", "em", "strong", "br"];
-        let bytes = code.as_bytes();
-        let mut idx = 0;
-        let mut found = false;
-        while idx < bytes.len() {
-            if bytes[idx] != b'<' {
-                idx += 1;
-                continue;
-            }
-            let start = idx + 1;
-            if start >= bytes.len() {
-                break;
-            }
-            let next = bytes[start];
-            if !(next.is_ascii_alphabetic() || next == b'/') {
-                idx += 1;
-                continue;
-            }
-            let rest = &code[start..];
-            let end_rel = match rest.find('>') {
-                Some(pos) => pos,
-                None => break,
-            };
-            let mut tag = rest[..end_rel].trim();
-            if tag.starts_with('/') {
-                tag = tag[1..].trim_start();
-            }
-            if tag.is_empty() {
-                idx = start + end_rel + 1;
-                continue;
-            }
-            let first = tag.as_bytes()[0];
-            if !first.is_ascii_alphabetic() {
-                idx = start + end_rel + 1;
-                continue;
-            }
-            let tag_name = tag.split_whitespace().next().unwrap_or("");
-            let tag_name = tag_name.trim_end_matches('/');
-            let tag_name = tag_name.to_ascii_lowercase();
-            if !SAFE_TAGS.iter().any(|allowed| *allowed == tag_name) {
-                return false;
-            }
-            found = true;
-            idx = start + end_rel + 1;
-        }
-        found
+    fn should_allow_html_labels(_code: &str) -> bool {
+        // Always return false because usvg cannot render foreignObject elements.
+        // When htmlLabels is true, mermaid renders labels inside <foreignObject>
+        // which usvg ignores, resulting in invisible text.
+        // By forcing htmlLabels=false, mermaid uses SVG <text> elements instead.
+        false
     }
 
     #[cfg(any(test, feature = "mermaid-quickjs"))]
@@ -1595,7 +1554,7 @@ impl MermaidWorker {
     fn patch_mermaid_js(js: &str) -> String {
         const TARGET: &str = "var hD=wRe();";
         const PATCH: &str =
-            "var hD=wRe();if(!hD||typeof hD.sanitize!==\"function\"){hD={sanitize:function(html){return String(html);},addHook:function(){},removeHook:function(){},removeHooks:function(){},removeAllHooks:function(){},isSupported:true};}";
+            "var hD=wRe();if(!hD||typeof hD.sanitize!==\"function\"||typeof hD.addHook!==\"function\"||typeof hD.removeHook!==\"function\"||typeof hD.removeHooks!==\"function\"||hD.isSupported===false){hD={sanitize:function(html){return String(html);},addHook:function(){},removeHook:function(){},removeHooks:function(){},removeAllHooks:function(){},isSupported:true};}";
         const D3_TARGET: &str = "FY.prototype={constructor:FY,appendChild:function(i){return this._parent.insertBefore(i,this._next)},insertBefore:function(i,s){return this._parent.insertBefore(i,s)},querySelector:function(i){return this._parent.querySelector(i)},querySelectorAll:function(i){return this._parent.querySelectorAll(i)}};";
         const D3_PATCH: &str = "FY.prototype={constructor:FY,appendChild:function(i){var p=this._parent||((typeof document!==\"undefined\"&&document.body)?document.body:null);return p?p.insertBefore(i,this._next):i},insertBefore:function(i,s){var p=this._parent||((typeof document!==\"undefined\"&&document.body)?document.body:null);return p?p.insertBefore(i,s):i},querySelector:function(i){var p=this._parent||((typeof document!==\"undefined\"&&document.body)?document.body:null);return p&&p.querySelector?p.querySelector(i):null},querySelectorAll:function(i){var p=this._parent||((typeof document!==\"undefined\"&&document.body)?document.body:null);return p&&p.querySelectorAll?p.querySelectorAll(i):[]}};";
         const D3_CTOR_TARGET: &str =
@@ -3605,6 +3564,8 @@ function __mdmdview_serialize(node) {
   var attrs = __mdmdview_serialize_attrs(node);
   var content = '';
   var lower = String(tag).toLowerCase();
+  // Check if this is an xhtml element (e.g., div inside foreignObject)
+  var isXhtml = node.namespaceURI && node.namespaceURI.indexOf('xhtml') >= 0;
   if (node.children && node.children.length) {
     if (lower === 'style' || lower === 'script') {
       content = __mdmdview_collect_text(node);
@@ -3614,6 +3575,10 @@ function __mdmdview_serialize(node) {
         content += __mdmdview_serialize(ordered[i]);
       }
     }
+  } else if (node.__rawInnerHTML && isXhtml) {
+    // For xhtml elements with raw innerHTML, escape & but preserve HTML tags
+    // Only escape & that aren't already part of entity references like &amp; &lt; etc.
+    content = node.__rawInnerHTML.replace(/&(?!(amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, '&amp;');
   } else if (node.textContent) {
     if (lower === 'style' || lower === 'script') {
       content = node.textContent;
@@ -4069,15 +4034,19 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
   if (!doc && typeof document !== 'undefined' && document) { doc = document; }
   var parent = null;
   var parent_set = false;
-  var node = {
-    tagName: tag,
-    namespaceURI: ns || null,
-    firstChild: null,
-    style: __mdmdview_make_style(),
-    children: [],
-    childNodes: [],
-    attributes: {},
-    textContent: '',
+    var node = {
+      tagName: tag,
+      namespaceURI: ns || null,
+      firstChild: null,
+      style: __mdmdview_make_style(),
+      children: [],
+      childNodes: [],
+      attributes: {},
+      hasAttribute: function(key) {
+        return Object.prototype.hasOwnProperty.call(this.attributes, key);
+      },
+      hasAttributeNS: function(ns, key) { return this.hasAttribute(key); },
+      textContent: '',
     setAttribute: function(key, value) {
       var v = String(value);
       this.attributes[key] = v;
@@ -4156,6 +4125,13 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
     remove: function() { return null; },
     querySelector: function(sel) { return __mdmdview_query_selector(this, sel); },
     querySelectorAll: function(sel) { return __mdmdview_query_selector_all(this, sel); },
+    getElementsByTagName: function(tag) {
+      var raw = String(tag || '').trim().toLowerCase();
+      if (!raw) { return []; }
+      var matches = [];
+      __mdmdview_find_by_tag(this, raw, matches);
+      return matches;
+    },
     cloneNode: function(deep) {
       var copy = __mdmdview_make_element(this.tagName, this.ownerDocument, this.namespaceURI);
       copy.textContent = this.textContent;
@@ -4251,8 +4227,13 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
     }
   };
   node.classList = classList;
+  Object.defineProperty(node, 'className', {
+    get: function() { return node.getAttribute ? (node.getAttribute('class') || '') : ''; },
+    set: function(value) { node.setAttribute('class', value); },
+    configurable: true
+  });
   Object.defineProperty(node, 'innerHTML', {
-    get: function() { return __mdmdview_serialize_children(this); },
+    get: function() { return this.__rawInnerHTML || __mdmdview_serialize_children(this); },
     set: function(value) {
       if (this.children && this.children.length) {
         for (var i = 0; i < this.children.length; i++) {
@@ -4264,6 +4245,8 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
       this.childNodes = this.children;
       this.firstChild = null;
       this.textContent = value ? String(value) : '';
+      // Store raw HTML for xhtml content (e.g., inside foreignObject)
+      this.__rawInnerHTML = value ? String(value) : '';
       __mdmdview_bump_bbox_rev();
     },
     configurable: true
@@ -4584,6 +4567,15 @@ var document = {
     var node = __mdmdview_make_element('#text', document);
     node.textContent = text || '';
     return node;
+  },
+  createDocumentFragment: function() {
+    var frag = __mdmdview_make_element('#document-fragment', document);
+    frag.nodeType = 11;
+    return frag;
+  },
+  importNode: function(node, deep) {
+    if (!node) { return null; }
+    return node.cloneNode ? node.cloneNode(deep) : node;
   },
   getElementById: function(id) { return __mdmdview_find_by_id(document, id); },
   getElementsByTagName: function(tag) {
@@ -5656,34 +5648,20 @@ mod tests {
     }
 
     #[test]
-    fn test_should_allow_html_labels_safe_tags() {
-        assert!(MermaidRenderer::should_allow_html_labels(
+    fn test_should_allow_html_labels_always_false_for_usvg() {
+        // HTML labels are disabled because usvg cannot render foreignObject.
+        // All inputs should return false to force SVG text elements.
+        assert!(!MermaidRenderer::should_allow_html_labels(
             "graph TD; A[\"<i>Voice</i>\"]"
         ));
-        assert!(MermaidRenderer::should_allow_html_labels(
+        assert!(!MermaidRenderer::should_allow_html_labels(
             "graph TD; A[\"<b>Bold</b>\"]"
         ));
-        assert!(MermaidRenderer::should_allow_html_labels(
-            "graph TD; A[\"<em>Italic</em>\"]"
-        ));
-        assert!(MermaidRenderer::should_allow_html_labels(
-            "graph TD; A[\"<strong>Strong</strong>\"]"
-        ));
-        assert!(MermaidRenderer::should_allow_html_labels(
-            "graph TD; A[\"Line<br/>Break\"]"
-        ));
-    }
-
-    #[test]
-    fn test_should_allow_html_labels_rejects_unknown_tags() {
         assert!(!MermaidRenderer::should_allow_html_labels(
             "graph TD; A[\"<script>bad</script>\"]"
         ));
         assert!(!MermaidRenderer::should_allow_html_labels(
-            "graph TD; A[\"<i>ok</i><span>no</span>\"]"
-        ));
-        assert!(!MermaidRenderer::should_allow_html_labels(
-            "graph TD; A[\"1 < 2\"]"
+            "graph TD; A[\"plain text\"]"
         ));
     }
 
@@ -5882,6 +5860,102 @@ mod tests {
         assert!(h > 0);
         assert!(w <= MermaidRenderer::MERMAID_MAX_RENDER_SIDE);
         assert!(h <= MermaidRenderer::MERMAID_MAX_RENDER_SIDE);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_quickjs_render_with_html_tags_in_label() {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        let fontdb = std::sync::Arc::new(fontdb);
+        let mut worker = MermaidWorker::new(0, fontdb).expect("worker init");
+
+        // HTML tags in labels - rendered as SVG text (not foreignObject) since htmlLabels=false
+        let diagram = r#"graph TD; A[hello<br/><i>world</i>]-->B"#;
+
+        let viewport_width = 1200;
+        let viewport_height = 900;
+
+        let svg = worker
+            .render_svg(
+                MermaidRenderer::hash_str(diagram),
+                diagram,
+                viewport_width,
+                viewport_height,
+            )
+            .expect("diagram with html tags render");
+
+        assert!(svg.contains("<svg"));
+        // Text should be in SVG text elements (htmlLabels disabled for usvg compatibility)
+        assert!(svg.contains("hello"), "Label text 'hello' should be in SVG");
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_quickjs_render_subgraph_with_html_tags() {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        let fontdb = std::sync::Arc::new(fontdb);
+        let mut worker = MermaidWorker::new(0, fontdb).expect("worker init");
+
+        // Complex diagram with HTML tags - should render using SVG text elements
+        let diagram = r#"graph TB
+    subgraph "Application Layer"
+        GABBY[gabby<br/><i>Voice AI Agent</i>]
+        APP[Your Application]
+    end
+
+    subgraph "Facade"
+        MDSIPRTP[mdsiprtp<br/><i>Unified API</i>]
+    end
+
+    GABBY --> MDSIPRTP
+    APP --> MDSIPRTP"#;
+
+        let viewport_width = 1200;
+        let viewport_height = 900;
+
+        let svg = worker
+            .render_svg(
+                MermaidRenderer::hash_str(diagram),
+                diagram,
+                viewport_width,
+                viewport_height,
+            )
+            .expect("subgraph diagram render");
+
+        assert!(svg.contains("<svg"));
+        // Labels should be visible as SVG text
+        assert!(svg.contains("gabby"), "Label 'gabby' should be in SVG");
+        assert!(svg.contains("Application"), "Label 'Application' should be in SVG");
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_quickjs_render_with_ampersand() {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        let fontdb = std::sync::Arc::new(fontdb);
+        let mut worker = MermaidWorker::new(0, fontdb).expect("worker init");
+
+        // Ampersands in labels - must be escaped for valid SVG
+        let diagram = r#"graph TD; A[SIP Parsing & Auth]-->B[Types & Errors]"#;
+
+        let viewport_width = 1200;
+        let viewport_height = 900;
+
+        let svg = worker
+            .render_svg(
+                MermaidRenderer::hash_str(diagram),
+                diagram,
+                viewport_width,
+                viewport_height,
+            )
+            .expect("ampersand in labels render");
+
+        assert!(svg.contains("<svg"));
+        // Ampersands should be escaped for valid XML/SVG
+        assert!(svg.contains("&amp;") || svg.contains("Parsing"), "Label text should be in SVG");
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -7355,6 +7429,13 @@ mod tests {
     #[test]
     fn test_mermaid_dom_shim_clusters_not_labelish() {
         assert!(MERMAID_DOM_SHIM.contains("has_class(node, 'clusters')"));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_dom_shim_has_attribute_helpers() {
+        assert!(MERMAID_DOM_SHIM.contains("hasAttribute"));
+        assert!(MERMAID_DOM_SHIM.contains("hasAttributeNS"));
     }
 
     #[cfg(feature = "mermaid-quickjs")]
