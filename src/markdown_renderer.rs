@@ -4294,7 +4294,8 @@ impl MarkdownRenderer {
                                 .append(true)
                                 .open(r"c:\tmp\scroll-debug.log")
                             {
-                                let _ = writeln!(f, "[REPAINT] table={} triggering repaint", table_id);
+                                let _ =
+                                    writeln!(f, "[REPAINT] table={} triggering repaint", table_id);
                             }
                         }
                         ui.ctx().request_repaint();
@@ -4372,20 +4373,6 @@ impl MarkdownRenderer {
         });
         let clip_rect = clip_rect.unwrap_or(rect);
         (rect, clip_rect)
-    }
-
-    fn row_needs_height_estimate(&self, row: &[Vec<InlineSpan>]) -> bool {
-        row.iter().any(|cell| {
-            cell.iter().any(|span| match span {
-                InlineSpan::Image { .. } => true,
-                InlineSpan::Text(text)
-                | InlineSpan::Code(text)
-                | InlineSpan::Strong(text)
-                | InlineSpan::Emphasis(text)
-                | InlineSpan::Strikethrough(text)
-                | InlineSpan::Link { text, .. } => text.contains('\n'),
-            })
-        })
     }
 
     fn table_min_column_width(&self) -> f32 {
@@ -4627,22 +4614,6 @@ impl MarkdownRenderer {
 
     fn row_height_fallback(&self) -> f32 {
         self.font_sizes.body * 1.6
-    }
-
-    fn row_height_hint(&self, table_id: u64, idx: usize) -> f32 {
-        let fallback = self.row_height_fallback();
-        self.table_metrics
-            .borrow()
-            .entry(table_id)
-            .and_then(|entry| entry.row(idx))
-            .map(|m| {
-                if m.max_height > 0.0 {
-                    m.max_height
-                } else {
-                    fallback
-                }
-            })
-            .unwrap_or(fallback)
     }
 
     fn update_row_height(&self, table_id: u64, idx: usize, height: f32) {
@@ -7370,29 +7341,6 @@ mod tests {
     }
 
     #[test]
-    fn test_row_needs_height_estimate_for_emphasis_and_strike() {
-        let renderer = MarkdownRenderer::new();
-        let row = vec![vec![
-            InlineSpan::Emphasis("alpha".to_string()),
-            InlineSpan::Strikethrough("gamma\ndelta".to_string()),
-        ]];
-        assert!(renderer.row_needs_height_estimate(&row));
-    }
-
-    #[test]
-    fn test_row_needs_height_estimate_code_and_link_without_newlines() {
-        let renderer = MarkdownRenderer::new();
-        let row = vec![vec![
-            InlineSpan::Code("code".to_string()),
-            InlineSpan::Link {
-                text: "link".to_string(),
-                url: "https://example.com".to_string(),
-            },
-        ]];
-        assert!(!renderer.row_needs_height_estimate(&row));
-    }
-
-    #[test]
     fn test_resolve_table_rects_clip_rect_fallbacks() {
         let renderer = MarkdownRenderer::new();
         let widths = vec![12.0];
@@ -8471,20 +8419,6 @@ fn main() {}
             let height = renderer.estimate_table_image_height(ui, &span, 2000.0);
             assert!(height > 0.0);
         });
-    }
-
-    #[test]
-    fn test_row_height_hint_uses_fallback_for_zero_height() {
-        let renderer = MarkdownRenderer::new();
-        let table_id = 42u64;
-        renderer
-            .table_metrics
-            .borrow_mut()
-            .entry_mut(table_id)
-            .ensure_row(0)
-            .max_height = 0.0;
-        let height = renderer.row_height_hint(table_id, 0);
-        assert_eq!(height, renderer.row_height_fallback());
     }
 
     #[test]
@@ -10578,7 +10512,14 @@ contexts:
             });
         });
 
-        let height = renderer.row_height_hint(table_id, 0);
+        // Check stored row height in metrics
+        let height = renderer
+            .table_metrics
+            .borrow()
+            .entry(table_id)
+            .and_then(|e| e.row(0))
+            .map(|r| r.max_height)
+            .unwrap_or(0.0);
         assert!(height > renderer.row_height_fallback() + 0.5);
     }
 
@@ -11632,23 +11573,6 @@ contexts:
     fn test_has_pipe_outside_inline_code_backticks() {
         assert!(MarkdownRenderer::has_pipe_outside_inline_code(r"\`|`"));
         assert!(!MarkdownRenderer::has_pipe_outside_inline_code("``a|b``"));
-    }
-
-    #[test]
-    fn test_row_needs_height_estimate_variants() {
-        let renderer = MarkdownRenderer::new();
-        let row_with_image = vec![vec![InlineSpan::Image {
-            src: "missing.png".to_string(),
-            alt: "Alt".to_string(),
-            title: None,
-        }]];
-        assert!(renderer.row_needs_height_estimate(&row_with_image));
-
-        let row_with_newline = vec![vec![InlineSpan::Text("line1\nline2".to_string())]];
-        assert!(renderer.row_needs_height_estimate(&row_with_newline));
-
-        let row_plain = vec![vec![InlineSpan::Text("plain".to_string())]];
-        assert!(!renderer.row_needs_height_estimate(&row_plain));
     }
 
     #[test]

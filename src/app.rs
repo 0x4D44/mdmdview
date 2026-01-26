@@ -350,6 +350,8 @@ pub struct MarkdownViewerApp {
     /// Queue of files waiting to be opened (from multi-file drop)
     pending_files: VecDeque<PathBuf>,
     screenshot: Option<ScreenshotState>,
+    /// Last title sent to the viewport (to avoid redundant updates)
+    last_sent_title: Option<String>,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -569,6 +571,7 @@ impl MarkdownViewerApp {
             drag_hover: false,
             pending_files: VecDeque::new(),
             screenshot: None,
+            last_sent_title: None,
         };
         // Load welcome content by default
         app.load_welcome_from_samples(SAMPLE_FILES, false);
@@ -2080,7 +2083,11 @@ impl MarkdownViewerApp {
         }
 
         // Keep native window title in sync with the current document
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.title.clone()));
+        // Only send command when title actually changes to avoid continuous repaints
+        if self.last_sent_title.as_ref() != Some(&self.title) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.title.clone()));
+            self.last_sent_title = Some(self.title.clone());
+        }
 
         let (monitor_size, outer_rect, inner_rect, is_fullscreen, is_maximized) = ctx.input(|i| {
             let vp = i.viewport();
