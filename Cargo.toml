@@ -10,7 +10,9 @@ name = "mdmdview"
 path = "src/main.rs"
 
 [dependencies]
-eframe = "0.27"
+# Disable accesskit (accessibility) to reduce idle CPU/GPU usage
+# See: https://github.com/emilk/egui/issues/4527
+eframe = { version = "0.27", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 egui = "0.27"
 egui_extras = "0.27"
 pulldown-cmark = "0.9"
