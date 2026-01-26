@@ -5927,7 +5927,10 @@ mod tests {
         assert!(svg.contains("<svg"));
         // Labels should be visible as SVG text
         assert!(svg.contains("gabby"), "Label 'gabby' should be in SVG");
-        assert!(svg.contains("Application"), "Label 'Application' should be in SVG");
+        assert!(
+            svg.contains("Application"),
+            "Label 'Application' should be in SVG"
+        );
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -5955,7 +5958,10 @@ mod tests {
 
         assert!(svg.contains("<svg"));
         // Ampersands should be escaped for valid XML/SVG
-        assert!(svg.contains("&amp;") || svg.contains("Parsing"), "Label text should be in SVG");
+        assert!(
+            svg.contains("&amp;") || svg.contains("Parsing"),
+            "Label text should be in SVG"
+        );
     }
 
     #[cfg(feature = "mermaid-quickjs")]
