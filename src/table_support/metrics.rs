@@ -101,13 +101,6 @@ impl TableMetricEntry {
         self.resolved_widths.extend_from_slice(widths);
         self.last_width_frame = frame_id;
 
-        // When widths change significantly, invalidate cached row heights
-        // so they get re-estimated with the new widths. This prevents
-        // scroll position miscalculations caused by stale height estimates.
-        if matches!(change, WidthChange::Large) {
-            self.rows.clear();
-        }
-
         change
     }
 
@@ -207,6 +200,32 @@ mod tests {
         assert_eq!(entry.update_widths(&[100.0, 120.0], 1), WidthChange::None);
         assert_eq!(entry.update_widths(&[100.2, 120.6], 2), WidthChange::Small);
         assert_eq!(entry.update_widths(&[140.0, 120.6], 3), WidthChange::Large);
+    }
+
+    #[test]
+    fn update_widths_preserves_rows_on_width_changes() {
+        let mut entry = TableMetricEntry::default();
+
+        // Set up some rows
+        entry.ensure_row(0).max_height = 20.0;
+        entry.ensure_row(1).max_height = 25.0;
+        assert_eq!(entry.rows.len(), 2);
+
+        // First update should preserve rows (uniform row heights approach)
+        assert_eq!(entry.update_widths(&[100.0, 120.0], 1), WidthChange::None);
+        assert_eq!(entry.rows.len(), 2, "first update should preserve rows");
+
+        // Small change should preserve rows
+        assert_eq!(entry.update_widths(&[100.2, 120.6], 2), WidthChange::Small);
+        assert_eq!(entry.rows.len(), 2, "small change should preserve rows");
+
+        // Large change should preserve rows
+        assert_eq!(entry.update_widths(&[140.0, 120.6], 3), WidthChange::Large);
+        assert_eq!(entry.rows.len(), 2, "large change should preserve rows");
+
+        // No change should preserve rows
+        assert_eq!(entry.update_widths(&[140.0, 120.6], 4), WidthChange::None);
+        assert_eq!(entry.rows.len(), 2, "no change should preserve rows");
     }
 
     #[test]
