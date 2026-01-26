@@ -4100,10 +4100,10 @@ impl MarkdownRenderer {
                     });
 
                     let fallback_row_height = self.row_height_fallback();
-                    let mut row_heights: Vec<f32> = (0..rows.len())
-                        .map(|idx| self.row_height_hint(table_id, idx))
-                        .collect();
-                    if needs_estimate {
+
+                    // Use uniform row height to avoid scroll issues with heterogeneous_rows.
+                    // Calculate the maximum height across all rows for consistency.
+                    let uniform_row_height = if needs_estimate {
                         let approx_widths = self.estimate_table_row_widths(
                             &column_specs,
                             &resolved_widths,
@@ -4114,26 +4114,35 @@ impl MarkdownRenderer {
                             scaled_down,
                         );
                         let style = ui.style().clone();
-                        let estimate_all_rows = rows.len() <= COLUMN_STATS_SAMPLE_ROWS;
-                        for (idx, row) in rows.iter().enumerate() {
-                            if estimate_all_rows || self.row_needs_height_estimate(row) {
-                                let estimate = self.estimate_table_row_height(
-                                    ui,
-                                    &style,
-                                    row,
-                                    &column_aligns,
-                                    &approx_widths,
-                                    fallback_row_height,
-                                );
-                                row_heights[idx] = row_heights[idx].max(estimate);
-                                // Cache the estimated height immediately so rows that aren't
-                                // rendered on this frame still have accurate height hints on
-                                // subsequent frames. Without this, off-screen rows revert to
-                                // fallback heights, causing scroll position miscalculations.
-                                self.update_row_height(table_id, idx, row_heights[idx]);
-                            }
+                        let mut max_height = fallback_row_height;
+                        for row in rows.iter() {
+                            let estimate = self.estimate_table_row_height(
+                                ui,
+                                &style,
+                                row,
+                                &column_aligns,
+                                &approx_widths,
+                                fallback_row_height,
+                            );
+                            max_height = max_height.max(estimate);
                         }
-                    }
+                        // Cache as uniform height for all rows
+                        for idx in 0..rows.len() {
+                            self.update_row_height(table_id, idx, max_height);
+                        }
+                        max_height
+                    } else {
+                        // Use cached max height from previous frames
+                        (0..rows.len())
+                            .filter_map(|idx| {
+                                self.table_metrics
+                                    .borrow()
+                                    .entry(table_id)
+                                    .and_then(|e| e.row(idx))
+                                    .map(|r| r.max_height)
+                            })
+                            .fold(fallback_row_height, f32::max)
+                    };
 
                     // Capture painter from outer UI BEFORE TableBuilder to ensure dividers
                     // paint on top of both header and body (fixes header divider visibility).
@@ -4193,18 +4202,18 @@ impl MarkdownRenderer {
                         })
                         .body(|body| {
                             // Capture the actual allocated column widths from the table layout system.
-                            // This MUST be done before heterogeneous_rows() consumes the body.
                             *column_widths.borrow_mut() = body.widths().to_vec();
 
                             // Capture body's layout rect for accurate table width calculation.
-                            // This is the allocated region, not the content bounds.
                             *body_layout_rect.borrow_mut() = Some(body.max_rect());
 
-                            let row_height_hints = row_heights.clone();
-                            body.heterogeneous_rows(row_height_hints.into_iter(), |mut row| {
+                            // Use uniform row height to avoid scroll calculation issues.
+                            // The rows() method renders all rows without virtualization issues.
+                            let row_count = rows.len();
+                            body.rows(uniform_row_height, row_count, |mut row| {
                                 let idx = row.index();
                                 let row_cells = rows.get(idx);
-                                let mut row_height = fallback_row_height;
+                                let mut actual_row_height = fallback_row_height;
                                 for (ci, _) in column_specs.iter().enumerate() {
                                     let mut cell_height = fallback_row_height;
                                     row.col(|ui| {
@@ -4230,27 +4239,14 @@ impl MarkdownRenderer {
                                             *body_clip_rect.borrow_mut() = Some(ui.clip_rect());
                                         }
                                     });
-                                    row_height = row_height.max(cell_height);
+                                    actual_row_height = actual_row_height.max(cell_height);
                                 }
-                                let height_delta = row_height - row_heights[idx];
-                                if height_delta.abs() > 0.5 {
+                                // Track actual heights to refine uniform height on next frame
+                                let height_delta = actual_row_height - uniform_row_height;
+                                if height_delta > 0.5 {
                                     height_change = true;
-                                    if std::env::var("MDMDVIEW_DEBUG_SCROLL").is_ok() {
-                                        use std::io::Write;
-                                        if let Ok(mut f) = std::fs::OpenOptions::new()
-                                            .create(true)
-                                            .append(true)
-                                            .open(r"c:\tmp\scroll-debug.log")
-                                        {
-                                            let _ = writeln!(
-                                                f,
-                                                "[TABLE] table={} row={} hint={:.1} actual={:.1} delta={:+.1}",
-                                                table_id, idx, row_heights[idx], row_height, height_delta
-                                            );
-                                        }
-                                    }
                                 }
-                                self.update_row_height(table_id, idx, row_height);
+                                self.update_row_height(table_id, idx, actual_row_height);
                                 self.note_row_rendered(table_id);
                             });
                         });
