@@ -2063,6 +2063,31 @@ impl MarkdownViewerApp {
     }
 
     fn update_impl(&mut self, ctx: &Context) {
+        // Debug: log repaint causes and input state when MDMDVIEW_DEBUG_REPAINT is set
+        if std::env::var("MDMDVIEW_DEBUG_REPAINT").is_ok() {
+            ctx.input(|i| {
+                let events_count = i.events.len();
+                let pointer_delta = i.pointer.delta();
+                let scroll_delta = i.raw_scroll_delta;
+                if events_count > 0
+                    || pointer_delta != egui::Vec2::ZERO
+                    || scroll_delta != egui::Vec2::ZERO
+                {
+                    eprintln!(
+                        "[INPUT] frame={} events={} pointer_delta={:?} scroll={:?}",
+                        ctx.frame_nr(),
+                        events_count,
+                        pointer_delta,
+                        scroll_delta
+                    );
+                }
+            });
+            let causes = ctx.repaint_causes();
+            if !causes.is_empty() {
+                eprintln!("[REPAINT] frame={} causes={:?}", ctx.frame_nr(), causes);
+            }
+        }
+
         self.handle_screenshot_events(ctx);
         self.poll_file_loads();
         if self.screenshot.as_ref().is_some_and(|state| state.done) {

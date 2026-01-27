@@ -464,6 +464,97 @@ impl SvgCache {
     }
 }
 
+/// LRU cache for Mermaid textures with both entry count and size limits.
+/// Prevents excessive GPU memory usage from large rendered diagrams.
+#[cfg(feature = "mermaid-quickjs")]
+struct TextureCache {
+    entries: HashMap<String, MermaidTextureEntry>,
+    order: VecDeque<String>,
+    capacity: usize,
+    max_bytes: usize,
+    current_bytes: usize,
+}
+
+#[cfg(feature = "mermaid-quickjs")]
+impl TextureCache {
+    fn new(capacity: usize, max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            capacity: capacity.max(1),
+            max_bytes,
+            current_bytes: 0,
+        }
+    }
+
+    /// Calculate memory size of a texture entry in bytes (width * height * 4 for RGBA)
+    fn texture_bytes(entry: &MermaidTextureEntry) -> usize {
+        entry.size[0] as usize * entry.size[1] as usize * 4
+    }
+
+    fn get(&mut self, key: &String) -> Option<MermaidTextureEntry> {
+        let value = self.entries.get(key).cloned();
+        if value.is_some() {
+            self.touch(key);
+        }
+        value
+    }
+
+    fn insert(&mut self, key: String, entry: MermaidTextureEntry) {
+        let entry_bytes = Self::texture_bytes(&entry);
+
+        // If key exists, update and adjust size tracking
+        if let Some(old_entry) = self.entries.get(&key) {
+            self.current_bytes = self
+                .current_bytes
+                .saturating_sub(Self::texture_bytes(old_entry));
+            self.entries.insert(key.clone(), entry);
+            self.current_bytes += entry_bytes;
+            self.touch(&key);
+            return;
+        }
+
+        // Evict if adding this texture would exceed byte limit
+        while self.current_bytes + entry_bytes > self.max_bytes && !self.order.is_empty() {
+            self.evict_oldest();
+        }
+
+        // Also respect entry count limit
+        while self.entries.len() >= self.capacity && !self.order.is_empty() {
+            self.evict_oldest();
+        }
+
+        self.order.push_back(key.clone());
+        self.entries.insert(key, entry);
+        self.current_bytes += entry_bytes;
+    }
+
+    fn evict_oldest(&mut self) {
+        if let Some(old_key) = self.order.pop_front() {
+            if let Some(old_entry) = self.entries.remove(&old_key) {
+                self.current_bytes = self
+                    .current_bytes
+                    .saturating_sub(Self::texture_bytes(&old_entry));
+            }
+        }
+    }
+
+    fn touch(&mut self, key: &String) {
+        self.order.retain(|k| k != key);
+        self.order.push_back(key.clone());
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    fn current_bytes(&self) -> usize {
+        self.current_bytes
+    }
+}
+
 #[cfg(feature = "mermaid-quickjs")]
 struct MermaidRequest {
     svg_key: u64,
@@ -522,7 +613,7 @@ struct MermaidThemeValues {
 
 pub(crate) struct MermaidRenderer {
     #[cfg(feature = "mermaid-quickjs")]
-    mermaid_textures: RefCell<LruCache<String, MermaidTextureEntry>>,
+    mermaid_textures: RefCell<TextureCache>,
     #[cfg(feature = "mermaid-quickjs")]
     mermaid_pending: RefCell<HashSet<String>>,
     #[cfg(feature = "mermaid-quickjs")]
@@ -549,6 +640,10 @@ pub(crate) struct MermaidRenderer {
 impl MermaidRenderer {
     #[cfg(feature = "mermaid-quickjs")]
     const MERMAID_TEXTURE_CACHE_CAPACITY: usize = 128;
+    /// Maximum total bytes for texture cache (256MB). Textures at 4096x4096 are 64MB each,
+    /// so 128 max-size textures would use 8GB. Size limit ensures bounded memory usage.
+    #[cfg(feature = "mermaid-quickjs")]
+    const MERMAID_TEXTURE_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
     #[cfg(any(test, feature = "mermaid-quickjs"))]
     const MERMAID_WIDTH_BUCKET_STEP: u32 = 32;
     #[cfg(any(test, feature = "mermaid-quickjs"))]
@@ -587,7 +682,10 @@ impl MermaidRenderer {
         let worker_handles = Self::spawn_mermaid_workers(mermaid_job_rx, mermaid_result_tx);
         Self {
             #[cfg(feature = "mermaid-quickjs")]
-            mermaid_textures: RefCell::new(LruCache::new(Self::MERMAID_TEXTURE_CACHE_CAPACITY)),
+            mermaid_textures: RefCell::new(TextureCache::new(
+                Self::MERMAID_TEXTURE_CACHE_CAPACITY,
+                Self::MERMAID_TEXTURE_CACHE_MAX_BYTES,
+            )),
             #[cfg(feature = "mermaid-quickjs")]
             mermaid_pending: RefCell::new(HashSet::new()),
             #[cfg(feature = "mermaid-quickjs")]
@@ -5179,7 +5277,7 @@ mod tests {
         result_rx: MermaidResultReceiver,
     ) -> MermaidRenderer {
         MermaidRenderer {
-            mermaid_textures: RefCell::new(LruCache::new(4)),
+            mermaid_textures: RefCell::new(TextureCache::new(4, 10 * 1024 * 1024)),
             mermaid_pending: RefCell::new(HashSet::new()),
             mermaid_frame_pending: Cell::new(false),
             mermaid_svg_cache: RefCell::new(SvgCache::new(4, 1024 * 1024)),
@@ -5499,6 +5597,141 @@ mod tests {
         assert!(cache.get(&1).is_some()); // Entry 1 survived because it was accessed
         assert!(cache.get(&2).is_none()); // Entry 2 was evicted
         assert!(cache.get(&3).is_some());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_texture_cache_size_based_eviction() {
+        let ctx = egui::Context::default();
+        // Create a small texture that's 10x10 = 100 pixels = 400 bytes
+        let small_tex = ctx.load_texture(
+            "small",
+            egui::ColorImage::new([10, 10], Color32::WHITE),
+            egui::TextureOptions::LINEAR,
+        );
+        // Create textures and set max_bytes to 1000 (enough for 2 textures but not 3)
+        let mut cache = TextureCache::new(10, 1000);
+
+        let entry1 = MermaidTextureEntry {
+            texture: small_tex.clone(),
+            size: [10, 10], // 400 bytes
+        };
+        let entry2 = MermaidTextureEntry {
+            texture: small_tex.clone(),
+            size: [10, 10], // 400 bytes
+        };
+        let entry3 = MermaidTextureEntry {
+            texture: small_tex.clone(),
+            size: [10, 10], // 400 bytes
+        };
+
+        cache.insert("a".to_string(), entry1);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.current_bytes(), 400);
+
+        cache.insert("b".to_string(), entry2);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.current_bytes(), 800);
+
+        // This should evict "a" because total would exceed 1000 bytes
+        cache.insert("c".to_string(), entry3);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.current_bytes(), 800);
+        assert!(cache.get(&"a".to_string()).is_none()); // Evicted
+        assert!(cache.get(&"b".to_string()).is_some());
+        assert!(cache.get(&"c".to_string()).is_some());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_texture_cache_count_based_eviction() {
+        let ctx = egui::Context::default();
+        let small_tex = ctx.load_texture(
+            "count_test",
+            egui::ColorImage::new([1, 1], Color32::WHITE),
+            egui::TextureOptions::LINEAR,
+        );
+        // Capacity 2, large byte limit (count-based eviction should trigger first)
+        let mut cache = TextureCache::new(2, 1024 * 1024);
+
+        let entry = MermaidTextureEntry {
+            texture: small_tex.clone(),
+            size: [1, 1], // 4 bytes
+        };
+
+        cache.insert("a".to_string(), entry.clone());
+        cache.insert("b".to_string(), entry.clone());
+        assert_eq!(cache.len(), 2);
+
+        // This should evict "a" because capacity is 2
+        cache.insert("c".to_string(), entry.clone());
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get(&"a".to_string()).is_none());
+        assert!(cache.get(&"b".to_string()).is_some());
+        assert!(cache.get(&"c".to_string()).is_some());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_texture_cache_update_existing_key() {
+        let ctx = egui::Context::default();
+        let small_tex = ctx.load_texture(
+            "update_test",
+            egui::ColorImage::new([5, 5], Color32::WHITE),
+            egui::TextureOptions::LINEAR,
+        );
+        let large_tex = ctx.load_texture(
+            "update_test_large",
+            egui::ColorImage::new([10, 10], Color32::WHITE),
+            egui::TextureOptions::LINEAR,
+        );
+        let mut cache = TextureCache::new(10, 1024 * 1024);
+
+        let small_entry = MermaidTextureEntry {
+            texture: small_tex,
+            size: [5, 5], // 100 bytes
+        };
+        let large_entry = MermaidTextureEntry {
+            texture: large_tex,
+            size: [10, 10], // 400 bytes
+        };
+
+        cache.insert("a".to_string(), small_entry);
+        assert_eq!(cache.current_bytes(), 100);
+
+        // Update same key with larger entry
+        cache.insert("a".to_string(), large_entry);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.current_bytes(), 400);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_texture_cache_touch_on_get() {
+        let ctx = egui::Context::default();
+        let small_tex = ctx.load_texture(
+            "touch_test",
+            egui::ColorImage::new([1, 1], Color32::WHITE),
+            egui::TextureOptions::LINEAR,
+        );
+        let mut cache = TextureCache::new(2, 1024 * 1024);
+
+        let entry = MermaidTextureEntry {
+            texture: small_tex.clone(),
+            size: [1, 1],
+        };
+
+        cache.insert("a".to_string(), entry.clone());
+        cache.insert("b".to_string(), entry.clone());
+
+        // Touch "a" by getting it
+        let _ = cache.get(&"a".to_string());
+
+        // Now "c" should evict "b" (not "a") because "a" was touched more recently
+        cache.insert("c".to_string(), entry.clone());
+        assert!(cache.get(&"a".to_string()).is_some());
+        assert!(cache.get(&"b".to_string()).is_none()); // Evicted
+        assert!(cache.get(&"c".to_string()).is_some());
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -6521,7 +6754,7 @@ mod tests {
     fn test_poll_mermaid_results_handles_variants() {
         let (result_tx, result_rx) = bounded(10);
         let renderer = MermaidRenderer {
-            mermaid_textures: RefCell::new(LruCache::new(4)),
+            mermaid_textures: RefCell::new(TextureCache::new(4, 10 * 1024 * 1024)),
             mermaid_pending: RefCell::new(std::collections::HashSet::new()),
             mermaid_frame_pending: std::cell::Cell::new(false),
             mermaid_svg_cache: RefCell::new(SvgCache::new(4, 1024 * 1024)),
