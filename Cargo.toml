@@ -2,7 +2,7 @@
 name = "mdmdview"
 version = "1.1.0"
 edition = "2021"
-description = "A simple markdown viewer for Windows"
+description = "mdmdview"
 authors = ["Your Name <your.email@example.com>"]
 
 [[bin]]
@@ -32,6 +32,7 @@ resvg = "0.43"
 tiny-skia = "0.11"
 htmlescape = "0.3"
 ttf-parser = "0.25"
+ureq = "2.9"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
