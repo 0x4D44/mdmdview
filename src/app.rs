@@ -352,6 +352,8 @@ pub struct MarkdownViewerApp {
     screenshot: Option<ScreenshotState>,
     /// Last title sent to the viewport (to avoid redundant updates)
     last_sent_title: Option<String>,
+    /// Allow loading images from remote URLs (http/https)
+    allow_remote_images: bool,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -572,6 +574,7 @@ impl MarkdownViewerApp {
             pending_files: VecDeque::new(),
             screenshot: None,
             last_sent_title: None,
+            allow_remote_images: false,
         };
         // Load welcome content by default
         app.load_welcome_from_samples(SAMPLE_FILES, false);
@@ -1705,6 +1708,28 @@ impl MarkdownViewerApp {
                 self.wrap_raw = !self.wrap_raw;
             }
         });
+
+        ui.horizontal(|ui| {
+            let clicked = ui
+                .add(egui::SelectableLabel::new(
+                    self.allow_remote_images,
+                    Self::menu_text_with_mnemonic(
+                        None,
+                        "Allow Remote Images",
+                        'A',
+                        alt_pressed,
+                        menu_text_color,
+                    ),
+                ))
+                .clicked();
+            if app_action_triggered(clicked, "menu_allow_remote_images") {
+                self.allow_remote_images = !self.allow_remote_images;
+                self.renderer
+                    .set_allow_remote_images(self.allow_remote_images);
+            }
+        });
+
+        ui.separator();
 
         ui.horizontal(|ui| {
             let clicked = ui

@@ -16,6 +16,7 @@ use pulldown_cmark::{Alignment, Event, LinkType, Options, Parser, Tag};
 use std::cell::{Cell, RefCell};
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -442,6 +443,7 @@ struct ImageFailure {
 enum ImageLoadSource {
     Embedded(&'static [u8]),
     File(PathBuf),
+    Remote(String),
 }
 
 struct ImageLoadRequest {
@@ -491,6 +493,8 @@ pub struct MarkdownRenderer {
     table_layout_cache: RefCell<CellLayoutCache>,
     table_metrics: RefCell<TableMetrics>,
     column_stats_cache: RefCell<HashMap<u64, ColumnStatsCacheEntry>>,
+    /// Allow loading images from remote URLs (http/https)
+    allow_remote_images: Cell<bool>,
 }
 
 impl Default for MarkdownRenderer {
@@ -865,7 +869,18 @@ impl MarkdownRenderer {
             table_layout_cache: RefCell::new(CellLayoutCache::new(TABLE_LAYOUT_CACHE_CAPACITY)),
             table_metrics: RefCell::new(TableMetrics::default()),
             column_stats_cache: RefCell::new(HashMap::new()),
+            allow_remote_images: Cell::new(false),
         }
+    }
+
+    /// Set whether remote images (http/https URLs) should be loaded
+    pub fn set_allow_remote_images(&self, allow: bool) {
+        self.allow_remote_images.set(allow);
+    }
+
+    /// Get whether remote images are currently allowed
+    pub fn allow_remote_images(&self) -> bool {
+        self.allow_remote_images.get()
     }
 
     fn spawn_image_loader(job_rx: Receiver<ImageLoadRequest>, result_tx: Sender<ImageLoadResult>) {
@@ -905,6 +920,26 @@ impl MarkdownRenderer {
                             }
                         }
                     }
+                    ImageLoadSource::Remote(url) => match ureq::get(&url).call() {
+                        Ok(response) => {
+                            let mut bytes = Vec::new();
+                            match response.into_reader().read_to_end(&mut bytes) {
+                                Ok(_) => {
+                                    match image_decode::bytes_to_color_image_guess(&bytes, None) {
+                                        Some((image, w, h)) => ImageLoadResult::Loaded {
+                                            key,
+                                            image,
+                                            size: [w, h],
+                                            modified: None,
+                                        },
+                                        None => ImageLoadResult::Failed { key },
+                                    }
+                                }
+                                Err(_) => ImageLoadResult::Failed { key },
+                            }
+                        }
+                        Err(_) => ImageLoadResult::Failed { key },
+                    },
                 };
                 let _ = result_tx.send(result);
             }
@@ -5227,8 +5262,10 @@ impl MarkdownRenderer {
         _ui: &egui::Ui,
         resolved_src: &str,
     ) -> Option<(egui::TextureHandle, u32, u32)> {
-        // Reject remote for now
-        if resolved_src.starts_with("http://") || resolved_src.starts_with("https://") {
+        let is_remote = resolved_src.starts_with("http://") || resolved_src.starts_with("https://");
+
+        // Check if remote images are disabled
+        if is_remote && !self.allow_remote_images.get() {
             return None;
         }
 
@@ -5238,8 +5275,8 @@ impl MarkdownRenderer {
         {
             let mut cache = self.image_textures.borrow_mut();
             if let Some(entry) = cache.get(resolved_src) {
-                let stale = if embedded.is_some() {
-                    false
+                let stale = if embedded.is_some() || is_remote {
+                    false // Embedded and remote images don't go stale
                 } else {
                     Self::image_source_stale(entry.modified, path)
                 };
@@ -5260,6 +5297,8 @@ impl MarkdownRenderer {
 
         let source = if let Some(bytes) = embedded {
             ImageLoadSource::Embedded(bytes)
+        } else if is_remote {
+            ImageLoadSource::Remote(resolved_src.to_string())
         } else {
             if !path.exists() {
                 self.note_image_failure(resolved_src);
