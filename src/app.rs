@@ -157,6 +157,31 @@ struct FileLoadResult {
     content: Result<(String, bool), String>,
 }
 
+/// Request for background readability calculation
+struct ReadabilityRequest {
+    id: u64,
+    content: String,
+}
+
+/// Result of readability calculation
+struct ReadabilityResult {
+    id: u64,
+    stats: ReadabilityStats,
+}
+
+/// Document readability statistics
+#[derive(Clone, Default)]
+struct ReadabilityStats {
+    /// Flesch Reading Ease score (0-100, higher = easier)
+    flesch_ease: f32,
+    /// Estimated reading grade level
+    grade_level: f32,
+    /// Number of sentences detected
+    sentences: usize,
+    /// Number of syllables detected
+    syllables: usize,
+}
+
 #[derive(Clone)]
 struct PendingFileLoad {
     id: u64,
@@ -360,6 +385,14 @@ pub struct MarkdownViewerApp {
     last_sent_title: Option<String>,
     /// Allow loading images from remote URLs (http/https)
     allow_remote_images: bool,
+    /// Channel to send readability calculation requests
+    readability_tx: Sender<ReadabilityRequest>,
+    /// Channel to receive readability calculation results
+    readability_rx: Receiver<ReadabilityResult>,
+    /// Current readability stats (None if not yet calculated)
+    readability_stats: Option<ReadabilityStats>,
+    /// ID of the current readability calculation request
+    readability_request_id: u64,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -538,6 +571,7 @@ impl MarkdownViewerApp {
     /// Create a new application instance
     pub fn new() -> Self {
         let (file_load_tx, file_load_rx) = Self::spawn_file_loader();
+        let (readability_tx, readability_rx) = Self::spawn_readability_worker();
         let mut app = Self {
             renderer: MarkdownRenderer::new(),
             current_file: None,
@@ -581,6 +615,10 @@ impl MarkdownViewerApp {
             screenshot: None,
             last_sent_title: None,
             allow_remote_images: false,
+            readability_tx,
+            readability_rx,
+            readability_stats: None,
+            readability_request_id: 0,
         };
         // Load welcome content by default
         app.load_welcome_from_samples(SAMPLE_FILES, false);
@@ -776,6 +814,9 @@ impl MarkdownViewerApp {
                 self.parsed_elements.clear();
             }
         }
+
+        // Trigger background readability calculation
+        self.request_readability_calculation();
     }
 
     /// Load markdown content from a file path
@@ -887,6 +928,113 @@ impl MarkdownViewerApp {
             eprintln!("Failed to start file loader thread: {err}");
         }
         (request_tx, result_rx)
+    }
+
+    fn spawn_readability_worker() -> (Sender<ReadabilityRequest>, Receiver<ReadabilityResult>) {
+        let (request_tx, request_rx) = unbounded::<ReadabilityRequest>();
+        let (result_tx, result_rx) = unbounded::<ReadabilityResult>();
+        if let Err(err) = Self::spawn_named_thread("mdmdview-readability", move || {
+            for request in request_rx.iter() {
+                let stats = Self::calculate_readability(&request.content);
+                let _ = result_tx.send(ReadabilityResult {
+                    id: request.id,
+                    stats,
+                });
+            }
+        }) {
+            eprintln!("Failed to start readability thread: {err}");
+        }
+        (request_tx, result_rx)
+    }
+
+    /// Calculate readability statistics for the given text
+    fn calculate_readability(text: &str) -> ReadabilityStats {
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let word_count = words.len();
+
+        if word_count == 0 {
+            return ReadabilityStats::default();
+        }
+
+        // Count sentences (periods, exclamation marks, question marks)
+        let sentence_count = text
+            .chars()
+            .filter(|&c| c == '.' || c == '!' || c == '?')
+            .count()
+            .max(1); // At least 1 sentence
+
+        // Count syllables
+        let syllable_count: usize = words.iter().map(|w| Self::count_syllables(w)).sum();
+
+        let words_f = word_count as f32;
+        let sentences_f = sentence_count as f32;
+        let syllables_f = syllable_count as f32;
+
+        // Flesch Reading Ease: 206.835 - 1.015*(words/sentences) - 84.6*(syllables/words)
+        let flesch_ease =
+            206.835 - 1.015 * (words_f / sentences_f) - 84.6 * (syllables_f / words_f);
+
+        // Flesch-Kincaid Grade Level: 0.39*(words/sentences) + 11.8*(syllables/words) - 15.59
+        let grade_level = 0.39 * (words_f / sentences_f) + 11.8 * (syllables_f / words_f) - 15.59;
+
+        ReadabilityStats {
+            flesch_ease: flesch_ease.clamp(0.0, 100.0),
+            grade_level: grade_level.max(0.0),
+            sentences: sentence_count,
+            syllables: syllable_count,
+        }
+    }
+
+    /// Estimate syllable count for a word using vowel groups
+    fn count_syllables(word: &str) -> usize {
+        let word = word.to_lowercase();
+        let chars: Vec<char> = word.chars().filter(|c| c.is_alphabetic()).collect();
+
+        if chars.is_empty() {
+            return 0;
+        }
+
+        let vowels = ['a', 'e', 'i', 'o', 'u', 'y'];
+        let mut count = 0;
+        let mut prev_vowel = false;
+
+        for ch in &chars {
+            let is_vowel = vowels.contains(ch);
+            if is_vowel && !prev_vowel {
+                count += 1;
+            }
+            prev_vowel = is_vowel;
+        }
+
+        // Adjust for silent 'e' at end
+        if chars.len() > 2 && chars.last() == Some(&'e') {
+            let second_last = chars.get(chars.len() - 2);
+            if second_last.map(|c| !vowels.contains(c)).unwrap_or(false) && count > 1 {
+                count -= 1;
+            }
+        }
+
+        count.max(1) // Every word has at least one syllable
+    }
+
+    /// Request readability calculation for current content
+    fn request_readability_calculation(&mut self) {
+        self.readability_request_id += 1;
+        self.readability_stats = None; // Clear while calculating
+        let _ = self.readability_tx.send(ReadabilityRequest {
+            id: self.readability_request_id,
+            content: self.current_content.clone(),
+        });
+    }
+
+    /// Poll for readability calculation results
+    fn poll_readability(&mut self) {
+        while let Ok(result) = self.readability_rx.try_recv() {
+            // Only accept result if it matches current request
+            if result.id == self.readability_request_id {
+                self.readability_stats = Some(result.stats);
+            }
+        }
     }
 
     fn poll_file_loads(&mut self) {
@@ -1987,10 +2135,26 @@ impl MarkdownViewerApp {
                         ViewMode::Rendered => "Rendered",
                         ViewMode::Raw => "Raw",
                     };
-                    let status = format!(
-                        "Mode: {} | Elements: {} | Words: {} | Characters: {}",
-                        mode, element_count, word_count, char_count
-                    );
+
+                    // Readability score
+                    let readability = match &self.readability_stats {
+                        Some(stats) => format!("Flesch: {:.0}", stats.flesch_ease),
+                        None if !self.current_content.is_empty() => "Flesch: ...".to_string(),
+                        None => String::new(),
+                    };
+
+                    let status = if readability.is_empty() {
+                        format!(
+                            "Mode: {} | Elements: {} | Words: {} | Characters: {}",
+                            mode, element_count, word_count, char_count
+                        )
+                    } else {
+                        format!(
+                            "Mode: {} | Elements: {} | Words: {} | {} | Characters: {}",
+                            mode, element_count, word_count, readability, char_count
+                        )
+                    };
+
                     #[cfg(test)]
                     {
                         ui.label(status);
@@ -2012,6 +2176,32 @@ impl MarkdownViewerApp {
     fn render_status_tooltip(&self, ui: &mut egui::Ui) {
         ui.label(format!("Version: {}", BUILD_VERSION));
         ui.label(format!("Built: {}", BUILD_TIMESTAMP));
+
+        if let Some(stats) = &self.readability_stats {
+            ui.separator();
+            ui.label(format!("Flesch Reading Ease: {:.1}", stats.flesch_ease));
+            ui.label(format!("Grade Level: {:.1}", stats.grade_level));
+            ui.label(format!("Sentences: {}", stats.sentences));
+            ui.label(format!("Syllables: {}", stats.syllables));
+
+            // Interpretation
+            let interpretation = if stats.flesch_ease >= 90.0 {
+                "Very Easy (5th grade)"
+            } else if stats.flesch_ease >= 80.0 {
+                "Easy (6th grade)"
+            } else if stats.flesch_ease >= 70.0 {
+                "Fairly Easy (7th grade)"
+            } else if stats.flesch_ease >= 60.0 {
+                "Standard (8th-9th grade)"
+            } else if stats.flesch_ease >= 50.0 {
+                "Fairly Difficult (10th-12th grade)"
+            } else if stats.flesch_ease >= 30.0 {
+                "Difficult (College)"
+            } else {
+                "Very Difficult (College graduate)"
+            };
+            ui.label(format!("Reading Level: {}", interpretation));
+        }
     }
     /// Handle drag-drop events from egui
     fn handle_drag_drop_events(&mut self, ctx: &Context) {
@@ -2122,6 +2312,7 @@ impl MarkdownViewerApp {
 
         self.handle_screenshot_events(ctx);
         self.poll_file_loads();
+        self.poll_readability();
         if self.screenshot.as_ref().is_some_and(|state| state.done) {
             return;
         }
@@ -7287,5 +7478,45 @@ The end.
             let _guard = EnvGuard::set("MDMDVIEW_TMP_ENV", "value");
         }
         assert!(std::env::var("MDMDVIEW_TMP_ENV").is_err());
+    }
+
+    #[test]
+    fn test_count_syllables_basic_words() {
+        assert_eq!(MarkdownViewerApp::count_syllables("hello"), 2);
+        assert_eq!(MarkdownViewerApp::count_syllables("world"), 1);
+        assert_eq!(MarkdownViewerApp::count_syllables("computer"), 3);
+        assert_eq!(MarkdownViewerApp::count_syllables("the"), 1);
+        assert_eq!(MarkdownViewerApp::count_syllables("a"), 1);
+        assert_eq!(MarkdownViewerApp::count_syllables(""), 0);
+        // Silent e
+        assert_eq!(MarkdownViewerApp::count_syllables("make"), 1);
+        assert_eq!(MarkdownViewerApp::count_syllables("time"), 1);
+    }
+
+    #[test]
+    fn test_calculate_readability_empty() {
+        let stats = MarkdownViewerApp::calculate_readability("");
+        assert_eq!(stats.flesch_ease, 0.0);
+        assert_eq!(stats.sentences, 0);
+        assert_eq!(stats.syllables, 0);
+    }
+
+    #[test]
+    fn test_calculate_readability_simple_text() {
+        let text = "The cat sat on the mat. The dog ran away.";
+        let stats = MarkdownViewerApp::calculate_readability(text);
+        assert!(stats.flesch_ease > 80.0); // Should be very easy
+        assert_eq!(stats.sentences, 2);
+        assert!(stats.syllables > 0);
+    }
+
+    #[test]
+    fn test_calculate_readability_complex_text() {
+        let text = "The implementation of sophisticated algorithms \
+                    necessitates comprehensive understanding of \
+                    computational complexity theory.";
+        let stats = MarkdownViewerApp::calculate_readability(text);
+        assert!(stats.flesch_ease < 50.0); // Should be difficult
+        assert_eq!(stats.sentences, 1);
     }
 }
