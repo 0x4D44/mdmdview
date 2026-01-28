@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 
-// Return embedded emoji sprites keyed by real Unicode emoji characters.
+/// Returns the embedded PNG bytes for a known emoji character.
+///
+/// This function uses pattern matching and never performs array indexing,
+/// so it cannot panic regardless of input. Unknown emoji characters
+/// return `None`.
 pub fn image_bytes_for(emoji: &str) -> Option<&'static [u8]> {
     match emoji {
         "\u{1f389}" => Some(include_bytes!(concat!(
@@ -79,6 +83,11 @@ pub fn image_bytes_for(emoji: &str) -> Option<&'static [u8]> {
     }
 }
 
+/// Returns a reference to the static shortcode-to-emoji mapping.
+///
+/// Callers should use `.get()` for safe lookups that return `Option`.
+/// For convenience, prefer using `emoji_for_shortcode()` which wraps
+/// this safely.
 pub fn shortcode_map() -> &'static HashMap<&'static str, &'static str> {
     use std::sync::OnceLock;
     static MAP: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
@@ -105,6 +114,15 @@ pub fn shortcode_map() -> &'static HashMap<&'static str, &'static str> {
             (":wrench:", "\u{1f527}"),
         ])
     })
+}
+
+/// Safely looks up an emoji by its shortcode (e.g., ":rocket:").
+///
+/// Returns `Some(emoji_str)` if the shortcode is known, `None` otherwise.
+/// This function never panics regardless of input.
+#[inline]
+pub fn emoji_for_shortcode(shortcode: &str) -> Option<&'static str> {
+    shortcode_map().get(shortcode).copied()
 }
 
 #[cfg(test)]
@@ -155,5 +173,19 @@ mod tests {
         assert_eq!(map.get(":fire:"), Some(&"\u{1f525}"));
         assert_eq!(map.get(":wrench:"), Some(&"\u{1f527}"));
         assert!(map.get(":does_not_exist:").is_none());
+    }
+
+    #[test]
+    fn test_emoji_for_shortcode() {
+        // Known shortcodes return Some
+        assert_eq!(emoji_for_shortcode(":rocket:"), Some("\u{1f680}"));
+        assert_eq!(emoji_for_shortcode(":tada:"), Some("\u{1f389}"));
+        assert_eq!(emoji_for_shortcode(":fire:"), Some("\u{1f525}"));
+
+        // Unknown shortcodes return None (no panic)
+        assert_eq!(emoji_for_shortcode(":unknown:"), None);
+        assert_eq!(emoji_for_shortcode(""), None);
+        assert_eq!(emoji_for_shortcode("no_colons"), None);
+        assert_eq!(emoji_for_shortcode(":partial"), None);
     }
 }

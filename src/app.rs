@@ -21,6 +21,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
@@ -30,6 +31,11 @@ pub const APP_TITLE_PREFIX: &str = "mdmdview";
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TIMESTAMP: &str = env!("MDMDVIEW_BUILD_TIMESTAMP");
 const ASYNC_LOAD_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024;
+/// Maximum number of entries in the navigation history
+const MAX_HISTORY_SIZE: usize = 100;
+
+/// Cached result of MDMDVIEW_DEBUG_REPAINT environment variable check
+static DEBUG_REPAINT: OnceLock<bool> = OnceLock::new();
 
 #[cfg(test)]
 thread_local! {
@@ -569,7 +575,7 @@ impl MarkdownViewerApp {
             pending_raw_cursor_line_move: None,
             history: Vec::new(),
             history_index: 0,
-            max_history: 50,
+            max_history: MAX_HISTORY_SIZE,
             drag_hover: false,
             pending_files: VecDeque::new(),
             screenshot: None,
@@ -2089,7 +2095,7 @@ impl MarkdownViewerApp {
 
     fn update_impl(&mut self, ctx: &Context) {
         // Debug: log repaint causes and input state when MDMDVIEW_DEBUG_REPAINT is set
-        if std::env::var("MDMDVIEW_DEBUG_REPAINT").is_ok() {
+        if *DEBUG_REPAINT.get_or_init(|| std::env::var("MDMDVIEW_DEBUG_REPAINT").is_ok()) {
             ctx.input(|i| {
                 let events_count = i.events.len();
                 let pointer_delta = i.pointer.delta();

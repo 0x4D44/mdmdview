@@ -1202,7 +1202,12 @@ impl MermaidRenderer {
                             }
                         }
                     };
-                    let _ = worker_tx.send(payload);
+                    // Use try_send to avoid blocking if result channel is full.
+                    // This prevents deadlock during shutdown: if Drop joins workers
+                    // while they're blocked on send (because result_rx isn't being
+                    // polled), we'd hang forever. Dropping results is acceptable
+                    // since we're shutting down anyway.
+                    let _ = worker_tx.try_send(payload);
                 }
             })
     }
