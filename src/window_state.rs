@@ -9,6 +9,12 @@ pub struct WindowState {
     pub maximized: bool,
 }
 
+/// Application settings that persist across sessions
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AppSettings {
+    pub allow_remote_images: bool,
+}
+
 fn config_dir() -> Option<PathBuf> {
     // Cross‑platform config dir without extra deps
     #[cfg(target_os = "windows")]
@@ -176,6 +182,100 @@ fn save_window_state_registry(state: &WindowState) -> std::io::Result<()> {
     key.set_value("Width", &to_u32(state.size[0]))?;
     key.set_value("Height", &to_u32(state.size[1]))?;
     key.set_value("Maximized", &(state.maximized as u32))?;
+    Ok(())
+}
+
+// --- App Settings persistence ---
+
+fn settings_path() -> Option<PathBuf> {
+    config_dir().map(|mut dir| {
+        dir.push("settings.txt");
+        dir
+    })
+}
+
+pub fn load_app_settings() -> AppSettings {
+    #[cfg(windows)]
+    {
+        if let Some(settings) = load_app_settings_registry() {
+            return settings;
+        }
+    }
+    // Fall back to file-based storage
+    let Some(path) = settings_path() else {
+        return AppSettings::default();
+    };
+    let Ok(contents) = fs::read_to_string(path) else {
+        return AppSettings::default();
+    };
+    let mut settings = AppSettings::default();
+    for line in contents.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            match key.trim() {
+                "allow_remote_images" => {
+                    settings.allow_remote_images = matches!(value.trim(), "1" | "true");
+                }
+                _ => {}
+            }
+        }
+    }
+    settings
+}
+
+pub fn save_app_settings(settings: &AppSettings) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        if let Err(e) = save_app_settings_registry(settings) {
+            eprintln!("Failed to write app settings to registry: {e}");
+        }
+    }
+    if let Some(mut dir) = config_dir() {
+        if !dir.exists() {
+            fs::create_dir_all(&dir)?;
+        }
+        dir.push("settings.txt");
+        let mut f = fs::File::create(&dir)?;
+        writeln!(f, "allow_remote_images={}", settings.allow_remote_images as u8)?;
+    }
+    Ok(())
+}
+
+#[cfg(all(windows, not(test)))]
+fn load_app_settings_registry() -> Option<AppSettings> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let key = hkcu.open_subkey("Software\\MarkdownView").ok()?;
+    let allow_remote: u32 = key.get_value("AllowRemoteImages").unwrap_or(0);
+    Some(AppSettings {
+        allow_remote_images: allow_remote != 0,
+    })
+}
+
+#[cfg(all(windows, not(test)))]
+fn save_app_settings_registry(settings: &AppSettings) -> std::io::Result<()> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
+    use winreg::RegKey;
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (key, _disp) =
+        hkcu.create_subkey_with_flags("Software\\MarkdownView", KEY_READ | KEY_WRITE)?;
+    key.set_value("AllowRemoteImages", &(settings.allow_remote_images as u32))?;
+    Ok(())
+}
+
+#[cfg(all(windows, test))]
+thread_local! {
+    static FORCED_SETTINGS_LOAD: std::cell::RefCell<Option<AppSettings>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(windows, test))]
+fn load_app_settings_registry() -> Option<AppSettings> {
+    FORCED_SETTINGS_LOAD.with(|slot| slot.borrow_mut().take())
+}
+
+#[cfg(all(windows, test))]
+fn save_app_settings_registry(_settings: &AppSettings) -> std::io::Result<()> {
     Ok(())
 }
 

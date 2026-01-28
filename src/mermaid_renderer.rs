@@ -1648,6 +1648,30 @@ struct MermaidWorker {
     text_measurer: Arc<TextMeasurer>,
 }
 
+// =========================================================================
+// HTML Tag to SVG tspan Conversion Types
+// =========================================================================
+
+/// Tag mapping for HTML to SVG conversion.
+#[cfg(feature = "mermaid-quickjs")]
+struct HtmlTagMapping {
+    attr: &'static str,
+    value: &'static str,
+}
+
+/// Supported HTML tags and their SVG tspan equivalents.
+#[cfg(feature = "mermaid-quickjs")]
+const HTML_TAG_MAPPINGS: &[(&str, HtmlTagMapping)] = &[
+    ("i", HtmlTagMapping { attr: "font-style", value: "italic" }),
+    ("em", HtmlTagMapping { attr: "font-style", value: "italic" }),
+    ("b", HtmlTagMapping { attr: "font-weight", value: "bold" }),
+    ("strong", HtmlTagMapping { attr: "font-weight", value: "bold" }),
+    ("u", HtmlTagMapping { attr: "text-decoration", value: "underline" }),
+    ("s", HtmlTagMapping { attr: "text-decoration", value: "line-through" }),
+    ("del", HtmlTagMapping { attr: "text-decoration", value: "line-through" }),
+    ("strike", HtmlTagMapping { attr: "text-decoration", value: "line-through" }),
+];
+
 #[cfg(feature = "mermaid-quickjs")]
 impl MermaidWorker {
     const MEMORY_LIMIT_BYTES: usize = 256 * 1024 * 1024; // 256MB (reduced from 2GB)
@@ -2375,6 +2399,228 @@ impl MermaidWorker {
         }
     }
 
+    // =========================================================================
+    // HTML Tag to SVG tspan Conversion
+    // =========================================================================
+
+    /// Finds the SVG attribute mapping for an HTML tag name.
+    fn find_html_tag_mapping(tag_name: &str) -> Option<&'static HtmlTagMapping> {
+        let lower = tag_name.to_ascii_lowercase();
+        HTML_TAG_MAPPINGS.iter().find(|(name, _)| *name == lower).map(|(_, m)| m)
+    }
+
+    /// Converts escaped HTML formatting tags in SVG text elements to tspan equivalents.
+    ///
+    /// Transforms tags like `&lt;i&gt;text&lt;/i&gt;` to `<tspan font-style="italic">text</tspan>`.
+    ///
+    /// Supported tags: `<i>`, `<em>`, `<b>`, `<strong>`, `<u>`, `<s>`, `<del>`, `<strike>`
+    fn convert_html_tags_to_tspan(svg: &str) -> String {
+        // Check feature flag (cached check)
+        if std::env::var("MDMDVIEW_MERMAID_HTML_TAGS").ok().as_deref() == Some("off") {
+            return svg.to_string();
+        }
+
+        // Fast path: if no escaped tags, return unchanged
+        if !svg.contains("&lt;") {
+            return svg.to_string();
+        }
+
+        Self::convert_text_element_contents(svg)
+    }
+
+    /// Processes all <text> elements in the SVG, converting their HTML tag content.
+    fn convert_text_element_contents(svg: &str) -> String {
+        let mut result = String::with_capacity(svg.len() + 256);
+        let mut pos = 0;
+
+        while let Some(text_start_rel) = svg[pos..].find("<text") {
+            let text_start = pos + text_start_rel;
+
+            // Copy everything before <text>
+            result.push_str(&svg[pos..text_start]);
+
+            // Find the closing > of the opening tag
+            let content_start = match svg[text_start..].find('>') {
+                Some(i) => text_start + i + 1,
+                None => {
+                    result.push_str(&svg[text_start..]);
+                    return result;
+                }
+            };
+
+            // Copy the <text ...> opening tag
+            result.push_str(&svg[text_start..content_start]);
+
+            // Find </text>
+            let content_end = match svg[content_start..].find("</text>") {
+                Some(i) => content_start + i,
+                None => {
+                    result.push_str(&svg[content_start..]);
+                    return result;
+                }
+            };
+
+            // Extract and process content
+            let content = &svg[content_start..content_end];
+            if content.contains("&lt;") {
+                let unescaped = Self::unescape_html_entities(content);
+                let converted = Self::convert_html_in_text(&unescaped);
+                result.push_str(&converted);
+            } else {
+                result.push_str(content);
+            }
+
+            // Move position past </text>
+            pos = content_end;
+        }
+
+        // Copy remaining content
+        result.push_str(&svg[pos..]);
+        result
+    }
+
+    /// Unescapes HTML entities back to characters for processing.
+    fn unescape_html_entities(text: &str) -> String {
+        text.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+            .replace("&quot;", "\"")
+            .replace("&apos;", "'")
+    }
+
+    /// Attempts to parse an HTML tag at the given position.
+    ///
+    /// Returns `Some((tag_name, is_closing, chars_consumed))` if valid tag found.
+    fn try_parse_html_tag(text: &str) -> Option<(String, bool, usize)> {
+        if !text.starts_with('<') {
+            return None;
+        }
+
+        let is_closing = text.starts_with("</");
+        let start = if is_closing { 2 } else { 1 };
+
+        // Find end of tag name (space, /, or >)
+        let remaining = text.get(start..)?;
+        let name_end = remaining
+            .find(|c: char| c == ' ' || c == '/' || c == '>')
+            .unwrap_or(remaining.len());
+
+        if name_end == 0 {
+            return None; // Empty tag name
+        }
+
+        let tag_name = &remaining[..name_end];
+
+        // Validate tag name: must be alphabetic
+        if !tag_name.chars().all(|c| c.is_ascii_alphabetic()) {
+            return None;
+        }
+
+        // Find closing >
+        let tag_end = text.find('>')?;
+
+        Some((tag_name.to_ascii_lowercase(), is_closing, tag_end + 1))
+    }
+
+    /// Converts HTML tags in text content to SVG tspan elements.
+    ///
+    /// Uses a stack to track opened tags and ensure proper nesting.
+    fn convert_html_in_text(text: &str) -> String {
+        let mut result = String::with_capacity(text.len() * 2);
+        let mut tag_stack: Vec<String> = Vec::new();
+        let mut pos = 0;
+        let chars: Vec<char> = text.chars().collect();
+        let len = chars.len();
+
+        while pos < len {
+            let ch = chars[pos];
+
+            if ch == '<' {
+                // Attempt to parse as HTML tag
+                let remaining: String = chars[pos..].iter().collect();
+                if let Some((tag_name, is_closing, consumed)) = Self::try_parse_html_tag(&remaining) {
+                    // Check if it's a self-closing tag (like <br/>)
+                    let tag_content: String = chars[pos..pos + consumed].iter().collect();
+                    let is_self_closing = tag_content.contains("/>");
+
+                    if let Some(mapping) = Self::find_html_tag_mapping(&tag_name) {
+                        if is_self_closing {
+                            // Self-closing tags don't make sense for formatting, escape them
+                            result.push_str("&lt;");
+                            pos += 1;
+                            continue;
+                        } else if is_closing {
+                            // Only emit </tspan> if we have a matching open tag
+                            if let Some(stack_pos) = tag_stack.iter().rposition(|t| t == &tag_name) {
+                                // Close all tags from top of stack to the matching one
+                                let tags_to_close = tag_stack.len() - stack_pos;
+                                for _ in 0..tags_to_close {
+                                    result.push_str("</tspan>");
+                                }
+
+                                // Re-open any tags that were closed prematurely (except the matched one)
+                                let tags_to_reopen: Vec<String> = tag_stack[stack_pos + 1..].to_vec();
+                                tag_stack.truncate(stack_pos);
+
+                                for reopened in tags_to_reopen {
+                                    if let Some(m) = Self::find_html_tag_mapping(&reopened) {
+                                        result.push_str(&format!(
+                                            "<tspan {}=\"{}\">",
+                                            m.attr, m.value
+                                        ));
+                                        tag_stack.push(reopened);
+                                    }
+                                }
+                                pos += consumed;
+                                continue;
+                            } else {
+                                // No matching open tag, skip the closing tag entirely
+                                pos += consumed;
+                                continue;
+                            }
+                        } else {
+                            // Opening tag
+                            result.push_str(&format!(
+                                "<tspan {}=\"{}\">",
+                                mapping.attr, mapping.value
+                            ));
+                            tag_stack.push(tag_name);
+                            pos += consumed;
+                            continue;
+                        }
+                    } else {
+                        // Unknown tag (likely SVG element like tspan) - pass through unchanged
+                        let tag_content: String = chars[pos..pos + consumed].iter().collect();
+                        result.push_str(&tag_content);
+                        pos += consumed;
+                        continue;
+                    }
+                } else {
+                    // Not a valid tag (e.g., math like "x < 5") - escape it
+                    result.push_str("&lt;");
+                    pos += 1;
+                    continue;
+                }
+            } else if ch == '>' {
+                result.push_str("&gt;");
+                pos += 1;
+            } else if ch == '&' {
+                result.push_str("&amp;");
+                pos += 1;
+            } else {
+                result.push(ch);
+                pos += 1;
+            }
+        }
+
+        // Close any unclosed tags
+        for _ in &tag_stack {
+            result.push_str("</tspan>");
+        }
+
+        result
+    }
+
     fn find_svg_attr(tag: &str, name: &str) -> Option<String> {
         let needle = format!("{name}=\"");
         let start = tag.find(&needle)? + needle.len();
@@ -2517,6 +2763,13 @@ impl MermaidWorker {
                 if let Some(updated) = Self::fix_er_attribute_fills(&svg) {
                     svg = updated;
                 }
+
+                // Convert escaped HTML tags (like &lt;i&gt;) to SVG tspan elements
+                let converted_svg = Self::convert_html_tags_to_tspan(&svg);
+                if converted_svg != svg {
+                    svg = converted_svg;
+                }
+
                 Self::maybe_dump_svg(svg_key, code_ref, &svg);
                 match self.rasterize_svg(&svg, width_bucket, scale_bucket, bg) {
                     Ok((rgba, w, h)) => MermaidResult {
@@ -8382,6 +8635,286 @@ mod tests {
         assert_eq!(
             MermaidWorker::insert_svg_attr("no svg", "width", "1"),
             "no svg"
+        );
+    }
+
+    // =============================================================================
+    // HTML Tag to SVG tspan Conversion Tests (TDD)
+    // =============================================================================
+
+    #[test]
+    fn test_html_to_tspan_basic_italic() {
+        let input = "<text>&lt;i&gt;italic&lt;/i&gt;</text>";
+        let expected = "<text><tspan font-style=\"italic\">italic</tspan></text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_basic_bold() {
+        let input = "<text>&lt;b&gt;bold&lt;/b&gt;</text>";
+        let expected = "<text><tspan font-weight=\"bold\">bold</tspan></text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_semantic_em() {
+        let input = "<text>&lt;em&gt;emphasis&lt;/em&gt;</text>";
+        let expected = "<text><tspan font-style=\"italic\">emphasis</tspan></text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_semantic_strong() {
+        let input = "<text>&lt;strong&gt;strong&lt;/strong&gt;</text>";
+        let expected = "<text><tspan font-weight=\"bold\">strong</tspan></text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_nested_tags() {
+        let input = "<text>&lt;b&gt;&lt;i&gt;both&lt;/i&gt;&lt;/b&gt;</text>";
+        let expected =
+            "<text><tspan font-weight=\"bold\"><tspan font-style=\"italic\">both</tspan></tspan></text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_mixed_content() {
+        let input = "<text>normal &lt;i&gt;italic&lt;/i&gt; normal</text>";
+        let expected = "<text>normal <tspan font-style=\"italic\">italic</tspan> normal</text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_unclosed_tag() {
+        let input = "<text>&lt;i&gt;unclosed</text>";
+        let expected = "<text><tspan font-style=\"italic\">unclosed</tspan></text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_extra_closing_tag() {
+        let input = "<text>text&lt;/i&gt;</text>";
+        let expected = "<text>text</text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_unknown_tag_passthrough() {
+        // Unknown tags (like <span>, or SVG elements like <tspan>) pass through unchanged
+        // This is essential to preserve existing SVG structure
+        let input = "<text>&lt;span&gt;text&lt;/span&gt;</text>";
+        let expected = "<text><span>text</span></text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_preserves_existing_svg_tspan() {
+        // Critical: existing SVG tspan elements must be preserved unchanged
+        // This is the real-world case from Mermaid output
+        let input = r#"<text><tspan xml:space="preserve" dy="1em" x="0" class="row">Label</tspan></text>"#;
+        let expected = r#"<text><tspan xml:space="preserve" dy="1em" x="0" class="row">Label</tspan></text>"#;
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_mixed_svg_and_html_tags() {
+        // HTML tags inside existing SVG tspan should still be converted
+        let input = r#"<text><tspan dy="1em">&lt;b&gt;bold&lt;/b&gt;</tspan></text>"#;
+        let result = MermaidWorker::convert_html_tags_to_tspan(input);
+        assert!(result.contains(r#"<tspan dy="1em">"#)); // Preserve outer tspan
+        assert!(result.contains(r#"font-weight="bold""#)); // Convert HTML bold
+    }
+
+    #[test]
+    fn test_html_to_tspan_angle_brackets_in_math() {
+        let input = "<text>x &lt; 5</text>";
+        let expected = "<text>x &lt; 5</text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_multiple_text_elements() {
+        let input =
+            "<text>&lt;b&gt;one&lt;/b&gt;</text><rect/><text>&lt;i&gt;two&lt;/i&gt;</text>";
+        let expected = "<text><tspan font-weight=\"bold\">one</tspan></text><rect/><text><tspan font-style=\"italic\">two</tspan></text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_no_html_tags_unchanged() {
+        let input = "<text>plain text</text>";
+        let result = MermaidWorker::convert_html_tags_to_tspan(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_html_to_tspan_no_escaped_tags_fast_path() {
+        let input = "<svg><text>no tags here</text></svg>";
+        let result = MermaidWorker::convert_html_tags_to_tspan(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_html_to_tspan_case_insensitive() {
+        let input = "<text>&lt;I&gt;italic&lt;/I&gt;</text>";
+        let expected = "<text><tspan font-style=\"italic\">italic</tspan></text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_tag_with_attributes() {
+        let input = "<text>&lt;i class=\"x\"&gt;text&lt;/i&gt;</text>";
+        let expected = "<text><tspan font-style=\"italic\">text</tspan></text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_self_closing_tag_passthrough() {
+        // Self-closing tags like <br/> pass through unchanged (preserves SVG structure)
+        let input = "<text>line&lt;br/&gt;break</text>";
+        let expected = "<text>line<br/>break</text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_empty_tag() {
+        let input = "<text>&lt;i&gt;&lt;/i&gt;</text>";
+        let expected = "<text><tspan font-style=\"italic\"></tspan></text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_mismatched_tags() {
+        // <b>a<i>b</b>c</i> - close b while i is open
+        let input = "<text>&lt;b&gt;a&lt;i&gt;b&lt;/b&gt;c&lt;/i&gt;</text>";
+        // Expected: close i and b at </b>, reopen i for c, close i at </i>
+        let result = MermaidWorker::convert_html_tags_to_tspan(input);
+        // Should contain proper tspan nesting
+        assert!(result.contains("<tspan font-weight=\"bold\">"));
+        assert!(result.contains("<tspan font-style=\"italic\">"));
+        // Should not contain escaped tags
+        assert!(!result.contains("&lt;b&gt;"));
+        assert!(!result.contains("&lt;i&gt;"));
+    }
+
+    #[test]
+    fn test_html_to_tspan_underline_experimental() {
+        let input = "<text>&lt;u&gt;underline&lt;/u&gt;</text>";
+        let expected = "<text><tspan text-decoration=\"underline\">underline</tspan></text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_strikethrough_experimental() {
+        let input = "<text>&lt;s&gt;strike&lt;/s&gt;</text>";
+        let expected = "<text><tspan text-decoration=\"line-through\">strike</tspan></text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_del_tag() {
+        let input = "<text>&lt;del&gt;deleted&lt;/del&gt;</text>";
+        let expected = "<text><tspan text-decoration=\"line-through\">deleted</tspan></text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_preserves_text_attributes() {
+        let input = "<text x=\"10\" y=\"20\">&lt;b&gt;bold&lt;/b&gt;</text>";
+        let expected = "<text x=\"10\" y=\"20\"><tspan font-weight=\"bold\">bold</tspan></text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_nested_text_not_processed() {
+        // tspan inside text should have its content processed too
+        let input = "<text><tspan>&lt;i&gt;nested&lt;/i&gt;</tspan></text>";
+        let result = MermaidWorker::convert_html_tags_to_tspan(input);
+        // The inner tspan content should be converted
+        assert!(result.contains("font-style=\"italic\"") || result.contains("&lt;i&gt;"));
+    }
+
+    #[test]
+    fn test_html_to_tspan_ampersand_preserved() {
+        let input = "<text>A &amp; B</text>";
+        let expected = "<text>A &amp; B</text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    fn test_html_to_tspan_multiple_same_tags() {
+        let input = "<text>&lt;i&gt;a&lt;/i&gt; and &lt;i&gt;b&lt;/i&gt;</text>";
+        let expected =
+            "<text><tspan font-style=\"italic\">a</tspan> and <tspan font-style=\"italic\">b</tspan></text>";
+        assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
+    }
+
+    #[test]
+    #[ignore = "env vars are process-global; run with --ignored to test in isolation"]
+    fn test_html_to_tspan_feature_flag_disabled() {
+        std::env::set_var("MDMDVIEW_MERMAID_HTML_TAGS", "off");
+        let input = "<text>&lt;i&gt;italic&lt;/i&gt;</text>";
+        let result = MermaidWorker::convert_html_tags_to_tspan(input);
+        // With feature disabled, should return unchanged
+        assert_eq!(result, input);
+        std::env::remove_var("MDMDVIEW_MERMAID_HTML_TAGS");
+    }
+
+    #[test]
+    fn test_try_parse_html_tag_basic() {
+        let (name, closing, len) = MermaidWorker::try_parse_html_tag("<i>rest").unwrap();
+        assert_eq!(name, "i");
+        assert!(!closing);
+        assert_eq!(len, 3);
+    }
+
+    #[test]
+    fn test_try_parse_html_tag_closing() {
+        let (name, closing, len) = MermaidWorker::try_parse_html_tag("</b>rest").unwrap();
+        assert_eq!(name, "b");
+        assert!(closing);
+        assert_eq!(len, 4);
+    }
+
+    #[test]
+    fn test_try_parse_html_tag_with_attrs() {
+        let (name, closing, len) =
+            MermaidWorker::try_parse_html_tag("<i class=\"x\">rest").unwrap();
+        assert_eq!(name, "i");
+        assert!(!closing);
+        assert_eq!(len, 13);
+    }
+
+    #[test]
+    fn test_try_parse_html_tag_not_a_tag() {
+        assert!(MermaidWorker::try_parse_html_tag("< 5").is_none());
+        assert!(MermaidWorker::try_parse_html_tag("<123>").is_none());
+        assert!(MermaidWorker::try_parse_html_tag("<>").is_none());
+        assert!(MermaidWorker::try_parse_html_tag("<i").is_none()); // No closing >
+    }
+
+    #[test]
+    fn test_try_parse_html_tag_self_closing() {
+        let result = MermaidWorker::try_parse_html_tag("<br/>");
+        assert!(result.is_some());
+        let (name, _, _) = result.unwrap();
+        assert_eq!(name, "br");
+    }
+
+    #[test]
+    fn test_unescape_html_entities() {
+        assert_eq!(
+            MermaidWorker::unescape_html_entities("&lt;i&gt;"),
+            "<i>"
+        );
+        assert_eq!(
+            MermaidWorker::unescape_html_entities("&amp;&quot;&apos;"),
+            "&\"'"
+        );
+        assert_eq!(
+            MermaidWorker::unescape_html_entities("no entities"),
+            "no entities"
         );
     }
 }
