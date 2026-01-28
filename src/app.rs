@@ -20,7 +20,7 @@ use std::cell::RefCell;
 #[cfg(test)]
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,6 +39,8 @@ const MAX_HISTORY_SIZE: usize = 100;
 
 /// Cached result of MDMDVIEW_DEBUG_REPAINT environment variable check
 static DEBUG_REPAINT: OnceLock<bool> = OnceLock::new();
+/// Log file for debug repaint output (writes to repaint_debug.log in current dir)
+static DEBUG_LOG_FILE: OnceLock<std::sync::Mutex<Option<std::fs::File>>> = OnceLock::new();
 
 #[cfg(test)]
 thread_local! {
@@ -2321,26 +2323,33 @@ impl MarkdownViewerApp {
 
         // Debug: log repaint causes and input state when MDMDVIEW_DEBUG_REPAINT is set
         if *DEBUG_REPAINT.get_or_init(|| std::env::var("MDMDVIEW_DEBUG_REPAINT").is_ok()) {
-            ctx.input(|i| {
-                let events_count = i.events.len();
-                let pointer_delta = i.pointer.delta();
-                let scroll_delta = i.raw_scroll_delta;
-                if events_count > 0
-                    || pointer_delta != egui::Vec2::ZERO
-                    || scroll_delta != egui::Vec2::ZERO
-                {
-                    eprintln!(
-                        "[INPUT] frame={} events={} pointer_delta={:?} scroll={:?}",
-                        ctx.frame_nr(),
-                        events_count,
-                        pointer_delta,
-                        scroll_delta
-                    );
-                }
+            let log_mutex = DEBUG_LOG_FILE.get_or_init(|| {
+                let file = std::fs::File::create("repaint_debug.log").ok();
+                std::sync::Mutex::new(file)
             });
-            let causes = ctx.repaint_causes();
-            if !causes.is_empty() {
-                eprintln!("[REPAINT] frame={} causes={:?}", ctx.frame_nr(), causes);
+            if let Ok(mut guard) = log_mutex.lock() {
+                if let Some(ref mut file) = *guard {
+                    let frame_nr = ctx.frame_nr();
+                    let causes = ctx.repaint_causes();
+                    let (events_count, pointer_delta, scroll_delta) = ctx.input(|i| {
+                        (i.events.len(), i.pointer.delta(), i.raw_scroll_delta)
+                    });
+                    // Always log frame number; include details when there's activity
+                    let msg = if events_count > 0
+                        || pointer_delta != egui::Vec2::ZERO
+                        || scroll_delta != egui::Vec2::ZERO
+                        || !causes.is_empty()
+                    {
+                        format!(
+                            "[FRAME] {} events={} pointer={:?} scroll={:?} causes={:?}\n",
+                            frame_nr, events_count, pointer_delta, scroll_delta, causes
+                        )
+                    } else {
+                        format!("[FRAME] {} (idle)\n", frame_nr)
+                    };
+                    let _ = file.write_all(msg.as_bytes());
+                    let _ = file.flush();
+                }
             }
         }
 
