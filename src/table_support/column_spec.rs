@@ -1244,9 +1244,9 @@ mod tests {
         // Headers have 3 columns, but rows have varying column counts
         let headers = vec![vec![span("Name")], vec![span("Value")], vec![span("Notes")]];
         let rows = vec![
-            vec![vec![span("item1")], vec![span("val1")]],              // 2 columns
+            vec![vec![span("item1")], vec![span("val1")]], // 2 columns
             vec![vec![span("item2")], vec![span("val2")], vec![span("note2")]], // 3 columns
-            vec![vec![span("item3")]],                                  // 1 column
+            vec![vec![span("item3")]],                     // 1 column
         ];
         let stats = compute_column_stats(&headers, &rows, 32);
         let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);

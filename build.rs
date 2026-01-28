@@ -148,7 +148,11 @@ fn format_unix_timestamp_iso8601(secs: u64) -> String {
     }
 
     fn days_in_year(year: u32) -> u32 {
-        if is_leap_year(year) { 366 } else { 365 }
+        if is_leap_year(year) {
+            366
+        } else {
+            365
+        }
     }
 
     let secs_per_minute = 60u64;
@@ -284,10 +288,7 @@ mod tests {
     #[test]
     fn format_unix_timestamp_produces_valid_iso8601() {
         // Unix epoch should produce 1970-01-01T00:00:00Z
-        assert_eq!(
-            format_unix_timestamp_iso8601(0),
-            "1970-01-01T00:00:00Z"
-        );
+        assert_eq!(format_unix_timestamp_iso8601(0), "1970-01-01T00:00:00Z");
 
         // 2025-01-15T12:30:45Z = 1736942445 seconds since epoch
         assert_eq!(
