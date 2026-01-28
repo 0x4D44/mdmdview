@@ -162,11 +162,24 @@ const IMAGE_MAX_PENDING: usize = 64;
 const IMAGE_FAILURE_BACKOFF: Duration = Duration::from_secs(5);
 const EMOJI_TEXTURE_CACHE_CAPACITY: usize = 512;
 const IMAGE_FAILURE_CACHE_CAPACITY: usize = 256;
+/// Maximum total bytes for the image texture cache (100 MB).
+/// When exceeded, oldest entries are evicted until under the limit.
+const MAX_IMAGE_TEXTURE_CACHE_BYTES: usize = 100 * 1024 * 1024;
 
 /// Generic LRU (Least Recently Used) cache with configurable capacity.
 ///
 /// This cache evicts the least recently accessed entries when capacity is exceeded.
 /// Used for `emoji_textures` and `image_failures` to prevent unbounded memory growth.
+///
+/// # Performance Note
+///
+/// The `touch()`, `insert()` (for existing keys), and `remove()` operations use
+/// `VecDeque::retain()` which is O(n) where n is the cache capacity. This is acceptable
+/// because:
+/// - Cache capacities are small and bounded (256-512 entries max)
+/// - These operations are infrequent compared to `get()` which is O(1)
+/// - For these cache sizes, the constant factors of a more complex O(1) data structure
+///   (e.g., intrusive linked list with HashMap) would likely outweigh the O(n) cost
 struct LruCache<K, V> {
     entries: HashMap<K, V>,
     order: VecDeque<K>,
@@ -377,12 +390,36 @@ struct ImageCacheEntry {
     texture: egui::TextureHandle,
     size: [u32; 2],
     modified: Option<SystemTime>,
+    /// Approximate memory size in bytes (width * height * 4 for RGBA).
+    byte_size: usize,
 }
 
+impl ImageCacheEntry {
+    /// Estimate texture memory size: width * height * 4 bytes (RGBA).
+    fn estimate_bytes(size: [u32; 2]) -> usize {
+        (size[0] as usize) * (size[1] as usize) * 4
+    }
+}
+
+/// LRU cache for image textures with both entry count and memory size limits.
+///
+/// Eviction occurs when either:
+/// - Entry count exceeds `capacity`
+/// - Total memory exceeds `MAX_IMAGE_TEXTURE_CACHE_BYTES`
+///
+/// # Performance Note
+///
+/// The `touch()` and `remove()` operations use `VecDeque::retain()` which is O(n).
+/// This is acceptable because the cache capacity is bounded (256 entries max) and
+/// these operations are infrequent compared to `get()` which is O(1).
 struct ImageCache {
     entries: HashMap<String, ImageCacheEntry>,
     order: VecDeque<String>,
     capacity: usize,
+    /// Total approximate bytes of all cached textures.
+    total_bytes: usize,
+    /// Maximum total bytes before size-based eviction triggers.
+    max_bytes: usize,
 }
 
 impl ImageCache {
@@ -391,6 +428,8 @@ impl ImageCache {
             entries: HashMap::new(),
             order: VecDeque::new(),
             capacity: capacity.max(1),
+            total_bytes: 0,
+            max_bytes: MAX_IMAGE_TEXTURE_CACHE_BYTES,
         }
     }
 
@@ -403,30 +442,51 @@ impl ImageCache {
     }
 
     fn insert(&mut self, key: String, entry: ImageCacheEntry) {
-        if self.entries.contains_key(&key) {
+        let new_bytes = entry.byte_size;
+
+        // If key already exists, update value and adjust total_bytes
+        if let Some(old_entry) = self.entries.get(&key) {
+            self.total_bytes = self.total_bytes.saturating_sub(old_entry.byte_size);
             self.entries.insert(key.clone(), entry);
+            self.total_bytes += new_bytes;
             self.touch(&key);
             return;
         }
-        while self.entries.len() >= self.capacity {
-            if let Some(old) = self.order.pop_front() {
-                self.entries.remove(&old);
+
+        // Evict oldest entries if at entry capacity or memory limit exceeded
+        while self.entries.len() >= self.capacity
+            || (self.total_bytes + new_bytes > self.max_bytes && !self.entries.is_empty())
+        {
+            if let Some(old_key) = self.order.pop_front() {
+                if let Some(old_entry) = self.entries.remove(&old_key) {
+                    self.total_bytes = self.total_bytes.saturating_sub(old_entry.byte_size);
+                }
             } else {
                 break;
             }
         }
+
         self.order.push_back(key.clone());
+        self.total_bytes += new_bytes;
         self.entries.insert(key, entry);
     }
 
     fn remove(&mut self, key: &str) {
-        self.entries.remove(key);
+        if let Some(entry) = self.entries.remove(key) {
+            self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
+        }
         self.order.retain(|entry| entry != key);
     }
 
     #[cfg(test)]
     fn contains_key(&self, key: &str) -> bool {
         self.entries.contains_key(key)
+    }
+
+    /// Returns the current total bytes used by cached textures.
+    #[cfg(test)]
+    fn current_bytes(&self) -> usize {
+        self.total_bytes
     }
 
     fn touch(&mut self, key: &str) {
@@ -3315,7 +3375,12 @@ impl MarkdownRenderer {
                 }
             }
             // advance by one UTF-8 character
-            let ch = s[i..].chars().next().unwrap();
+            // Safety: i < s.len() is guaranteed by the while condition, and s[i..] is
+            // guaranteed to be valid UTF-8 since s is a &str, so chars().next() will
+            // always return Some.
+            let Some(ch) = s[i..].chars().next() else {
+                break;
+            };
             out.push(ch);
             i += ch.len_utf8();
         }
@@ -3479,6 +3544,8 @@ impl MarkdownRenderer {
         spans: &[InlineSpan],
     ) {
         // Split into lines on embedded '\n'
+        // Safety: `lines` is initialized with one empty Vec and we only ever push more,
+        // so `last_mut()` will always return Some.
         let mut lines: Vec<Vec<InlineSpan>> = vec![Vec::new()];
         for s in spans.iter().cloned() {
             match s {
@@ -3486,17 +3553,20 @@ impl MarkdownRenderer {
                     let parts: Vec<&str> = t.split('\n').collect();
                     for (pi, part) in parts.iter().enumerate() {
                         if !part.is_empty() {
-                            lines
-                                .last_mut()
-                                .unwrap()
-                                .push(InlineSpan::Text(part.to_string()));
+                            if let Some(last) = lines.last_mut() {
+                                last.push(InlineSpan::Text(part.to_string()));
+                            }
                         }
                         if pi < parts.len() - 1 {
                             lines.push(Vec::new());
                         }
                     }
                 }
-                other => lines.last_mut().unwrap().push(other),
+                other => {
+                    if let Some(last) = lines.last_mut() {
+                        last.push(other);
+                    }
+                }
             }
         }
 
@@ -5356,6 +5426,7 @@ impl MarkdownRenderer {
                 texture,
                 size,
                 modified,
+                byte_size: ImageCacheEntry::estimate_bytes(size),
             },
         );
     }
@@ -5714,6 +5785,7 @@ mod tests {
                 texture: tex,
                 size: [1, 1],
                 modified: None,
+                byte_size: ImageCacheEntry::estimate_bytes([1, 1]),
             });
         });
         let entry = entry_slot.expect("texture");
@@ -5723,6 +5795,7 @@ mod tests {
                 texture: entry.texture.clone(),
                 size: entry.size,
                 modified: entry.modified,
+                byte_size: entry.byte_size,
             },
         );
         cache.order.clear();
@@ -5732,6 +5805,7 @@ mod tests {
                 texture: entry.texture.clone(),
                 size: entry.size,
                 modified: entry.modified,
+                byte_size: entry.byte_size,
             },
         );
         assert!(cache.contains_key("b"));
@@ -5751,6 +5825,7 @@ mod tests {
                 texture: tex,
                 size: [1, 1],
                 modified: None,
+                byte_size: ImageCacheEntry::estimate_bytes([1, 1]),
             });
         });
         let entry = entry_slot.expect("texture");
@@ -5760,6 +5835,7 @@ mod tests {
                 texture: entry.texture.clone(),
                 size: [1, 1],
                 modified: entry.modified,
+                byte_size: ImageCacheEntry::estimate_bytes([1, 1]),
             },
         );
         cache.insert(
@@ -5768,6 +5844,7 @@ mod tests {
                 texture: entry.texture.clone(),
                 size: [2, 2],
                 modified: entry.modified,
+                byte_size: ImageCacheEntry::estimate_bytes([2, 2]),
             },
         );
         let stored = cache.get("a").expect("stored");
@@ -5788,6 +5865,7 @@ mod tests {
                 texture: tex,
                 size: [1, 1],
                 modified: None,
+                byte_size: ImageCacheEntry::estimate_bytes([1, 1]),
             });
         });
         let entry = entry_slot.expect("texture");
@@ -5797,6 +5875,7 @@ mod tests {
                 texture: entry.texture.clone(),
                 size: entry.size,
                 modified: entry.modified,
+                byte_size: entry.byte_size,
             },
         );
         cache.insert(
@@ -5805,10 +5884,112 @@ mod tests {
                 texture: entry.texture.clone(),
                 size: entry.size,
                 modified: entry.modified,
+                byte_size: entry.byte_size,
             },
         );
         assert!(cache.contains_key("b"));
         assert!(!cache.contains_key("a"));
+    }
+
+    #[test]
+    fn test_image_cache_tracks_memory_and_evicts_on_size_limit() {
+        // Create a cache with high entry limit but low memory limit
+        let mut cache = ImageCache::new(100);
+        cache.max_bytes = 32; // 8 pixels worth (2x2 RGBA = 16 bytes each)
+
+        let mut entry_slot = None;
+        with_test_ui(|ctx, _ui| {
+            let tex = ctx.load_texture(
+                "cache_mem",
+                egui::ColorImage::new([2, 2], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            entry_slot = Some(ImageCacheEntry {
+                texture: tex,
+                size: [2, 2],
+                modified: None,
+                byte_size: ImageCacheEntry::estimate_bytes([2, 2]), // 16 bytes
+            });
+        });
+        let entry = entry_slot.expect("texture");
+
+        // Insert first entry (16 bytes)
+        cache.insert(
+            "a".to_string(),
+            ImageCacheEntry {
+                texture: entry.texture.clone(),
+                size: entry.size,
+                modified: entry.modified,
+                byte_size: entry.byte_size,
+            },
+        );
+        assert_eq!(cache.current_bytes(), 16);
+        assert!(cache.contains_key("a"));
+
+        // Insert second entry (16 bytes) - should fit within 32 byte limit
+        cache.insert(
+            "b".to_string(),
+            ImageCacheEntry {
+                texture: entry.texture.clone(),
+                size: entry.size,
+                modified: entry.modified,
+                byte_size: entry.byte_size,
+            },
+        );
+        assert_eq!(cache.current_bytes(), 32);
+        assert!(cache.contains_key("a"));
+        assert!(cache.contains_key("b"));
+
+        // Insert third entry - should evict "a" due to memory limit
+        cache.insert(
+            "c".to_string(),
+            ImageCacheEntry {
+                texture: entry.texture.clone(),
+                size: entry.size,
+                modified: entry.modified,
+                byte_size: entry.byte_size,
+            },
+        );
+        // Memory should still be at 32 bytes (evicted "a", added "c")
+        assert_eq!(cache.current_bytes(), 32);
+        assert!(!cache.contains_key("a")); // Evicted due to memory limit
+        assert!(cache.contains_key("b"));
+        assert!(cache.contains_key("c"));
+    }
+
+    #[test]
+    fn test_image_cache_remove_decrements_bytes() {
+        let mut cache = ImageCache::new(10);
+        let mut entry_slot = None;
+        with_test_ui(|ctx, _ui| {
+            let tex = ctx.load_texture(
+                "cache_remove_bytes",
+                egui::ColorImage::new([4, 4], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            entry_slot = Some(ImageCacheEntry {
+                texture: tex,
+                size: [4, 4],
+                modified: None,
+                byte_size: ImageCacheEntry::estimate_bytes([4, 4]), // 64 bytes
+            });
+        });
+        let entry = entry_slot.expect("texture");
+
+        cache.insert(
+            "x".to_string(),
+            ImageCacheEntry {
+                texture: entry.texture.clone(),
+                size: entry.size,
+                modified: entry.modified,
+                byte_size: entry.byte_size,
+            },
+        );
+        assert_eq!(cache.current_bytes(), 64);
+
+        cache.remove("x");
+        assert_eq!(cache.current_bytes(), 0);
+        assert!(!cache.contains_key("x"));
     }
 
     // --- LruCache Tests ---
@@ -10174,6 +10355,7 @@ contexts:
                     texture: tex,
                     size: [64, 32],
                     modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([64, 32]),
                 },
             );
             let spans = vec![
@@ -10232,6 +10414,7 @@ contexts:
                     texture: tex,
                     size: [2, 2],
                     modified: Some(SystemTime::UNIX_EPOCH),
+                    byte_size: ImageCacheEntry::estimate_bytes([2, 2]),
                 },
             );
 
@@ -10369,6 +10552,7 @@ contexts:
                     texture: tex,
                     size: [120, 80],
                     modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([120, 80]),
                 },
             );
             let table_id = renderer.compute_table_id(&headers, &rows, &[], 12);
@@ -11009,6 +11193,7 @@ contexts:
                     texture: tex,
                     size: [200, 120],
                     modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([200, 120]),
                 },
             );
             let span = InlineSpan::Image {
@@ -11154,6 +11339,7 @@ contexts:
                     texture: tex,
                     size: [20, 12],
                     modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([20, 12]),
                 },
             );
             let span = InlineSpan::Image {

@@ -490,6 +490,29 @@ pub fn compute_column_stats(
     stats
 }
 
+/// Check if a character is emoji-like (for column width estimation).
+/// Covers common emoji Unicode blocks including:
+/// - Miscellaneous Symbols (2600-26FF)
+/// - Dingbats (2700-27BF)
+/// - Emoticons (1F600-1F64F)
+/// - Transport and Map (1F680-1F6FF)
+/// - Miscellaneous Symbols and Pictographs (1F300-1F5FF)
+/// - Supplemental Symbols and Pictographs (1F900-1F9FF)
+/// - Symbols and Pictographs Extended-A (1FA00-1FAFF)
+fn is_emoji_like(c: char) -> bool {
+    let cp = c as u32;
+    matches!(
+        cp,
+        0x2600..=0x26FF     // Miscellaneous Symbols
+        | 0x2700..=0x27BF   // Dingbats
+        | 0x1F300..=0x1F5FF // Miscellaneous Symbols and Pictographs
+        | 0x1F600..=0x1F64F // Emoticons (smileys)
+        | 0x1F680..=0x1F6FF // Transport and Map Symbols
+        | 0x1F900..=0x1F9FF // Supplemental Symbols and Pictographs
+        | 0x1FA00..=0x1FAFF // Symbols and Pictographs Extended-A
+    )
+}
+
 fn accumulate_stats_for_cell(spans: &[InlineSpan], stat: &mut ColumnStat) {
     if stat.rich_content.has_image {
         // rich-content flags persist; skip repeated scans for pure images.
@@ -518,7 +541,7 @@ fn accumulate_stats_for_cell(spans: &[InlineSpan], stat: &mut ColumnStat) {
         }
 
         if !has_emoji_like {
-            has_emoji_like = text.chars().any(|c| matches!(c as u32, 0x1F300..=0x1FAFF));
+            has_emoji_like = text.chars().any(is_emoji_like);
         }
     }
 
@@ -1164,5 +1187,71 @@ mod tests {
         let mut empty_stat = ColumnStat::default();
         accumulate_stats_for_cell(&[], &mut empty_stat);
         assert_eq!(empty_stat.max_graphemes, 0);
+    }
+
+    #[test]
+    fn test_emoji_detection_covers_all_blocks() {
+        // Basic emoticons (0x1F600-0x1F64F)
+        assert!(is_emoji_like('\u{1F600}')); // grinning face
+        assert!(is_emoji_like('\u{1F64F}')); // person with folded hands
+
+        // Miscellaneous Symbols (0x2600-0x26FF)
+        assert!(is_emoji_like('\u{2600}')); // sun
+        assert!(is_emoji_like('\u{26FF}')); // end of block
+
+        // Dingbats (0x2700-0x27BF)
+        assert!(is_emoji_like('\u{2700}')); // black scissors
+        assert!(is_emoji_like('\u{27BF}')); // end of block
+
+        // Transport and Map (0x1F680-0x1F6FF)
+        assert!(is_emoji_like('\u{1F680}')); // rocket
+        assert!(is_emoji_like('\u{1F6FF}')); // end of block
+
+        // Supplemental Symbols (0x1F900-0x1F9FF)
+        assert!(is_emoji_like('\u{1F900}')); // start of block
+        assert!(is_emoji_like('\u{1F9FF}')); // end of block
+
+        // Extended-A (0x1FA00-0x1FAFF)
+        assert!(is_emoji_like('\u{1FA00}')); // start of block
+        assert!(is_emoji_like('\u{1FAFF}')); // end of block
+
+        // Non-emoji should return false
+        assert!(!is_emoji_like('A'));
+        assert!(!is_emoji_like('z'));
+        assert!(!is_emoji_like('0'));
+        assert!(!is_emoji_like(' '));
+    }
+
+    #[test]
+    fn test_compute_column_stats_jagged_rows() {
+        // Headers have 3 columns, but some rows have fewer
+        let headers = vec![vec![span("A")], vec![span("B")], vec![span("C")]];
+        let rows = vec![
+            vec![vec![span("a1")], vec![span("b1")], vec![span("c1")]], // full row
+            vec![vec![span("a2")], vec![span("b2")]],                   // missing 3rd column
+            vec![vec![span("a3")]],                                     // only 1 column
+        ];
+        let stats = compute_column_stats(&headers, &rows, 32);
+        assert_eq!(stats.len(), 3);
+        // All columns should have stats, even if some rows are missing columns
+        assert!(stats[0].max_graphemes > 0);
+        assert!(stats[1].max_graphemes > 0);
+        assert!(stats[2].max_graphemes > 0);
+    }
+
+    #[test]
+    fn test_derive_column_specs_jagged_rows() {
+        // Headers have 3 columns, but rows have varying column counts
+        let headers = vec![vec![span("Name")], vec![span("Value")], vec![span("Notes")]];
+        let rows = vec![
+            vec![vec![span("item1")], vec![span("val1")]],              // 2 columns
+            vec![vec![span("item2")], vec![span("val2")], vec![span("note2")]], // 3 columns
+            vec![vec![span("item3")]],                                  // 1 column
+        ];
+        let stats = compute_column_stats(&headers, &rows, 32);
+        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
+        let specs = derive_column_specs(&ctx);
+        // Should produce specs for all 3 columns without panicking
+        assert_eq!(specs.len(), 3);
     }
 }
