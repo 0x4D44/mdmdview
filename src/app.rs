@@ -2,7 +2,10 @@
 ///
 /// This module contains the primary app state, UI logic, and event handling
 /// for the markdown viewer application built with egui.
-use crate::{MarkdownElement, MarkdownRenderer, SampleFile, WindowState, SAMPLE_FILES};
+use crate::{
+    load_app_settings, save_app_settings, AppSettings, MarkdownElement, MarkdownRenderer,
+    SampleFile, WindowState, SAMPLE_FILES,
+};
 use anyhow::{bail, Result};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use egui::text::LayoutJob;
@@ -576,6 +579,7 @@ impl MarkdownViewerApp {
     pub fn new() -> Self {
         let (file_load_tx, file_load_rx) = Self::spawn_file_loader();
         let (readability_tx, readability_rx) = Self::spawn_readability_worker();
+        let settings = load_app_settings();
         let mut app = Self {
             renderer: MarkdownRenderer::new(),
             current_file: None,
@@ -618,13 +622,16 @@ impl MarkdownViewerApp {
             pending_files: VecDeque::new(),
             screenshot: None,
             last_sent_title: None,
-            allow_remote_images: false,
+            allow_remote_images: settings.allow_remote_images,
             readability_tx,
             readability_rx,
             readability_stats: None,
             readability_request_id: 0,
             startup_frame: 0,
         };
+        // Apply loaded settings to renderer
+        app.renderer
+            .set_allow_remote_images(settings.allow_remote_images);
         // Load welcome content by default
         app.load_welcome_from_samples(SAMPLE_FILES, false);
 
@@ -1886,6 +1893,13 @@ impl MarkdownViewerApp {
                 self.allow_remote_images = !self.allow_remote_images;
                 self.renderer
                     .set_allow_remote_images(self.allow_remote_images);
+                // Persist setting
+                let settings = AppSettings {
+                    allow_remote_images: self.allow_remote_images,
+                };
+                if let Err(e) = save_app_settings(&settings) {
+                    eprintln!("Failed to save app settings: {e}");
+                }
             }
         });
 
