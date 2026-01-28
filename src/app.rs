@@ -1981,14 +1981,15 @@ impl MarkdownViewerApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Document stats
                     let element_count = self.parsed_elements.len();
+                    let word_count = self.current_content.split_whitespace().count();
                     let char_count = self.current_content.len();
                     let mode = match self.view_mode {
                         ViewMode::Rendered => "Rendered",
                         ViewMode::Raw => "Raw",
                     };
                     let status = format!(
-                        "Mode: {} | Elements: {} | Characters: {}",
-                        mode, element_count, char_count
+                        "Mode: {} | Elements: {} | Words: {} | Characters: {}",
+                        mode, element_count, word_count, char_count
                     );
                     #[cfg(test)]
                     {
