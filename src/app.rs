@@ -176,6 +176,8 @@ struct ReadabilityStats {
     flesch_ease: f32,
     /// Estimated reading grade level
     grade_level: f32,
+    /// Number of words
+    word_count: usize,
     /// Number of sentences detected
     sentences: usize,
     /// Number of syllables detected
@@ -980,6 +982,7 @@ impl MarkdownViewerApp {
         ReadabilityStats {
             flesch_ease: flesch_ease.clamp(0.0, 100.0),
             grade_level: grade_level.max(0.0),
+            word_count,
             sentences: sentence_count,
             syllables: syllable_count,
         }
@@ -2127,9 +2130,13 @@ impl MarkdownViewerApp {
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Document stats
+                    // Document stats (word_count from cached readability stats to avoid per-frame calculation)
                     let element_count = self.parsed_elements.len();
-                    let word_count = self.current_content.split_whitespace().count();
+                    let word_count = self
+                        .readability_stats
+                        .as_ref()
+                        .map(|s| s.word_count)
+                        .unwrap_or(0);
                     let char_count = self.current_content.len();
                     let mode = match self.view_mode {
                         ViewMode::Rendered => "Rendered",
@@ -7497,6 +7504,7 @@ The end.
     fn test_calculate_readability_empty() {
         let stats = MarkdownViewerApp::calculate_readability("");
         assert_eq!(stats.flesch_ease, 0.0);
+        assert_eq!(stats.word_count, 0);
         assert_eq!(stats.sentences, 0);
         assert_eq!(stats.syllables, 0);
     }
@@ -7506,6 +7514,7 @@ The end.
         let text = "The cat sat on the mat. The dog ran away.";
         let stats = MarkdownViewerApp::calculate_readability(text);
         assert!(stats.flesch_ease > 80.0); // Should be very easy
+        assert_eq!(stats.word_count, 10);
         assert_eq!(stats.sentences, 2);
         assert!(stats.syllables > 0);
     }
@@ -7517,6 +7526,7 @@ The end.
                     computational complexity theory.";
         let stats = MarkdownViewerApp::calculate_readability(text);
         assert!(stats.flesch_ease < 50.0); // Should be difficult
+        assert_eq!(stats.word_count, 12);
         assert_eq!(stats.sentences, 1);
     }
 }
