@@ -395,6 +395,8 @@ pub struct MarkdownViewerApp {
     readability_stats: Option<ReadabilityStats>,
     /// ID of the current readability calculation request
     readability_request_id: u64,
+    /// Frame counter for delayed window visibility (to avoid white flash on startup)
+    startup_frame: u8,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -621,6 +623,7 @@ impl MarkdownViewerApp {
             readability_rx,
             readability_stats: None,
             readability_request_id: 0,
+            startup_frame: 0,
         };
         // Load welcome content by default
         app.load_welcome_from_samples(SAMPLE_FILES, false);
@@ -2292,6 +2295,16 @@ impl MarkdownViewerApp {
     }
 
     fn update_impl(&mut self, ctx: &Context) {
+        // Show window after a few frames to ensure dark theme is fully rendered
+        // (avoids white flash on startup)
+        if self.startup_frame < 3 {
+            self.startup_frame += 1;
+            ctx.request_repaint(); // Ensure we get another frame quickly
+            if self.startup_frame == 3 {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            }
+        }
+
         // Debug: log repaint causes and input state when MDMDVIEW_DEBUG_REPAINT is set
         if *DEBUG_REPAINT.get_or_init(|| std::env::var("MDMDVIEW_DEBUG_REPAINT").is_ok()) {
             ctx.input(|i| {

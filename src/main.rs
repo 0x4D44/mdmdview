@@ -274,7 +274,9 @@ fn main() -> Result<(), eframe::Error> {
         .with_resizable(!screenshot_enabled)
         .with_maximize_button(!screenshot_enabled)
         .with_minimize_button(!screenshot_enabled)
-        .with_drag_and_drop(!screenshot_enabled);
+        .with_drag_and_drop(!screenshot_enabled)
+        // Start hidden to avoid white flash before dark theme is applied
+        .with_visible(screenshot_enabled);
 
     // Restore previous window position/size if available
     if !screenshot_enabled {
