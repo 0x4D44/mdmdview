@@ -53,6 +53,12 @@ strip = true
 codegen-units = 1
 panic = "abort"
 
+# Profiling profile: optimized but with debug symbols
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+
 [features]
 # Default to the embedded Mermaid renderer (QuickJS).
 default = ["mermaid-embedded"]

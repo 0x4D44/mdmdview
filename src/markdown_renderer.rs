@@ -39,6 +39,19 @@ struct InlineStyle {
     color: Option<Color32>,
 }
 
+/// A single syntax-highlighted token within a code block line.
+/// Pre-computed during parsing to avoid re-highlighting every frame.
+#[derive(Clone, Debug)]
+pub struct HighlightedToken {
+    pub text: String,
+    pub color: Color32,
+    pub bold: bool,
+    pub italic: bool,
+}
+
+/// A line of syntax-highlighted tokens.
+pub type HighlightedLine = Vec<HighlightedToken>;
+
 #[cfg(test)]
 thread_local! {
     static FORCED_RENDER_ACTIONS: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
@@ -362,6 +375,8 @@ pub enum MarkdownElement {
     CodeBlock {
         language: Option<String>,
         text: String,
+        /// Pre-computed syntax highlighting. None if language unknown or highlighting failed.
+        highlighted: Option<Vec<HighlightedLine>>,
     },
     List {
         ordered: bool,
@@ -1756,9 +1771,11 @@ impl MarkdownRenderer {
             }
             Event::Start(Tag::CodeBlock(_)) => {
                 let (code_text, language, next_idx) = self.parse_code_block(events, start);
+                let highlighted = self.highlight_code(language.as_deref(), &code_text);
                 elements.push(MarkdownElement::CodeBlock {
                     language,
                     text: code_text,
+                    highlighted,
                 });
                 next_idx
             }
@@ -1990,9 +2007,11 @@ impl MarkdownRenderer {
                 Event::Start(Tag::CodeBlock(_)) => {
                     flush_inline(&mut blocks, &mut spans);
                     let (code_text, language, next_idx) = self.parse_code_block(events, i);
+                    let highlighted = self.highlight_code(language.as_deref(), &code_text);
                     blocks.push(MarkdownElement::CodeBlock {
                         language,
                         text: code_text,
+                        highlighted,
                     });
                     i = next_idx;
                 }
@@ -2417,9 +2436,12 @@ impl MarkdownRenderer {
                                 flush_inline(&mut blocks, &mut spans);
                                 let (code_text, language, next_idx) =
                                     self.parse_code_block(events, i);
+                                let highlighted =
+                                    self.highlight_code(language.as_deref(), &code_text);
                                 blocks.push(MarkdownElement::CodeBlock {
                                     language,
                                     text: code_text,
+                                    highlighted,
                                 });
                                 i = next_idx;
                             }
@@ -2671,8 +2693,12 @@ impl MarkdownRenderer {
                     .insert(id.clone(), resp.response.rect);
                 ui.add_space(6.0);
             }
-            MarkdownElement::CodeBlock { language, text } => {
-                self.render_code_block(ui, language.as_deref(), text);
+            MarkdownElement::CodeBlock {
+                language,
+                text,
+                highlighted,
+            } => {
+                self.render_code_block(ui, language.as_deref(), text, highlighted.as_ref());
             }
             MarkdownElement::List { ordered, items } => {
                 self.render_list(ui, *ordered, items);
@@ -3683,8 +3709,15 @@ impl MarkdownRenderer {
         }
     }
 
-    /// Render a code block with syntax highlighting
-    fn render_code_block(&self, ui: &mut egui::Ui, language: Option<&str>, code: &str) {
+    /// Render a code block using pre-computed syntax highlighting.
+    /// The `highlighted` parameter contains cached token colors computed at parse time.
+    fn render_code_block(
+        &self,
+        ui: &mut egui::Ui,
+        language: Option<&str>,
+        code: &str,
+        highlighted: Option<&Vec<HighlightedLine>>,
+    ) {
         ui.add_space(8.0);
 
         // Special handling for Mermaid diagrams
@@ -3712,95 +3745,65 @@ impl MarkdownRenderer {
                         ui.add_space(2.0);
                     }
 
-                    // Try syntax highlighting
-                    if let Some(lang) = language {
-                        if let Some(syntax) = self
-                            .find_syntax_for_language(lang)
-                            .or_else(|| self.syntax_set.find_syntax_by_first_line(code))
-                        {
-                            let theme = &self.theme_set.themes["base16-ocean.dark"];
-                            let mut h = HighlightLines::new(syntax, theme);
+                    // Use pre-computed highlighting if available
+                    if let Some(lines) = highlighted {
+                        for tokens in lines {
+                            ui.horizontal_wrapped(|ui| {
+                                // Remove spacing between tokens to avoid visual gaps
+                                ui.spacing_mut().item_spacing.x = 0.0;
 
-                            for line in LinesWithEndings::from(code) {
-                                let ranges =
-                                    h.highlight_line(line, &self.syntax_set).unwrap_or_default();
-
-                                ui.horizontal_wrapped(|ui| {
-                                    // Remove spacing between tokens to avoid visual gaps
-                                    ui.spacing_mut().item_spacing.x = 0.0;
-                                    for (style, text) in ranges {
-                                        // Drop newline characters completely; they're handled by the outer line loop
-                                        let cleaned = text.replace(['\n', '\r'], "");
-
-                                        if cleaned.is_empty() {
-                                            continue;
-                                        }
-
-                                        // Check if this token is pure whitespace (spaces or tabs only)
-                                        if cleaned.chars().all(|c| c == ' ' || c == '\t') {
-                                            // Render whitespace as transparent to preserve layout without visual gaps
-                                            ui.label(
-                                                RichText::new(cleaned)
+                                for token in tokens {
+                                    // Check if this token is pure whitespace
+                                    if token.text.chars().all(|c| c == ' ' || c == '\t') {
+                                        ui.label(
+                                            RichText::new(&token.text)
+                                                .size(self.font_sizes.code)
+                                                .color(Color32::TRANSPARENT)
+                                                .family(egui::FontFamily::Monospace),
+                                        );
+                                    } else {
+                                        // Split by spaces and handle separately for proper spacing
+                                        let parts: Vec<&str> = token.text.split(' ').collect();
+                                        for (i, part) in parts.iter().enumerate() {
+                                            if !part.is_empty() {
+                                                let mut rich_text = RichText::new(*part)
                                                     .size(self.font_sizes.code)
-                                                    .color(Color32::TRANSPARENT)
-                                                    .family(egui::FontFamily::Monospace),
-                                            );
-                                        } else {
-                                            // For non-whitespace, use normal highlighting but replace spaces with transparent ones
-                                            let color = Color32::from_rgb(
-                                                style.foreground.r,
-                                                style.foreground.g,
-                                                style.foreground.b,
-                                            );
+                                                    .color(token.color)
+                                                    .family(egui::FontFamily::Monospace);
 
-                                            // Split by spaces and handle separately
-                                            let parts: Vec<&str> = cleaned.split(' ').collect();
-                                            for (i, part) in parts.iter().enumerate() {
-                                                if !part.is_empty() {
-                                                    let mut rich_text = RichText::new(*part)
+                                                if token.bold {
+                                                    rich_text = rich_text.strong();
+                                                }
+                                                if token.italic {
+                                                    rich_text = rich_text.italics();
+                                                }
+
+                                                ui.label(rich_text);
+                                            }
+
+                                            // Add transparent space between parts
+                                            if i < parts.len() - 1 {
+                                                ui.label(
+                                                    RichText::new(" ")
                                                         .size(self.font_sizes.code)
-                                                        .color(color)
-                                                        .family(egui::FontFamily::Monospace);
-
-                                                    if style.font_style.contains(
-                                                        syntect::highlighting::FontStyle::BOLD,
-                                                    ) {
-                                                        rich_text = rich_text.strong();
-                                                    }
-                                                    if style.font_style.contains(
-                                                        syntect::highlighting::FontStyle::ITALIC,
-                                                    ) {
-                                                        rich_text = rich_text.italics();
-                                                    }
-
-                                                    ui.label(rich_text);
-                                                }
-
-                                                // Add transparent space between parts (except after last part)
-                                                if i < parts.len() - 1 {
-                                                    ui.label(
-                                                        RichText::new(" ")
-                                                            .size(self.font_sizes.code)
-                                                            .color(Color32::TRANSPARENT)
-                                                            .family(egui::FontFamily::Monospace),
-                                                    );
-                                                }
+                                                        .color(Color32::TRANSPARENT)
+                                                        .family(egui::FontFamily::Monospace),
+                                                );
                                             }
                                         }
                                     }
-                                });
-                            }
-                            return; // Early return if highlighting succeeded
+                                }
+                            });
                         }
+                    } else {
+                        // Fallback: render as plain text (no highlighting available)
+                        ui.label(
+                            RichText::new(code)
+                                .size(self.font_sizes.code)
+                                .color(Color32::from_rgb(220, 220, 220))
+                                .family(egui::FontFamily::Monospace),
+                        );
                     }
-
-                    // Fallback: render as plain text
-                    ui.label(
-                        RichText::new(code)
-                            .size(self.font_sizes.code)
-                            .color(Color32::from_rgb(220, 220, 220))
-                            .family(egui::FontFamily::Monospace),
-                    );
                 });
             });
 
@@ -5492,6 +5495,62 @@ impl MarkdownRenderer {
             .or_else(|| self.syntax_set.find_syntax_by_name(mapped_lang))
     }
 
+    /// Pre-compute syntax highlighting for a code block.
+    /// Returns None if the language is unknown or highlighting fails.
+    fn highlight_code(&self, language: Option<&str>, code: &str) -> Option<Vec<HighlightedLine>> {
+        let lang = language?;
+
+        // Skip mermaid blocks - they're rendered as diagrams, not highlighted code
+        if lang.eq_ignore_ascii_case("mermaid") {
+            return None;
+        }
+
+        let syntax = self
+            .find_syntax_for_language(lang)
+            .or_else(|| self.syntax_set.find_syntax_by_first_line(code))?;
+
+        let theme = &self.theme_set.themes["base16-ocean.dark"];
+        let mut highlighter = HighlightLines::new(syntax, theme);
+        let mut highlighted_lines = Vec::new();
+
+        for line in LinesWithEndings::from(code) {
+            let ranges = highlighter
+                .highlight_line(line, &self.syntax_set)
+                .ok()?;
+
+            let mut tokens = Vec::new();
+            for (style, text) in ranges {
+                // Drop newline characters - they're handled by the line structure
+                let cleaned = text.replace(['\n', '\r'], "");
+                if cleaned.is_empty() {
+                    continue;
+                }
+
+                let color = Color32::from_rgb(
+                    style.foreground.r,
+                    style.foreground.g,
+                    style.foreground.b,
+                );
+                let bold = style
+                    .font_style
+                    .contains(syntect::highlighting::FontStyle::BOLD);
+                let italic = style
+                    .font_style
+                    .contains(syntect::highlighting::FontStyle::ITALIC);
+
+                tokens.push(HighlightedToken {
+                    text: cleaned,
+                    color,
+                    bold,
+                    italic,
+                });
+            }
+            highlighted_lines.push(tokens);
+        }
+
+        Some(highlighted_lines)
+    }
+
     /// Zoom in (increase font sizes)
     pub fn zoom_in(&mut self) {
         self.font_sizes.body = (self.font_sizes.body * 1.1).min(32.0);
@@ -6504,7 +6563,7 @@ mod tests {
     fn test_render_code_block_with_none_language() {
         let renderer = MarkdownRenderer::new();
         with_test_ui(|_, ui| {
-            renderer.render_code_block(ui, None, "fn main() {}");
+            renderer.render_code_block(ui, None, "fn main() {}", None);
         });
     }
 
@@ -6796,6 +6855,7 @@ mod tests {
         let elements = vec![MarkdownElement::CodeBlock {
             language: Some("rust".to_string()),
             text: "fn main() {\n    println!(\"Hello\");\n}".to_string(),
+            highlighted: None,
         }];
 
         let plain_text = MarkdownRenderer::elements_to_plain_text(&elements);
@@ -7108,6 +7168,7 @@ mod tests {
         let code = MarkdownElement::CodeBlock {
             text: "fn main() {}".to_string(),
             language: Some("rust".to_string()),
+            highlighted: None,
         };
         assert_eq!(
             MarkdownRenderer::element_plain_text(&header),
@@ -8830,6 +8891,7 @@ fn main() {}
             MarkdownElement::CodeBlock {
                 language: Some("rust".to_string()),
                 text: "fn main() {}".to_string(),
+                highlighted: None,
             },
             MarkdownElement::List {
                 ordered: false,
@@ -10190,6 +10252,7 @@ contexts:
         let block = MarkdownElement::CodeBlock {
             language: Some("rust".to_string()),
             text: "fn main() {}".to_string(),
+            highlighted: None,
         };
         with_test_ui(|_, ui| {
             renderer.render_list_block(ui, &block, 12.0, Color32::WHITE);
@@ -10765,6 +10828,7 @@ contexts:
                     MarkdownElement::CodeBlock {
                         language: None,
                         text: "code".to_string(),
+                        highlighted: None,
                     },
                     MarkdownElement::Paragraph(vec![InlineSpan::Text("After".to_string())]),
                 ],
@@ -11855,13 +11919,13 @@ contexts:
         let renderer = MarkdownRenderer::new();
         let _guard = EnvVarGuard::set("MDMDVIEW_MERMAID_RENDERER", "off");
         with_test_ui(|_, ui| {
-            renderer.render_code_block(ui, Some("mermaid"), "graph TD; A-->B;");
+            renderer.render_code_block(ui, Some("mermaid"), "graph TD; A-->B;", None);
         });
 
         let ctx = egui::Context::default();
         let click = input_with_click(egui::pos2(12.0, 12.0), egui::PointerButton::Secondary);
         run_frame_with_input(&ctx, click, |_, ui| {
-            renderer.render_code_block(ui, Some("rust"), "fn main() {}");
+            renderer.render_code_block(ui, Some("rust"), "fn main() {}", None);
         });
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -11871,7 +11935,7 @@ contexts:
             ..Default::default()
         };
         run_frame_with_input(&ctx, input, |_, ui| {
-            renderer.render_code_block(ui, Some("rust"), "fn main() {}");
+            renderer.render_code_block(ui, Some("rust"), "fn main() {}", None);
         });
     }
 
@@ -11894,7 +11958,7 @@ contexts:
             },
         });
         with_test_ui(|_, ui| {
-            renderer.render_code_block(ui, Some("rust"), "fn main() {}");
+            renderer.render_code_block(ui, Some("rust"), "fn main() {}", None);
         });
     }
 
@@ -11903,13 +11967,13 @@ contexts:
         let renderer = MarkdownRenderer::new();
         let code = "fn main() {\n    let value = 1;\n    // comment with  spaces\n    \n}\n";
         with_test_ui(|_, ui| {
-            renderer.render_code_block(ui, Some("rust"), code);
+            renderer.render_code_block(ui, Some("rust"), code, None);
         });
 
         let mut fallback_renderer = MarkdownRenderer::new();
         fallback_renderer.syntax_set = SyntaxSet::new();
         with_test_ui(|_, ui| {
-            fallback_renderer.render_code_block(ui, Some("notalanguage"), "code");
+            fallback_renderer.render_code_block(ui, Some("notalanguage"), "code", None);
         });
     }
 
