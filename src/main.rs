@@ -482,8 +482,61 @@ fn configure_egui_style(ctx: &egui::Context) {
 
     ctx.set_style(style);
 
-    // Use default fonts - egui has good built-in font support
-    // Custom fonts could be added here if needed
+    // Add system font fallback for symbols not covered by default fonts or Twemoji
+    configure_font_fallbacks(ctx);
+}
+
+/// Configure font fallbacks for better symbol coverage.
+/// Adds platform-specific symbol fonts as fallbacks so characters like ✓ ✗ ⚠
+/// render instead of showing tofu boxes.
+fn configure_font_fallbacks(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    // Platform-specific symbol font paths
+    #[cfg(target_os = "windows")]
+    let symbol_font_paths = &[
+        "C:\\Windows\\Fonts\\seguisym.ttf",  // Segoe UI Symbol
+        "C:\\Windows\\Fonts\\segoeui.ttf",   // Segoe UI (backup)
+    ];
+
+    #[cfg(target_os = "macos")]
+    let symbol_font_paths = &[
+        "/System/Library/Fonts/Apple Symbols.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    ];
+
+    #[cfg(target_os = "linux")]
+    let symbol_font_paths = &[
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ];
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let symbol_font_paths: &[&str] = &[];
+
+    // Try to load the first available symbol font
+    for (i, path) in symbol_font_paths.iter().enumerate() {
+        if let Ok(font_data) = std::fs::read(path) {
+            let font_name = format!("symbol_fallback_{}", i);
+            fonts.font_data.insert(
+                font_name.clone(),
+                egui::FontData::from_owned(font_data),
+            );
+
+            // Add as last fallback for both proportional and monospace
+            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                family.push(font_name.clone());
+            }
+            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                family.push(font_name);
+            }
+
+            // One fallback font is enough
+            break;
+        }
+    }
+
+    ctx.set_fonts(fonts);
 }
 
 #[cfg(test)]
