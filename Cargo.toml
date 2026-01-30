@@ -1,6 +1,6 @@
 [package]
 name = "mdmdview"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 description = "mdmdview"
 authors = ["Your Name <your.email@example.com>"]
