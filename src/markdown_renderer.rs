@@ -2891,40 +2891,35 @@ impl MarkdownRenderer {
             }
             InlineSpan::Link { text, url } => {
                 let fixed_text = self.fix_unicode_chars(text);
-                let group = ui.horizontal_wrapped(|ui| {
-                    // Render link-like styled text with emoji expansion
-                    let color = if Self::is_external_url(url) {
-                        // Slightly different color to indicate external website links
-                        Color32::from_rgb(120, 190, 255)
-                    } else {
-                        Color32::LIGHT_BLUE
-                    };
-                    let style = InlineStyle {
-                        strong: is_strong,
-                        color: Some(color),
-                        ..Default::default()
-                    };
-                    self.render_text_with_emojis(ui, &fixed_text, size, style);
-                });
-                // Use a unique id per link occurrence to avoid collisions when the same URL appears multiple times
-                let mut counter = self.link_counter.borrow_mut();
-                let id = egui::Id::new(format!("link:{}:{}", *counter, url));
-                *counter += 1;
-                let r = ui.interact(group.response.rect, id, egui::Sense::click());
-                if render_action_triggered(r.hovered(), "link_hover") {
+                let color = if Self::is_external_url(url) {
+                    Color32::from_rgb(120, 190, 255)
+                } else {
+                    Color32::LIGHT_BLUE
+                };
+
+                // Render link content as clickable widgets directly in the parent
+                // layout. Important: do NOT nest horizontal_wrapped here - egui 0.27
+                // has interaction bugs with nested horizontal_wrapped (#5666) and
+                // ui.interact() on overlapping rects (#4147, #2947).
+                let (clicked, hovered, last_r) =
+                    self.render_clickable_link(ui, &fixed_text, size, is_strong, color);
+
+                if render_action_triggered(hovered, "link_hover") {
                     ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
                 }
-                if render_action_triggered(r.clicked(), "link_click") {
+                if render_action_triggered(clicked, "link_click") {
                     self.trigger_link(url);
                 }
 
-                // Add context menu for links
-                #[cfg(test)]
-                self.render_link_context_menu(ui, text, url);
-                #[cfg(not(test))]
-                r.context_menu(|ui| {
+                // Attach context menu to the last rendered widget
+                if let Some(r) = last_r {
+                    #[cfg(test)]
                     self.render_link_context_menu(ui, text, url);
-                });
+                    #[cfg(not(test))]
+                    r.context_menu(|ui| {
+                        self.render_link_context_menu(ui, text, url);
+                    });
+                }
             }
             InlineSpan::Image { src, alt, title } => {
                 // Resolve path
@@ -3006,6 +3001,95 @@ impl MarkdownRenderer {
             || lower.starts_with("https://")
             || lower.starts_with("mailto:")
             || lower.starts_with("www.")
+    }
+
+    /// Render a clickable link's content directly in the current layout.
+    /// Returns (clicked, hovered, last_response) so the caller can handle
+    /// link activation, cursor changes, and context menus.
+    ///
+    /// Each sub-widget (Label for text, Image for emoji) gets
+    /// `Sense::click()` applied during creation - this is the egui 0.27
+    /// approved pattern that avoids the broken `ui.interact()` overlay.
+    fn render_clickable_link(
+        &self,
+        ui: &mut egui::Ui,
+        text: &str,
+        size: f32,
+        is_strong: bool,
+        color: Color32,
+    ) -> (bool, bool, Option<egui::Response>) {
+        let has_emoji = text
+            .graphemes(true)
+            .any(|g| self.emoji_key_for_grapheme(g).is_some());
+
+        if !has_emoji {
+            // Simple text link: single Label with click sense
+            let expanded = Self::expand_shortcodes(text);
+            let expanded = Self::expand_superscripts(&expanded);
+            let mut rich = RichText::new(&expanded).size(size).color(color);
+            if is_strong {
+                rich = rich.strong();
+            }
+            let r = ui.add(egui::Label::new(rich).sense(egui::Sense::click()));
+            let clicked = r.clicked();
+            let hovered = r.hovered();
+            return (clicked, hovered, Some(r));
+        }
+
+        // Emoji link: render each piece with click sense
+        let mut any_clicked = false;
+        let mut any_hovered = false;
+        let mut responses: Vec<egui::Response> = Vec::new();
+        let mut buffer = String::new();
+
+        for g in text.graphemes(true) {
+            if let Some(key) = self.emoji_key_for_grapheme(g) {
+                // Flush text buffer as a clickable label
+                if !buffer.is_empty() {
+                    let expanded = Self::expand_shortcodes(&buffer);
+                    let expanded = Self::expand_superscripts(&expanded);
+                    let mut rich = RichText::new(&expanded).size(size).color(color);
+                    if is_strong {
+                        rich = rich.strong();
+                    }
+                    let r = ui.add(egui::Label::new(rich).sense(egui::Sense::click()));
+                    any_clicked |= r.clicked();
+                    any_hovered |= r.hovered();
+                    responses.push(r);
+                    buffer.clear();
+                }
+                // Emoji image with click sense
+                let handle = self.get_or_make_emoji_texture(ui, &key);
+                let sz = size * 1.2;
+                let r = ui.add(
+                    egui::Image::new(&handle)
+                        .max_width(sz)
+                        .max_height(sz)
+                        .sense(egui::Sense::click()),
+                );
+                any_clicked |= r.clicked();
+                any_hovered |= r.hovered();
+                responses.push(r);
+            } else {
+                buffer.push_str(g);
+            }
+        }
+
+        // Flush remaining text
+        if !buffer.is_empty() {
+            let expanded = Self::expand_shortcodes(&buffer);
+            let expanded = Self::expand_superscripts(&expanded);
+            let mut rich = RichText::new(&expanded).size(size).color(color);
+            if is_strong {
+                rich = rich.strong();
+            }
+            let r = ui.add(egui::Label::new(rich).sense(egui::Sense::click()));
+            any_clicked |= r.clicked();
+            any_hovered |= r.hovered();
+            responses.push(r);
+        }
+
+        (any_clicked, any_hovered, responses.pop())
     }
 
     fn render_text_with_emojis(
@@ -4625,6 +4709,64 @@ impl MarkdownRenderer {
         let widths = self.resolve_table_column_widths(table_id, column_specs, min_floor);
         let spacing_total = column_spacing * widths.len().saturating_sub(1) as f32;
         widths.iter().sum::<f32>() + spacing_total
+    }
+
+    /// Estimate per-column natural widths from content statistics and
+    /// policy-resolved widths (which include any user-persisted widths).
+    ///
+    /// For each column, takes the maximum of:
+    /// - Content-based estimate (grapheme count * char_width_factor + cell_padding)
+    /// - Policy-resolved width (from resolve_table_column_widths)
+    ///
+    /// Each column width is clamped to [MIN_COL_WIDTH, MAX_COL_WIDTH].
+    #[cfg(test)]
+    fn estimate_natural_column_widths(
+        &self,
+        column_stats: &[ColumnStat],
+        headers: &[Vec<InlineSpan>],
+        resolved_widths: &[f32],
+        column_count: usize,
+    ) -> Vec<f32> {
+        use crate::table_support::column_spec::spans_to_text;
+        use unicode_width::UnicodeWidthStr;
+
+        let body = self.font_sizes.body;
+        let char_width_factor = body * 0.62;
+        let cell_padding = body * 1.8;
+        let min_col_width = body * 4.0;
+        let max_col_width = body * 35.0;
+
+        (0..column_count)
+            .map(|i| {
+                // Extract header text and compute its display width
+                let header_width = headers
+                    .get(i)
+                    .map(|spans| {
+                        let text = spans_to_text(spans);
+                        UnicodeWidthStr::width(text.as_str())
+                    })
+                    .unwrap_or(0);
+
+                // Content width from stats (already unicode-width-based)
+                let content_graphemes = column_stats
+                    .get(i)
+                    .map(|s| s.max_graphemes)
+                    .unwrap_or(0);
+
+                let display_graphemes = header_width.max(content_graphemes);
+                let content_width = display_graphemes as f32 * char_width_factor + cell_padding;
+                let policy_width = resolved_widths.get(i).copied().unwrap_or(0.0);
+                let natural = content_width.max(policy_width);
+                natural.clamp(min_col_width, max_col_width)
+            })
+            .collect()
+    }
+
+    /// Compute the total natural table width from per-column widths and inter-column spacing.
+    #[cfg(test)]
+    fn natural_table_width(natural_widths: &[f32], column_spacing: f32) -> f32 {
+        let spacing = column_spacing * natural_widths.len().saturating_sub(1) as f32;
+        natural_widths.iter().sum::<f32>() + spacing
     }
 
     fn estimate_table_row_height(
@@ -11525,6 +11667,220 @@ contexts:
         ];
         let widths = renderer.estimate_table_column_widths(&specs, 300.0, 10.0);
         assert_eq!(widths, vec![80.0, 60.0]);
+    }
+
+    // ── Stage 1: content-driven natural width tests ──────────────────────
+
+    #[test]
+    fn test_natural_widths_two_short_columns() {
+        // Two columns with content wider than policy → content drives widths
+        let renderer = MarkdownRenderer::new();
+        let headers = vec![
+            vec![InlineSpan::Text("Name".to_string())],
+            vec![InlineSpan::Text("Value".to_string())],
+        ];
+        let stats = vec![
+            ColumnStat {
+                max_graphemes: 20,
+                ..Default::default()
+            },
+            ColumnStat {
+                max_graphemes: 18,
+                ..Default::default()
+            },
+        ];
+        // Small resolved widths so content should dominate
+        let resolved = vec![60.0, 60.0];
+        let widths = renderer.estimate_natural_column_widths(&stats, &headers, &resolved, 2);
+        assert_eq!(widths.len(), 2);
+        // body=14.0, char_width_factor=14*0.62=8.68, cell_padding=14*1.8=25.2
+        // col0: max(4,20)=20 → 20*8.68+25.2 = 198.8 → clamp(198.8, 56, 490) = 198.8
+        // col1: max(5,18)=18 → 18*8.68+25.2 = 181.44 → clamp(181.44, 56, 490) = 181.44
+        assert!(widths[0] > 150.0, "col 0 = {} should be > 150", widths[0]);
+        assert!(widths[1] > 150.0, "col 1 = {} should be > 150", widths[1]);
+    }
+
+    #[test]
+    fn test_natural_widths_uses_max_of_content_and_policy() {
+        // Short content (3 graphemes), policy width 98 should win
+        let renderer = MarkdownRenderer::new();
+        let headers = vec![vec![InlineSpan::Text("ID".to_string())]];
+        let stats = vec![ColumnStat {
+            max_graphemes: 3,
+            ..Default::default()
+        }];
+        // body=14.0, char_width_factor=8.68, cell_padding=25.2
+        // header "ID" → width 2; max(2,3)=3 → 3*8.68+25.2 = 51.24
+        // policy = 98.0 → max(51.24, 98.0) = 98.0
+        let resolved = vec![98.0];
+        let widths = renderer.estimate_natural_column_widths(&stats, &headers, &resolved, 1);
+        assert_eq!(widths.len(), 1);
+        assert!(
+            (widths[0] - 98.0).abs() < 0.1,
+            "policy should win: got {}",
+            widths[0]
+        );
+    }
+
+    #[test]
+    fn test_natural_widths_clamped_to_bounds() {
+        let renderer = MarkdownRenderer::new();
+        // body=14.0 → min_col_width=56.0, max_col_width=490.0
+        let min_col = 14.0 * 4.0; // 56
+        let max_col = 14.0 * 35.0; // 490
+
+        // Tiny content: 1 grapheme → 1*8.68+25.2 = 33.88, policy=10 → clamp to min
+        let headers_tiny = vec![vec![InlineSpan::Text("X".to_string())]];
+        let stats_tiny = vec![ColumnStat {
+            max_graphemes: 1,
+            ..Default::default()
+        }];
+        let resolved_tiny = vec![10.0];
+        let widths_tiny =
+            renderer.estimate_natural_column_widths(&stats_tiny, &headers_tiny, &resolved_tiny, 1);
+        assert!(
+            (widths_tiny[0] - min_col).abs() < 0.1,
+            "tiny should clamp to min {}: got {}",
+            min_col,
+            widths_tiny[0]
+        );
+
+        // Huge content: 200 graphemes → 200*8.68+25.2 = 1761.2 → clamp to max
+        let headers_huge = vec![vec![InlineSpan::Text("Description".to_string())]];
+        let stats_huge = vec![ColumnStat {
+            max_graphemes: 200,
+            ..Default::default()
+        }];
+        let resolved_huge = vec![10.0];
+        let widths_huge =
+            renderer.estimate_natural_column_widths(&stats_huge, &headers_huge, &resolved_huge, 1);
+        assert!(
+            (widths_huge[0] - max_col).abs() < 0.1,
+            "huge should clamp to max {}: got {}",
+            max_col,
+            widths_huge[0]
+        );
+    }
+
+    #[test]
+    fn test_natural_table_width_sums_correctly() {
+        // Empty input
+        let empty = MarkdownRenderer::natural_table_width(&[], 10.0);
+        assert!((empty - 0.0).abs() < f32::EPSILON);
+
+        // Single column → no spacing
+        let single = MarkdownRenderer::natural_table_width(&[120.0], 10.0);
+        assert!((single - 120.0).abs() < f32::EPSILON);
+
+        // Three columns: 100+200+150 = 450, spacing = 10*2 = 20, total = 470
+        let three = MarkdownRenderer::natural_table_width(&[100.0, 200.0, 150.0], 10.0);
+        assert!(
+            (three - 470.0).abs() < 0.1,
+            "expected 470, got {}",
+            three
+        );
+    }
+
+    #[test]
+    fn test_content_fit_mode_activated_for_small_table() {
+        // 2-column table with short content → natural_total should be < 1100
+        let renderer = MarkdownRenderer::new();
+        let headers = vec![
+            vec![InlineSpan::Text("Key".to_string())],
+            vec![InlineSpan::Text("Value".to_string())],
+        ];
+        let stats = vec![
+            ColumnStat {
+                max_graphemes: 10,
+                ..Default::default()
+            },
+            ColumnStat {
+                max_graphemes: 12,
+                ..Default::default()
+            },
+        ];
+        let resolved = vec![60.0, 60.0];
+        let widths = renderer.estimate_natural_column_widths(&stats, &headers, &resolved, 2);
+        let total = MarkdownRenderer::natural_table_width(&widths, 6.0);
+        assert!(
+            total < 1100.0,
+            "small 2-col table total {} should be < 1100",
+            total
+        );
+    }
+
+    #[test]
+    fn test_viewport_fill_mode_for_wide_table() {
+        // 9-column table with moderate content → natural_total should be > 1100
+        let renderer = MarkdownRenderer::new();
+        let headers: Vec<Vec<InlineSpan>> = (0..9)
+            .map(|i| vec![InlineSpan::Text(format!("Column{i}"))])
+            .collect();
+        let stats: Vec<ColumnStat> = (0..9)
+            .map(|_| ColumnStat {
+                max_graphemes: 15,
+                ..Default::default()
+            })
+            .collect();
+        let resolved: Vec<f32> = vec![80.0; 9];
+        let widths = renderer.estimate_natural_column_widths(&stats, &headers, &resolved, 9);
+        let total = MarkdownRenderer::natural_table_width(&widths, 6.0);
+        assert!(
+            total > 1100.0,
+            "9-col table total {} should be > 1100",
+            total
+        );
+    }
+
+    // Test: column_count exceeds headers/stats/resolved_widths length
+    #[test]
+    fn test_natural_widths_handles_mismatched_lengths() {
+        let renderer = MarkdownRenderer::new();
+        let headers = vec![vec![InlineSpan::Text("Name".into())]]; // only 1 header
+        let stats = vec![ColumnStat {
+            max_graphemes: 10,
+            longest_word: 5,
+            ..Default::default()
+        }]; // only 1 stat
+        let resolved = vec![98.0]; // only 1 width
+        // column_count = 3, exceeds all inputs
+        let widths = renderer.estimate_natural_column_widths(&stats, &headers, &resolved, 3);
+        assert_eq!(widths.len(), 3);
+        // First column should be content/policy-driven
+        assert!(widths[0] > 50.0);
+        // Remaining columns should be clamped to MIN (body * 4.0 = 56.0)
+        let min_col = renderer.font_sizes.body * 4.0;
+        assert!(
+            (widths[1] - min_col).abs() < 1.0,
+            "extra col should be MIN, got {}",
+            widths[1]
+        );
+        assert!(
+            (widths[2] - min_col).abs() < 1.0,
+            "extra col should be MIN, got {}",
+            widths[2]
+        );
+    }
+
+    // Test: CJK characters in header get double-width estimate
+    #[test]
+    fn test_natural_widths_cjk_header_gets_double_width() {
+        let renderer = MarkdownRenderer::new();
+        let headers_ascii = vec![vec![InlineSpan::Text("Name".into())]]; // 4 display width
+        let headers_cjk = vec![vec![InlineSpan::Text("\u{540D}\u{524D}\u{5217}\u{5E45}".into())]]; // 4 CJK chars = 8 display width
+        let stats = vec![ColumnStat::default()]; // no content
+        let resolved = vec![0.0]; // no policy
+        let widths_ascii =
+            renderer.estimate_natural_column_widths(&stats, &headers_ascii, &resolved, 1);
+        let widths_cjk =
+            renderer.estimate_natural_column_widths(&stats, &headers_cjk, &resolved, 1);
+        // CJK header should produce a wider natural width than ASCII header
+        assert!(
+            widths_cjk[0] > widths_ascii[0],
+            "CJK width {} should exceed ASCII width {}",
+            widths_cjk[0],
+            widths_ascii[0]
+        );
     }
 
     #[test]
