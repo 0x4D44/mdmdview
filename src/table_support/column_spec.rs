@@ -552,7 +552,7 @@ fn accumulate_stats_for_cell(spans: &[InlineSpan], stat: &mut ColumnStat) {
     };
 }
 
-fn spans_to_text(spans: &[InlineSpan]) -> String {
+pub(crate) fn spans_to_text(spans: &[InlineSpan]) -> String {
     let mut text = String::new();
     for span in spans {
         match span {
