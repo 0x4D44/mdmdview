@@ -1,8 +1,8 @@
 use crate::image_decode;
 use crate::mermaid_renderer::MermaidRenderer;
 use crate::table_support::{
-    compute_column_stats, derive_column_specs, ColumnPolicy, ColumnSpec, ColumnStat,
-    TableColumnContext, TableMetrics, WidthChange,
+    column_spec::spans_to_text, compute_column_stats, derive_column_specs, ColumnPolicy,
+    ColumnSpec, ColumnStat, TableColumnContext, TableMetrics, WidthChange,
 };
 use crate::{emoji_assets, emoji_catalog};
 use anyhow::Result;
@@ -28,6 +28,7 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 use unicode_casefold::UnicodeCaseFold;
+use unicode_width::UnicodeWidthStr;
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -4127,9 +4128,22 @@ impl MarkdownRenderer {
             .collect();
 
         let column_spacing = ui.spacing().item_spacing.x.max(6.0);
-        let available_width = ui.available_width().max(1.0);
+        let viewport_width = ui.available_width().max(1.0);
         let min_floor = self.table_min_column_width();
         let resolved_widths = self.resolve_table_column_widths(table_id, &column_specs, min_floor);
+
+        // Content-driven table width: estimate natural column widths from content
+        // and policy, then determine if the table fits within the viewport.
+        let natural_widths = self.estimate_natural_column_widths(
+            &column_stats,
+            headers,
+            &resolved_widths,
+            column_specs.len(),
+        );
+        let natural_total = Self::natural_table_width(&natural_widths, column_spacing);
+        let effective_width = natural_total.min(viewport_width);
+        let content_fits = effective_width < viewport_width - 0.5;
+
         let min_widths: Vec<f32> = column_specs
             .iter()
             .map(|spec| match spec.policy {
@@ -4139,7 +4153,7 @@ impl MarkdownRenderer {
             })
             .collect();
         let spacing_total = column_spacing * column_specs.len().saturating_sub(1) as f32;
-        let available_for_columns = available_width - spacing_total;
+        let available_for_columns = viewport_width - spacing_total;
         let mut fixed_total = 0.0;
         let mut flexible_indices: Vec<usize> = Vec::new();
         let mut remainder_indices: Vec<usize> = Vec::new();
@@ -4156,7 +4170,7 @@ impl MarkdownRenderer {
         }
         let min_flex_total: f32 = flexible_indices.iter().map(|idx| min_widths[*idx]).sum();
         let desired_total_width = resolved_widths.iter().sum::<f32>() + spacing_total;
-        let content_width = desired_total_width.max(available_width);
+        let content_width = desired_total_width.max(viewport_width);
         let remaining_for_flex = available_for_columns - fixed_total;
         let use_hscroll = available_for_columns <= 0.0
             || fixed_total > available_for_columns + 0.5
@@ -4189,7 +4203,34 @@ impl MarkdownRenderer {
         }
         let column_layout: Vec<Column> = if use_hscroll {
             column_specs.iter().map(|spec| spec.as_column()).collect()
+        } else if content_fits {
+            // CONTENT-FIT MODE — columns sized to content, no Remainder expansion.
+            column_specs
+                .iter()
+                .enumerate()
+                .map(|(idx, spec)| {
+                    let width = natural_widths
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(min_floor)
+                        .max(1.0);
+                    let clip = match spec.policy {
+                        ColumnPolicy::Fixed { clip, .. } => clip,
+                        ColumnPolicy::Resizable { clip, .. } => clip,
+                        ColumnPolicy::Remainder { clip } => clip,
+                        ColumnPolicy::Auto => false,
+                    };
+                    let mut col = Column::initial(width)
+                        .at_least(min_floor.min(width))
+                        .resizable(true);
+                    if clip {
+                        col = col.clip(true);
+                    }
+                    col
+                })
+                .collect()
         } else {
+            // VIEWPORT-FILL MODE — existing policy logic unchanged.
             column_specs
                 .iter()
                 .enumerate()
@@ -4296,15 +4337,21 @@ impl MarkdownRenderer {
                     // Use uniform row height to avoid scroll issues with heterogeneous_rows.
                     // Calculate the maximum height across all rows for consistency.
                     let uniform_row_height = if needs_estimate {
-                        let approx_widths = self.estimate_table_row_widths(
-                            &column_specs,
-                            &resolved_widths,
-                            &adjusted_widths,
-                            available_for_columns,
-                            min_floor,
-                            use_hscroll,
-                            scaled_down,
-                        );
+                        let approx_widths = if content_fits {
+                            // Content-fit mode: use natural widths directly.
+                            // These are the actual widths columns will render at.
+                            natural_widths.clone()
+                        } else {
+                            self.estimate_table_row_widths(
+                                &column_specs,
+                                &resolved_widths,
+                                &adjusted_widths,
+                                available_for_columns,
+                                min_floor,
+                                use_hscroll,
+                                scaled_down,
+                            )
+                        };
                         let style = ui.style().clone();
                         let mut max_height = fallback_row_height;
                         for row in rows.iter() {
@@ -4505,8 +4552,10 @@ impl MarkdownRenderer {
                     ui.set_min_width(content_width);
                     render_table(ui, content_width);
                 });
+        } else if content_fits {
+            render_table(ui, effective_width);
         } else {
-            render_table(ui, available_width);
+            render_table(ui, viewport_width);
         }
     }
 
@@ -4719,7 +4768,6 @@ impl MarkdownRenderer {
     /// - Policy-resolved width (from resolve_table_column_widths)
     ///
     /// Each column width is clamped to [MIN_COL_WIDTH, MAX_COL_WIDTH].
-    #[cfg(test)]
     fn estimate_natural_column_widths(
         &self,
         column_stats: &[ColumnStat],
@@ -4727,9 +4775,6 @@ impl MarkdownRenderer {
         resolved_widths: &[f32],
         column_count: usize,
     ) -> Vec<f32> {
-        use crate::table_support::column_spec::spans_to_text;
-        use unicode_width::UnicodeWidthStr;
-
         let body = self.font_sizes.body;
         let char_width_factor = body * 0.62;
         let cell_padding = body * 1.8;
@@ -4763,7 +4808,6 @@ impl MarkdownRenderer {
     }
 
     /// Compute the total natural table width from per-column widths and inter-column spacing.
-    #[cfg(test)]
     fn natural_table_width(natural_widths: &[f32], column_spacing: f32) -> f32 {
         let spacing = column_spacing * natural_widths.len().saturating_sub(1) as f32;
         natural_widths.iter().sum::<f32>() + spacing
