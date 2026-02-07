@@ -40,6 +40,15 @@ pub fn make_image(emoji: &str, size: usize) -> Option<egui::ColorImage> {
     }
 }
 
+/// Returns true if the emoji has a procedural vector fallback in `make_image()`.
+/// This is a lightweight check that avoids allocating a ColorImage.
+pub fn has_fallback(emoji: &str) -> bool {
+    matches!(
+        emoji,
+        "\u{2705}" | "\u{1f389}" | "\u{1f680}" | "\u{2764}" | "\u{1f496}" | "\u{2b50}" | "\u{1f525}"
+    )
+}
+
 fn draw_circle(img: &mut egui::ColorImage, size: usize, color: C) {
     let cx = (size as i32) / 2;
     let cy = cx;
@@ -191,5 +200,19 @@ mod tests {
     #[test]
     fn test_make_image_unknown_returns_none() {
         assert!(make_image("\u{1f47d}", 24).is_none());
+    }
+
+    #[test]
+    fn test_has_fallback() {
+        assert!(has_fallback("\u{2705}"));
+        assert!(has_fallback("\u{1f389}"));
+        assert!(has_fallback("\u{1f680}"));
+        assert!(has_fallback("\u{2764}"));
+        assert!(has_fallback("\u{1f496}"));
+        assert!(has_fallback("\u{2b50}"));
+        assert!(has_fallback("\u{1f525}"));
+        // Unknown should return false
+        assert!(!has_fallback("\u{1f47d}"));
+        assert!(!has_fallback("\u{26a0}"));
     }
 }
