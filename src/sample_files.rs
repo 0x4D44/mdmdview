@@ -43,7 +43,15 @@ pub const SAMPLE_FILES: &[SampleFile] = &[
         title: "Inline Images & Diagrams",
         content: IMAGES_CONTENT,
     },
+    SampleFile {
+        name: "stress_test.md",
+        title: "Stress Test",
+        content: STRESS_TEST_CONTENT,
+    },
 ];
+
+/// Stress test content loaded from external file
+const STRESS_TEST_CONTENT: &str = include_str!("../test_stress.md");
 
 /// Welcome content with basic introduction
 const WELCOME_CONTENT: &str = r#"# Welcome to MarkdownView
@@ -457,7 +465,7 @@ mod tests {
 
     #[test]
     fn test_sample_files_exist() {
-        assert_eq!(SAMPLE_FILES.len(), 6);
+        assert_eq!(SAMPLE_FILES.len(), 7);
 
         let names: Vec<&str> = SAMPLE_FILES.iter().map(|f| f.name).collect();
         assert!(names.contains(&"welcome.md"));
@@ -466,6 +474,7 @@ mod tests {
         assert!(names.contains(&"usage.md"));
         assert!(names.contains(&"search.md"));
         assert!(names.contains(&"images.md"));
+        assert!(names.contains(&"stress_test.md"));
     }
 
     #[test]
@@ -532,5 +541,14 @@ mod tests {
         assert!(IMAGES_CONTENT.contains("Inline Images"));
         assert!(IMAGES_CONTENT.contains("WEBP Sample"));
         assert!(IMAGES_CONTENT.contains("```mermaid"));
+    }
+
+    #[test]
+    fn test_stress_test_content_structure() {
+        assert!(STRESS_TEST_CONTENT.contains("# Stress Test Document"));
+        assert!(STRESS_TEST_CONTENT.contains("```rust"));
+        assert!(STRESS_TEST_CONTENT.contains("```typescript"));
+        assert!(STRESS_TEST_CONTENT.contains("## Tables"));
+        assert!(STRESS_TEST_CONTENT.contains("## Nested Lists"));
     }
 }

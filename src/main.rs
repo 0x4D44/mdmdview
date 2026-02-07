@@ -495,8 +495,8 @@ fn configure_font_fallbacks(ctx: &egui::Context) {
     // Platform-specific symbol font paths
     #[cfg(target_os = "windows")]
     let symbol_font_paths = &[
-        "C:\\Windows\\Fonts\\seguisym.ttf",  // Segoe UI Symbol
-        "C:\\Windows\\Fonts\\segoeui.ttf",   // Segoe UI (backup)
+        "C:\\Windows\\Fonts\\seguisym.ttf", // Segoe UI Symbol
+        "C:\\Windows\\Fonts\\segoeui.ttf",  // Segoe UI (backup)
     ];
 
     #[cfg(target_os = "macos")]
@@ -518,10 +518,9 @@ fn configure_font_fallbacks(ctx: &egui::Context) {
     for (i, path) in symbol_font_paths.iter().enumerate() {
         if let Ok(font_data) = std::fs::read(path) {
             let font_name = format!("symbol_fallback_{}", i);
-            fonts.font_data.insert(
-                font_name.clone(),
-                egui::FontData::from_owned(font_data),
-            );
+            fonts
+                .font_data
+                .insert(font_name.clone(), egui::FontData::from_owned(font_data));
 
             // Add as last fallback for both proportional and monospace
             if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
