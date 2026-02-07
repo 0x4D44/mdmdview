@@ -211,11 +211,8 @@ pub fn load_app_settings() -> AppSettings {
     let mut settings = AppSettings::default();
     for line in contents.lines() {
         if let Some((key, value)) = line.split_once('=') {
-            match key.trim() {
-                "allow_remote_images" => {
-                    settings.allow_remote_images = matches!(value.trim(), "1" | "true");
-                }
-                _ => {}
+            if key.trim() == "allow_remote_images" {
+                settings.allow_remote_images = matches!(value.trim(), "1" | "true");
             }
         }
     }
@@ -235,7 +232,11 @@ pub fn save_app_settings(settings: &AppSettings) -> std::io::Result<()> {
         }
         dir.push("settings.txt");
         let mut f = fs::File::create(&dir)?;
-        writeln!(f, "allow_remote_images={}", settings.allow_remote_images as u8)?;
+        writeln!(
+            f,
+            "allow_remote_images={}",
+            settings.allow_remote_images as u8
+        )?;
     }
     Ok(())
 }
@@ -743,5 +744,284 @@ mod tests {
         };
         save_window_state(&state).expect("save ok");
         assert!(load_window_state().is_none());
+    }
+
+    // ========== AppSettings Tests ==========
+
+    #[test]
+    fn test_load_app_settings_default_when_no_config() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, _config_dir) = set_config_env(temp.path());
+
+        // No settings file exists - should return default
+        let settings = load_app_settings();
+        assert!(!settings.allow_remote_images);
+    }
+
+    #[test]
+    fn test_load_app_settings_parses_true_value() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, config_dir) = set_config_env(temp.path());
+
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        let settings_path = config_dir.join("settings.txt");
+        fs::write(&settings_path, "allow_remote_images=true\n").expect("write");
+
+        let settings = load_app_settings();
+        assert!(settings.allow_remote_images);
+    }
+
+    #[test]
+    fn test_load_app_settings_parses_one_value() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, config_dir) = set_config_env(temp.path());
+
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        let settings_path = config_dir.join("settings.txt");
+        fs::write(&settings_path, "allow_remote_images=1\n").expect("write");
+
+        let settings = load_app_settings();
+        assert!(settings.allow_remote_images);
+    }
+
+    #[test]
+    fn test_load_app_settings_parses_false_value() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, config_dir) = set_config_env(temp.path());
+
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        let settings_path = config_dir.join("settings.txt");
+        fs::write(&settings_path, "allow_remote_images=0\n").expect("write");
+
+        let settings = load_app_settings();
+        assert!(!settings.allow_remote_images);
+    }
+
+    #[test]
+    fn test_load_app_settings_ignores_unknown_keys() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, config_dir) = set_config_env(temp.path());
+
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        let settings_path = config_dir.join("settings.txt");
+        fs::write(
+            &settings_path,
+            "unknown_key=value\nallow_remote_images=true\nother=123\n",
+        )
+        .expect("write");
+
+        let settings = load_app_settings();
+        assert!(settings.allow_remote_images);
+    }
+
+    #[test]
+    fn test_load_app_settings_ignores_lines_without_equals() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, config_dir) = set_config_env(temp.path());
+
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        let settings_path = config_dir.join("settings.txt");
+        fs::write(
+            &settings_path,
+            "no equals sign here\nallow_remote_images=true\n",
+        )
+        .expect("write");
+
+        let settings = load_app_settings();
+        assert!(settings.allow_remote_images);
+    }
+
+    #[test]
+    fn test_load_app_settings_handles_whitespace() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, config_dir) = set_config_env(temp.path());
+
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        let settings_path = config_dir.join("settings.txt");
+        fs::write(&settings_path, "  allow_remote_images  =  true  \n").expect("write");
+
+        let settings = load_app_settings();
+        assert!(settings.allow_remote_images);
+    }
+
+    #[test]
+    fn test_save_app_settings_creates_file() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, config_dir) = set_config_env(temp.path());
+
+        let settings = AppSettings {
+            allow_remote_images: true,
+        };
+        save_app_settings(&settings).expect("save");
+
+        let settings_path = config_dir.join("settings.txt");
+        assert!(settings_path.exists());
+        let contents = fs::read_to_string(&settings_path).expect("read");
+        assert!(contents.contains("allow_remote_images=1"));
+    }
+
+    #[test]
+    fn test_save_app_settings_creates_directory() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, config_dir) = set_config_env(temp.path());
+
+        // Ensure directory doesn't exist
+        let _ = fs::remove_dir_all(&config_dir);
+
+        let settings = AppSettings {
+            allow_remote_images: false,
+        };
+        save_app_settings(&settings).expect("save");
+
+        assert!(config_dir.exists());
+        let settings_path = config_dir.join("settings.txt");
+        assert!(settings_path.exists());
+    }
+
+    #[test]
+    fn test_save_and_load_app_settings_roundtrip() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, _config_dir) = set_config_env(temp.path());
+
+        let settings = AppSettings {
+            allow_remote_images: true,
+        };
+        save_app_settings(&settings).expect("save");
+
+        let loaded = load_app_settings();
+        assert_eq!(loaded.allow_remote_images, settings.allow_remote_images);
+    }
+
+    #[test]
+    fn test_load_app_settings_default_when_no_config_dir() {
+        let _lock = env_lock();
+        let _guard_appdata = EnvGuard::unset("APPDATA");
+        let _guard_xdg = EnvGuard::unset("XDG_CONFIG_HOME");
+        let _guard_home = EnvGuard::unset("HOME");
+
+        let settings = load_app_settings();
+        assert!(!settings.allow_remote_images);
+    }
+
+    #[test]
+    fn test_save_app_settings_noop_when_no_config_dir() {
+        let _lock = env_lock();
+        let _guard_appdata = EnvGuard::unset("APPDATA");
+        let _guard_xdg = EnvGuard::unset("XDG_CONFIG_HOME");
+        let _guard_home = EnvGuard::unset("HOME");
+
+        let settings = AppSettings {
+            allow_remote_images: true,
+        };
+        // Should succeed but do nothing
+        save_app_settings(&settings).expect("save ok");
+    }
+
+    #[test]
+    fn test_load_window_state_parses_maximized_true_capital() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, config_dir) = set_config_env(temp.path());
+
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        let config = config_dir.join("window_state.txt");
+        std::fs::write(&config, "10 20 300 400 True").expect("write data");
+
+        let loaded = load_window_state().expect("load");
+        assert!(loaded.maximized);
+    }
+
+    #[test]
+    fn test_load_window_state_parses_maximized_one() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, config_dir) = set_config_env(temp.path());
+
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        let config = config_dir.join("window_state.txt");
+        std::fs::write(&config, "10 20 300 400 1").expect("write data");
+
+        let loaded = load_window_state().expect("load");
+        assert!(loaded.maximized);
+    }
+
+    #[test]
+    fn test_load_window_state_parses_maximized_false_value() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, config_dir) = set_config_env(temp.path());
+
+        std::fs::create_dir_all(&config_dir).expect("create config dir");
+        let config = config_dir.join("window_state.txt");
+        std::fs::write(&config, "10 20 300 400 0").expect("write data");
+
+        let loaded = load_window_state().expect("load");
+        assert!(!loaded.maximized);
+    }
+
+    #[test]
+    fn test_sanitize_window_state_infinity_rejected() {
+        let invalid = WindowState {
+            pos: [f32::INFINITY, 10.0],
+            size: [800.0, 600.0],
+            maximized: false,
+        };
+        assert!(sanitize_window_state(invalid).is_none());
+
+        let invalid2 = WindowState {
+            pos: [10.0, f32::NEG_INFINITY],
+            size: [800.0, 600.0],
+            maximized: false,
+        };
+        assert!(sanitize_window_state(invalid2).is_none());
+    }
+
+    #[test]
+    fn test_sanitize_window_state_infinity_in_size_rejected() {
+        let invalid = WindowState {
+            pos: [10.0, 20.0],
+            size: [f32::INFINITY, 600.0],
+            maximized: false,
+        };
+        assert!(sanitize_window_state(invalid).is_none());
+
+        let invalid2 = WindowState {
+            pos: [10.0, 20.0],
+            size: [800.0, f32::NEG_INFINITY],
+            maximized: false,
+        };
+        assert!(sanitize_window_state(invalid2).is_none());
+    }
+
+    #[test]
+    fn test_settings_path_returns_some_when_config_exists() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, _config_dir) = set_config_env(temp.path());
+
+        let path = settings_path();
+        assert!(path.is_some());
+        assert!(path.unwrap().ends_with("settings.txt"));
+    }
+
+    #[test]
+    fn test_state_path_returns_some_when_config_exists() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, _config_dir) = set_config_env(temp.path());
+
+        let path = state_path();
+        assert!(path.is_some());
+        assert!(path.unwrap().ends_with("window_state.txt"));
     }
 }

@@ -1662,14 +1662,62 @@ struct HtmlTagMapping {
 /// Supported HTML tags and their SVG tspan equivalents.
 #[cfg(feature = "mermaid-quickjs")]
 const HTML_TAG_MAPPINGS: &[(&str, HtmlTagMapping)] = &[
-    ("i", HtmlTagMapping { attr: "font-style", value: "italic" }),
-    ("em", HtmlTagMapping { attr: "font-style", value: "italic" }),
-    ("b", HtmlTagMapping { attr: "font-weight", value: "bold" }),
-    ("strong", HtmlTagMapping { attr: "font-weight", value: "bold" }),
-    ("u", HtmlTagMapping { attr: "text-decoration", value: "underline" }),
-    ("s", HtmlTagMapping { attr: "text-decoration", value: "line-through" }),
-    ("del", HtmlTagMapping { attr: "text-decoration", value: "line-through" }),
-    ("strike", HtmlTagMapping { attr: "text-decoration", value: "line-through" }),
+    (
+        "i",
+        HtmlTagMapping {
+            attr: "font-style",
+            value: "italic",
+        },
+    ),
+    (
+        "em",
+        HtmlTagMapping {
+            attr: "font-style",
+            value: "italic",
+        },
+    ),
+    (
+        "b",
+        HtmlTagMapping {
+            attr: "font-weight",
+            value: "bold",
+        },
+    ),
+    (
+        "strong",
+        HtmlTagMapping {
+            attr: "font-weight",
+            value: "bold",
+        },
+    ),
+    (
+        "u",
+        HtmlTagMapping {
+            attr: "text-decoration",
+            value: "underline",
+        },
+    ),
+    (
+        "s",
+        HtmlTagMapping {
+            attr: "text-decoration",
+            value: "line-through",
+        },
+    ),
+    (
+        "del",
+        HtmlTagMapping {
+            attr: "text-decoration",
+            value: "line-through",
+        },
+    ),
+    (
+        "strike",
+        HtmlTagMapping {
+            attr: "text-decoration",
+            value: "line-through",
+        },
+    ),
 ];
 
 #[cfg(feature = "mermaid-quickjs")]
@@ -2406,7 +2454,10 @@ impl MermaidWorker {
     /// Finds the SVG attribute mapping for an HTML tag name.
     fn find_html_tag_mapping(tag_name: &str) -> Option<&'static HtmlTagMapping> {
         let lower = tag_name.to_ascii_lowercase();
-        HTML_TAG_MAPPINGS.iter().find(|(name, _)| *name == lower).map(|(_, m)| m)
+        HTML_TAG_MAPPINGS
+            .iter()
+            .find(|(name, _)| *name == lower)
+            .map(|(_, m)| m)
     }
 
     /// Converts escaped HTML formatting tags in SVG text elements to tspan equivalents.
@@ -2501,9 +2552,7 @@ impl MermaidWorker {
 
         // Find end of tag name (space, /, or >)
         let remaining = text.get(start..)?;
-        let name_end = remaining
-            .find(|c: char| c == ' ' || c == '/' || c == '>')
-            .unwrap_or(remaining.len());
+        let name_end = remaining.find([' ', '/', '>']).unwrap_or(remaining.len());
 
         if name_end == 0 {
             return None; // Empty tag name
@@ -2538,7 +2587,8 @@ impl MermaidWorker {
             if ch == '<' {
                 // Attempt to parse as HTML tag
                 let remaining: String = chars[pos..].iter().collect();
-                if let Some((tag_name, is_closing, consumed)) = Self::try_parse_html_tag(&remaining) {
+                if let Some((tag_name, is_closing, consumed)) = Self::try_parse_html_tag(&remaining)
+                {
                     // Check if it's a self-closing tag (like <br/>)
                     let tag_content: String = chars[pos..pos + consumed].iter().collect();
                     let is_self_closing = tag_content.contains("/>");
@@ -2551,7 +2601,8 @@ impl MermaidWorker {
                             continue;
                         } else if is_closing {
                             // Only emit </tspan> if we have a matching open tag
-                            if let Some(stack_pos) = tag_stack.iter().rposition(|t| t == &tag_name) {
+                            if let Some(stack_pos) = tag_stack.iter().rposition(|t| t == &tag_name)
+                            {
                                 // Close all tags from top of stack to the matching one
                                 let tags_to_close = tag_stack.len() - stack_pos;
                                 for _ in 0..tags_to_close {
@@ -2559,7 +2610,8 @@ impl MermaidWorker {
                                 }
 
                                 // Re-open any tags that were closed prematurely (except the matched one)
-                                let tags_to_reopen: Vec<String> = tag_stack[stack_pos + 1..].to_vec();
+                                let tags_to_reopen: Vec<String> =
+                                    tag_stack[stack_pos + 1..].to_vec();
                                 tag_stack.truncate(stack_pos);
 
                                 for reopened in tags_to_reopen {
@@ -8712,8 +8764,10 @@ mod tests {
     fn test_html_to_tspan_preserves_existing_svg_tspan() {
         // Critical: existing SVG tspan elements must be preserved unchanged
         // This is the real-world case from Mermaid output
-        let input = r#"<text><tspan xml:space="preserve" dy="1em" x="0" class="row">Label</tspan></text>"#;
-        let expected = r#"<text><tspan xml:space="preserve" dy="1em" x="0" class="row">Label</tspan></text>"#;
+        let input =
+            r#"<text><tspan xml:space="preserve" dy="1em" x="0" class="row">Label</tspan></text>"#;
+        let expected =
+            r#"<text><tspan xml:space="preserve" dy="1em" x="0" class="row">Label</tspan></text>"#;
         assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
     }
 
@@ -8735,8 +8789,7 @@ mod tests {
 
     #[test]
     fn test_html_to_tspan_multiple_text_elements() {
-        let input =
-            "<text>&lt;b&gt;one&lt;/b&gt;</text><rect/><text>&lt;i&gt;two&lt;/i&gt;</text>";
+        let input = "<text>&lt;b&gt;one&lt;/b&gt;</text><rect/><text>&lt;i&gt;two&lt;/i&gt;</text>";
         let expected = "<text><tspan font-weight=\"bold\">one</tspan></text><rect/><text><tspan font-style=\"italic\">two</tspan></text>";
         assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
     }
@@ -8904,10 +8957,7 @@ mod tests {
 
     #[test]
     fn test_unescape_html_entities() {
-        assert_eq!(
-            MermaidWorker::unescape_html_entities("&lt;i&gt;"),
-            "<i>"
-        );
+        assert_eq!(MermaidWorker::unescape_html_entities("&lt;i&gt;"), "<i>");
         assert_eq!(
             MermaidWorker::unescape_html_entities("&amp;&quot;&apos;"),
             "&\"'"
