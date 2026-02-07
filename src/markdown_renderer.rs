@@ -4524,6 +4524,7 @@ impl MarkdownRenderer {
                         &widths,
                         header_height,
                         column_spacing,
+                        !content_fits,
                     );
                     if height_change {
                         if std::env::var("MDMDVIEW_DEBUG_SCROLL").is_ok() {
@@ -5011,6 +5012,7 @@ impl MarkdownRenderer {
         widths: &[f32],
         header_height: f32,
         column_spacing: f32,
+        draw_dividers: bool,
     ) {
         if widths.is_empty() {
             return;
@@ -5023,13 +5025,22 @@ impl MarkdownRenderer {
             .gamma_multiply(0.9);
         let separator_stroke = Stroke::new(1.0, separator_color);
         let border_stroke = visuals.window_stroke();
-        // Expand clip_rect to include the full table rect so borders aren't clipped.
+        // Expand border rect horizontally by half the column spacing to match
+        // the visual extent of egui's striped row backgrounds (which expand by
+        // item_spacing/2 on each side). This eliminates the double-line effect
+        // at table edges and provides padding between the border and cell text.
+        let half_spacing = column_spacing * 0.5;
+        let border_rect = egui::Rect::from_min_max(
+            egui::pos2(rect.left() - half_spacing, rect.top()),
+            egui::pos2(rect.right() + half_spacing, rect.bottom()),
+        );
+        // Expand clip_rect to include the full border rect so borders aren't clipped.
         // The cell clip_rect may not include the outer border area.
-        let expanded_clip = clip_rect.union(rect);
+        let expanded_clip = clip_rect.union(border_rect);
         let painter = painter.with_clip_rect(expanded_clip);
 
         // Draw vertical dividers between columns
-        if widths.len() > 1 {
+        if draw_dividers && widths.len() > 1 {
             let mut x = rect.left();
             for (idx, width) in widths
                 .iter()
@@ -5047,12 +5058,12 @@ impl MarkdownRenderer {
         if header_height > 0.0 {
             let header_y = rect.top() + header_height;
             if header_y < rect.bottom() {
-                painter.hline(rect.x_range(), header_y.round() + 0.5, separator_stroke);
+                painter.hline(border_rect.x_range(), header_y.round() + 0.5, separator_stroke);
             }
         }
 
         // Draw outer border
-        painter.rect_stroke(rect, 0.0, border_stroke);
+        painter.rect_stroke(border_rect, 0.0, border_stroke);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -12513,7 +12524,7 @@ contexts:
                 renderer.estimate_table_row_height(ui, &style, &row, &[Align::LEFT], &[40.0], 12.0);
             assert!(height >= 12.0);
             let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0));
-            renderer.paint_table_dividers(ui.painter(), ui.visuals(), rect, rect, &[], 0.0, 0.0);
+            renderer.paint_table_dividers(ui.painter(), ui.visuals(), rect, rect, &[], 0.0, 0.0, true);
         });
     }
 
@@ -12624,6 +12635,7 @@ contexts:
                 &[40.0, 60.0],
                 8.0,
                 12.0,
+                true,
             );
         });
     }
@@ -12641,6 +12653,7 @@ contexts:
                 &[40.0, 60.0],
                 0.0,
                 8.0,
+                true,
             );
         });
     }
@@ -12658,6 +12671,44 @@ contexts:
                 &[40.0, 60.0],
                 60.0,
                 8.0,
+                true,
+            );
+        });
+    }
+
+    #[test]
+    fn test_paint_table_dividers_suppresses_dividers_when_false() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(120.0, 40.0));
+            // Should not panic with draw_dividers=false; only outer border + header drawn
+            renderer.paint_table_dividers(
+                ui.painter(),
+                ui.visuals(),
+                rect,
+                rect,
+                &[40.0, 60.0],
+                8.0,
+                12.0,
+                false,
+            );
+        });
+    }
+
+    #[test]
+    fn test_paint_table_dividers_single_column_no_dividers() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(80.0, 30.0));
+            renderer.paint_table_dividers(
+                ui.painter(),
+                ui.visuals(),
+                rect,
+                rect,
+                &[80.0],
+                8.0,
+                6.0,
+                false,
             );
         });
     }
