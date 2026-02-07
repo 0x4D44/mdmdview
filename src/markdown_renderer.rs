@@ -4524,6 +4524,7 @@ impl MarkdownRenderer {
                         &widths,
                         header_height,
                         column_spacing,
+                        prev_spacing.y,
                         !content_fits,
                     );
                     if height_change {
@@ -5012,6 +5013,7 @@ impl MarkdownRenderer {
         widths: &[f32],
         header_height: f32,
         column_spacing: f32,
+        row_spacing: f32,
         draw_dividers: bool,
     ) {
         if widths.is_empty() {
@@ -5025,14 +5027,15 @@ impl MarkdownRenderer {
             .gamma_multiply(0.9);
         let separator_stroke = Stroke::new(1.0, separator_color);
         let border_stroke = visuals.window_stroke();
-        // Expand border rect horizontally by half the column spacing to match
-        // the visual extent of egui's striped row backgrounds (which expand by
+        // Expand border rect by half the column/row spacing to match the visual
+        // extent of egui's striped row backgrounds (which expand by
         // item_spacing/2 on each side). This eliminates the double-line effect
         // at table edges and provides padding between the border and cell text.
-        let half_spacing = column_spacing * 0.5;
+        let half_col_spacing = column_spacing * 0.5;
+        let half_row_spacing = row_spacing * 0.5;
         let border_rect = egui::Rect::from_min_max(
-            egui::pos2(rect.left() - half_spacing, rect.top()),
-            egui::pos2(rect.right() + half_spacing, rect.bottom()),
+            egui::pos2(rect.left() - half_col_spacing, rect.top() - half_row_spacing),
+            egui::pos2(rect.right() + half_col_spacing, rect.bottom() + half_row_spacing),
         );
         // Expand clip_rect to include the full border rect so borders aren't clipped.
         // The cell clip_rect may not include the outer border area.
@@ -5050,7 +5053,7 @@ impl MarkdownRenderer {
                 x += *width;
                 let divider_x = x + column_spacing * (idx as f32 + 0.5);
                 let x_pos = (divider_x.round() + 0.5).clamp(rect.left(), rect.right());
-                painter.vline(x_pos, rect.y_range(), separator_stroke);
+                painter.vline(x_pos, border_rect.y_range(), separator_stroke);
             }
         }
 
@@ -12524,7 +12527,7 @@ contexts:
                 renderer.estimate_table_row_height(ui, &style, &row, &[Align::LEFT], &[40.0], 12.0);
             assert!(height >= 12.0);
             let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0));
-            renderer.paint_table_dividers(ui.painter(), ui.visuals(), rect, rect, &[], 0.0, 0.0, true);
+            renderer.paint_table_dividers(ui.painter(), ui.visuals(), rect, rect, &[], 0.0, 0.0, 0.0, true);
         });
     }
 
@@ -12635,6 +12638,7 @@ contexts:
                 &[40.0, 60.0],
                 8.0,
                 12.0,
+                4.0,
                 true,
             );
         });
@@ -12653,6 +12657,7 @@ contexts:
                 &[40.0, 60.0],
                 0.0,
                 8.0,
+                4.0,
                 true,
             );
         });
@@ -12671,6 +12676,7 @@ contexts:
                 &[40.0, 60.0],
                 60.0,
                 8.0,
+                4.0,
                 true,
             );
         });
@@ -12690,6 +12696,7 @@ contexts:
                 &[40.0, 60.0],
                 8.0,
                 12.0,
+                4.0,
                 false,
             );
         });
@@ -12708,6 +12715,7 @@ contexts:
                 &[80.0],
                 8.0,
                 6.0,
+                4.0,
                 false,
             );
         });
