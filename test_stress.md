@@ -316,6 +316,29 @@ LIMIT 50;
 
 ## Tables
 
+### Two-Column Tables (Bug Regression Tests)
+
+These tables previously triggered a bug where both columns would be Fixed,
+causing the table to squish to the left instead of filling available width.
+
+| Name | Status |
+|------|--------|
+| Authentication Module | Complete |
+| Database Layer | In Progress |
+| API Endpoints | Pending |
+
+| ID | Date |
+|----|------|
+| 001 | 2026-01-15 |
+| 002 | 2026-01-16 |
+| 003 | 2026-01-17 |
+
+| Key | State |
+|-----|-------|
+| config.debug | Enabled |
+| config.cache | Disabled |
+| config.logging | Enabled |
+
 ### Performance Metrics
 
 | Operation | Time (ms) | Memory (MB) | CPU (%) | Status |
