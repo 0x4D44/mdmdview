@@ -2331,9 +2331,8 @@ impl MarkdownViewerApp {
                 if let Some(ref mut file) = *guard {
                     let frame_nr = ctx.frame_nr();
                     let causes = ctx.repaint_causes();
-                    let (events_count, pointer_delta, scroll_delta) = ctx.input(|i| {
-                        (i.events.len(), i.pointer.delta(), i.raw_scroll_delta)
-                    });
+                    let (events_count, pointer_delta, scroll_delta) =
+                        ctx.input(|i| (i.events.len(), i.pointer.delta(), i.raw_scroll_delta));
                     // Always log frame number; include details when there's activity
                     let msg = if events_count > 0
                         || pointer_delta != egui::Vec2::ZERO
@@ -2690,11 +2689,54 @@ impl MarkdownViewerApp {
             }
         });
 
-        // Add context menu for the main panel
+        // Show context menu on right-click in the main panel area.
+        // NOTE: We do NOT use central_response.response.context_menu() because
+        // egui 0.27's context_menu() calls response.interact(Sense::click()) which
+        // adds click sense to the entire CentralPanel, making it a "covering" widget
+        // that steals ALL left-clicks from child widgets (buttons, links, labels).
+        // Instead, we manually detect secondary clicks and show a popup menu.
         #[cfg(not(test))]
-        central_response
-            .response
-            .context_menu(|ui| self.render_main_context_menu(ui));
+        {
+            let ctx_menu_id = egui::Id::new("main_context_menu");
+            let secondary_clicked = ctx.input(|i| {
+                i.pointer.secondary_clicked()
+                    && central_response.response.rect.contains(
+                        i.pointer.interact_pos().unwrap_or_default(),
+                    )
+            });
+            if secondary_clicked {
+                let pos = ctx.input(|i| i.pointer.interact_pos().unwrap_or_default());
+                ctx.memory_mut(|mem| mem.open_popup(ctx_menu_id));
+                ctx.data_mut(|d| d.insert_temp(ctx_menu_id, pos));
+            }
+            // Show the popup if open
+            if ctx.memory(|mem| mem.is_popup_open(ctx_menu_id)) {
+                let popup_pos = ctx.data(|d| {
+                    d.get_temp::<egui::Pos2>(ctx_menu_id)
+                        .unwrap_or(egui::pos2(100.0, 100.0))
+                });
+                let area_response = egui::Area::new(ctx_menu_id)
+                    .order(egui::Order::Foreground)
+                    .fixed_pos(popup_pos)
+                    .show(ctx, |ui| {
+                        egui::Frame::popup(ui.style()).show(ui, |ui| {
+                            ui.set_min_width(200.0);
+                            self.render_main_context_menu(ui);
+                        });
+                    });
+                // Close if clicked outside
+                let clicked_elsewhere = ctx.input(|i| {
+                    i.pointer.any_click()
+                        && !area_response
+                            .response
+                            .rect
+                            .contains(i.pointer.interact_pos().unwrap_or_default())
+                });
+                if clicked_elsewhere {
+                    ctx.memory_mut(|mem| mem.close_popup());
+                }
+            }
+        }
 
         if let Some(state) = self.screenshot.as_mut() {
             state.content_rect = Some(central_response.response.rect);
