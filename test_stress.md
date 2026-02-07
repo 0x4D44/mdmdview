@@ -9,6 +9,10 @@ This document is designed to stress-test the markdown renderer with heavy conten
 - [Nested Lists](#nested-lists)
 - [Mixed Content](#mixed-content)
 - [Long Paragraphs](#long-paragraphs)
+- [Emojis](#emojis)
+- [Mermaid Diagrams](#mermaid-diagrams)
+- [Links](#links)
+- [Edge Cases](#edge-cases)
 
 ---
 
@@ -901,15 +905,549 @@ main "$@"
 
 ---
 
+## Emojis
+
+### Unicode Emojis in Text
+
+Here's a paragraph with emojis inline: The 🚀 rocket launched at dawn, leaving a trail of 🔥 fire across the 🌅 sky. Scientists 👨‍🔬👩‍🔬 watched from the 🏗️ launchpad while 📡 tracking stations around the 🌍 globe monitored its trajectory.
+
+### Shortcode Emojis
+
+These use the `:name:` shortcode syntax: :rocket: :fire: :star: :heart: :thumbsup: :warning: :bulb: :tada: :zap: :sparkles:
+
+### Emojis in Headers
+
+#### 🎯 Target Accuracy Report
+
+#### 🔧 Maintenance Schedule
+
+#### 📊 Quarterly Results
+
+#### ⚡ Performance Metrics
+
+### Emojis with Formatting
+
+- **🚀 Bold rocket** and *🌟 italic star*
+- ***🔥 Bold italic fire*** with ~~❌ strikethrough cross~~
+- `📝 code emoji` alongside 💻 regular emoji
+- A [🔗 link with emoji](https://example.com) and a [🌐 another link](https://example.org)
+
+### Emojis in Tables
+
+| Emoji | Name | Category | Status |
+|-------|------|----------|--------|
+| 🚀 | Rocket | Transport | ✅ Active |
+| 🎯 | Target | Activity | ✅ Active |
+| 🔥 | Fire | Nature | ⚠️ Caution |
+| 💎 | Gem | Objects | ✅ Active |
+| 🌊 | Wave | Nature | ✅ Active |
+| 🎨 | Palette | Activity | 🔄 In Progress |
+| 🛡️ | Shield | Objects | ✅ Active |
+| 🧪 | Test Tube | Science | 🔬 Testing |
+
+### Complex Emoji Sequences
+
+Flags: 🇬🇧 🇺🇸 🇫🇷 🇩🇪 🇯🇵 🇦🇺 🇨🇦 🇧🇷
+
+Family sequences: 👨‍👩‍👧‍👦 👩‍👩‍👦 👨‍👨‍👧
+
+Skin tones: 👋🏻 👋🏼 👋🏽 👋🏾 👋🏿
+
+Profession emojis: 👩‍💻 👨‍🔬 👩‍🎨 👨‍🚀 👩‍⚕️ 👨‍🍳
+
+### Mixed Emoji Paragraphs
+
+The development team 👨‍💻👩‍💻 completed **Sprint 14** :tada: with outstanding results! Here's the summary:
+
+> 🎯 **Goal**: Ship the v2.0 release
+> ✅ All 47 user stories completed
+> 🐛 Zero critical bugs at release
+> 📈 Performance improved by 35%
+> 🌟 Customer satisfaction: 4.8/5
+
+The :rocket: deployment went smoothly, and the :chart_with_upwards_trend: metrics look great. Special thanks to the QA team 🧪 for their thorough testing!
+
+---
+
+## Mermaid Diagrams
+
+### Architecture Flowchart
+
+```mermaid
+flowchart TB
+    subgraph UI["User Interface Layer"]
+        A[Main Window] --> B[Menu Bar]
+        A --> C[Central Panel]
+        A --> D[Status Bar]
+        C --> E[ScrollArea]
+        E --> F[Rendered View]
+        E --> G[Raw View]
+        F --> H[Markdown Elements]
+        G --> I[Text Editor]
+    end
+
+    subgraph Core["Core Engine"]
+        J[File Loader] --> K[UTF-8 Parser]
+        K --> L[Markdown Parser]
+        L --> M[Element Tree]
+        M --> N[Search Index]
+        M --> O[Render Pipeline]
+    end
+
+    subgraph Render["Rendering Subsystems"]
+        O --> P[Text Renderer]
+        O --> Q[Code Highlighter]
+        O --> R[Table Renderer]
+        O --> S[Image Loader]
+        O --> T[Mermaid Engine]
+        O --> U[Emoji Renderer]
+    end
+
+    subgraph Platform["Platform Layer"]
+        V[Window State] --> W[Registry/Config]
+        X[File Watcher] --> Y[Hot Reload]
+        Z[Clipboard] --> AA[Copy/Paste]
+    end
+
+    H --> O
+    J --> A
+    V --> A
+    X --> J
+
+    style UI fill:#1a1a2e,stroke:#16213e,color:#e8e8e8
+    style Core fill:#0f3460,stroke:#16213e,color:#e8e8e8
+    style Render fill:#533483,stroke:#16213e,color:#e8e8e8
+    style Platform fill:#e94560,stroke:#16213e,color:#e8e8e8
+```
+
+### Sequence Diagram — File Open Flow
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant App as MarkdownViewerApp
+    participant FS as FileSystem
+    participant Parser as MarkdownParser
+    participant Renderer as MarkdownRenderer
+    participant Cache as TextureCache
+    participant UI as egui
+
+    User->>App: Ctrl+O (Open File)
+    App->>UI: Show file dialog
+    UI-->>App: Selected path
+    App->>FS: read_file_lossy(path)
+    alt File exists
+        FS-->>App: File content as String
+        App->>App: Normalize line endings
+        App->>Parser: parse(content)
+        Parser->>Parser: Create pulldown_cmark parser
+        loop For each event
+            Parser->>Parser: Process Start/End/Text/Code events
+        end
+        Parser-->>App: Parsed element list
+        App->>App: Build search index
+        App->>App: Extract header IDs
+        App->>Renderer: render_to_ui(elements)
+        loop For each element
+            Renderer->>UI: Add widgets
+            alt Image element
+                Renderer->>Cache: get_or_load_texture()
+                Cache->>FS: Load image file
+                FS-->>Cache: Image bytes
+                Cache->>UI: Register texture
+                Cache-->>Renderer: Texture handle
+            end
+            alt Mermaid element
+                Renderer->>Renderer: QuickJS render
+                Renderer->>Cache: Cache SVG texture
+            end
+        end
+        UI-->>User: Display rendered document
+    else File not found
+        FS-->>App: Error
+        App->>UI: Show error message
+        UI-->>User: Display error
+    end
+```
+
+### Class Diagram — Core Types
+
+```mermaid
+classDiagram
+    class MarkdownViewerApp {
+        -current_file: OpenFile [optional]
+        -renderer: MarkdownRenderer
+        -search_query: String
+        -view_mode: ViewMode
+        -navigation_history: HistoryEntry[]
+        +update(ctx, frame)
+        +handle_shortcuts(ctx)
+        +render_menu_bar(ui)
+        +render_content(ui)
+    }
+
+    class MarkdownRenderer {
+        -font_sizes: FontSizes
+        -emoji_textures: TextureMap
+        -syntax_set: SyntaxSet
+        -theme: Theme
+        +render_to_ui(ui, elements)
+        +render_element(ui, element)
+        +render_inline_span(ui, span)
+        +render_table(ui, headers, rows)
+    }
+
+    class MarkdownElement {
+        <<enumeration>>
+        Paragraph(InlineSpan[])
+        Header(level, spans, id)
+        CodeBlock(language, code)
+        Table(headers, rows)
+        List(items, ordered)
+        Image(src, alt, title)
+        Blockquote(elements)
+        HorizontalRule
+        Mermaid(code)
+    }
+
+    class InlineSpan {
+        <<enumeration>>
+        Text(String)
+        Code(String)
+        Strong(String)
+        Emphasis(String)
+        Strikethrough(String)
+        Link(text, url)
+        Image(src, alt, title)
+    }
+
+    class ViewMode {
+        <<enumeration>>
+        Rendered
+        Raw
+    }
+
+    class OpenFile {
+        -path: PathBuf
+        -content: String
+        -elements: MarkdownElement[]
+        -modified: bool
+    }
+
+    MarkdownViewerApp --> MarkdownRenderer
+    MarkdownViewerApp --> OpenFile
+    MarkdownViewerApp --> ViewMode
+    OpenFile --> MarkdownElement
+    MarkdownElement --> InlineSpan
+    MarkdownRenderer ..> MarkdownElement : renders
+```
+
+### State Diagram — View Mode Transitions
+
+```mermaid
+stateDiagram-v2
+    [*] --> NoFile: App Start
+
+    NoFile --> Rendered: Open File (Ctrl+O)
+    NoFile --> Rendered: Drop File
+    NoFile --> Rendered: Open Sample
+
+    state "Rendered View" as Rendered {
+        [*] --> Idle
+        Idle --> Scrolling: Mouse Wheel / Keys
+        Scrolling --> Idle: Stop
+        Idle --> Searching: Ctrl+F
+        Searching --> NavigatingResults: Enter
+        NavigatingResults --> Searching: Type query
+        Searching --> Idle: Escape
+        NavigatingResults --> Idle: Escape
+        Idle --> ClickingLink: Click Link
+        ClickingLink --> Idle: Internal anchor
+        ClickingLink --> ExternalBrowser: External URL
+    }
+
+    state "Raw View" as Raw {
+        [*] --> ReadOnly
+        ReadOnly --> Editing: Ctrl+E
+        Editing --> ReadOnly: Ctrl+E
+        Editing --> Saving: Ctrl+S
+        Saving --> Editing: Save complete
+    }
+
+    Rendered --> Raw: Ctrl+R
+    Raw --> Rendered: Ctrl+R
+    Rendered --> NoFile: Ctrl+W
+    Raw --> NoFile: Ctrl+W
+    Rendered --> Rendered: F5 (Reload)
+    Raw --> Raw: F5 (Reload)
+```
+
+### Gantt Chart — Development Timeline
+
+```mermaid
+gantt
+    title mdmdview Development Timeline
+    dateFormat YYYY-MM-DD
+    axisFormat %b %Y
+
+    section Core
+        Basic markdown parsing      :done, core1, 2024-01-01, 2024-02-15
+        File loading/saving         :done, core2, 2024-01-15, 2024-03-01
+        Keyboard navigation         :done, core3, 2024-02-01, 2024-03-15
+
+    section Rendering
+        Syntax highlighting         :done, rend1, 2024-03-01, 2024-04-15
+        Table support               :done, rend2, 2024-03-15, 2024-05-01
+        Image loading               :done, rend3, 2024-04-01, 2024-05-15
+        SVG rendering               :done, rend4, 2024-05-01, 2024-06-01
+        Emoji support               :done, rend5, 2024-06-01, 2024-07-15
+
+    section Advanced
+        Mermaid diagrams            :done, adv1, 2024-06-15, 2024-08-01
+        Search with Unicode         :done, adv2, 2024-07-01, 2024-08-15
+        Navigation history          :done, adv3, 2024-08-01, 2024-09-01
+        Content-driven tables       :active, adv4, 2025-12-01, 2026-02-15
+        Link click fix              :done, adv5, 2026-02-01, 2026-02-05
+
+    section Polish
+        Performance tuning          :active, pol1, 2026-01-15, 2026-03-01
+        Code coverage               :active, pol2, 2026-02-01, 2026-03-01
+        Cross-platform testing      :pol3, 2026-03-01, 2026-04-01
+```
+
+### Entity Relationship Diagram
+
+```mermaid
+erDiagram
+    DOCUMENT ||--o{ ELEMENT : contains
+    DOCUMENT {
+        string path
+        string content
+        datetime created_at
+        datetime modified_at
+        boolean is_modified
+    }
+    ELEMENT ||--o{ INLINE_SPAN : contains
+    ELEMENT {
+        enum type
+        int level
+        string language
+        string code
+    }
+    INLINE_SPAN {
+        enum type
+        string text
+        string url
+        string src
+    }
+    DOCUMENT ||--o{ SEARCH_MATCH : has
+    SEARCH_MATCH {
+        int element_index
+        int start_offset
+        int end_offset
+        string matched_text
+    }
+    DOCUMENT ||--|| RENDER_STATE : has
+    RENDER_STATE {
+        float scroll_offset
+        float zoom_level
+        enum view_mode
+        string search_query
+    }
+    TEXTURE_CACHE ||--o{ TEXTURE : stores
+    TEXTURE {
+        string key
+        blob data
+        int width
+        int height
+        datetime loaded_at
+    }
+    ELEMENT ||--o{ TEXTURE : references
+```
+
+### Journey Diagram — User Experience
+
+```mermaid
+journey
+    title A Day Using mdmdview
+    section Morning
+        Open app: 5: User
+        Load project README: 4: User
+        Browse documentation: 5: User
+        Search for API details: 4: User
+    section Development
+        Reference while coding: 5: User
+        Check Mermaid diagrams: 4: User
+        Navigate between docs: 5: User
+        Use keyboard shortcuts: 5: User
+    section Review
+        Review changelog: 3: User
+        Check formatting: 4: User
+        Export notes: 2: User
+        Close app: 5: User
+```
+
+### Complex Flowchart — Table Rendering Pipeline
+
+```mermaid
+flowchart LR
+    A[Table Data] --> B{Has cached metrics?}
+    B -->|Yes| C[Use cached widths]
+    B -->|No| D[column_stats_for_table]
+    D --> E[Measure each cell]
+    E --> F[derive_column_specs]
+    F --> G{Content fits?}
+    G -->|Yes| H[All columns auto-sized]
+    G -->|No| I{Has long text?}
+    I -->|Yes| J[Assign Remainder columns]
+    I -->|No| K[Proportional scaling]
+    J --> L[resolve_table_column_widths]
+    K --> L
+    H --> L
+    C --> L
+    L --> M[render_table_tablebuilder]
+    M --> N[Paint header row]
+    M --> O[Paint data rows]
+    M --> P[paint_table_dividers]
+    N --> Q[Final rendered table]
+    O --> Q
+    P --> Q
+```
+
+---
+
+## Links
+
+### Various Link Types
+
+- External link: [Rust Programming Language](https://www.rust-lang.org/)
+- External link: [egui Documentation](https://docs.rs/egui/latest/egui/)
+- Internal anchor: [Back to Code Blocks](#code-blocks)
+- Internal anchor: [Jump to Tables](#tables)
+- Internal anchor: [See Emojis](#emojis)
+- Internal anchor: [See Mermaid Diagrams](#mermaid-diagrams)
+- Link with formatting: [**Bold link text**](https://example.com)
+- Link with emoji: [🚀 Launch Page](https://example.com/launch)
+- Link with code context: See the [`render_table`](https://example.com/docs) function
+
+### Links in Paragraphs
+
+The [Rust](https://www.rust-lang.org/) programming language provides memory safety without garbage collection. Combined with [egui](https://github.com/emilk/egui) for immediate-mode GUI, and [pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark) for CommonMark parsing, [mdmdview](https://github.com/0x4D44/mdmdview) delivers a fast, single-binary markdown viewer. For syntax highlighting, it uses [syntect](https://github.com/trishume/syntect), and for Mermaid diagrams, [rquickjs](https://github.com/nickel-org/rquickjs) provides embedded JavaScript execution.
+
+---
+
+## Edge Cases
+
+### Single-Column Table
+
+| Status |
+|--------|
+| Active |
+| Inactive |
+| Pending |
+| Archived |
+| Deleted |
+
+### Very Wide Table (Many Columns)
+
+| A | B | C | D | E | F | G | H | I | J | K | L |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
+| alpha | bravo | charlie | delta | echo | foxtrot | golf | hotel | india | juliet | kilo | lima |
+
+### Table with Long Cell Content
+
+| Feature | Description | Implementation Notes |
+|---------|-------------|---------------------|
+| Syntax Highlighting | Supports 50+ programming languages via the syntect library with the base16-ocean-dark theme for consistent dark-mode appearance | Uses lazy initialization to avoid loading all syntax definitions at startup; caches highlighted output per code block |
+| Mermaid Diagrams | Offline rendering of flowcharts, sequence diagrams, class diagrams, state diagrams, Gantt charts, ER diagrams, and more via embedded QuickJS JavaScript engine | The Mermaid.js library is compiled into the binary at build time; SVG output is rasterized via resvg/tiny-skia and cached as egui textures |
+| Unicode Search | Accent-insensitive, case-folded search using Unicode normalization (NFC/NFD) with grapheme-cluster-aware highlighting that preserves emoji and combining characters | Uses unicode-normalization and unicode-casefold crates; searches normalized copies while highlighting original text positions |
+
+### Empty Table
+
+| | |
+|-|-|
+| | |
+
+### Deeply Nested Blockquotes
+
+> Level 1: The outer context
+> > Level 2: A response
+> > > Level 3: A clarification
+> > > > Level 4: Further detail
+> > > > > Level 5: Maximum reasonable depth
+> > > >
+> > > > Back to level 4 with **bold** and *italic*
+> > >
+> > > Level 3 with `inline code` and a [link](#edge-cases)
+> >
+> > Level 2 with a list:
+> > - Item one
+> > - Item two
+> > - Item three
+>
+> Back at level 1.
+
+### Mixed Inline Formatting Stress
+
+This paragraph has **bold**, *italic*, ***bold italic***, `code`, ~~strikethrough~~, **`bold code`**, *`italic code`*, [a link](https://example.com), and 🎯 emojis all **mixed *together* in ~~various ~~** combinations to test the inline span renderer thoroughly.
+
+### Consecutive Horizontal Rules
+
+---
+
+---
+
+---
+
+### Adjacent Code Blocks (No Gap)
+
+```rust
+fn first() -> i32 { 1 }
+```
+
+```rust
+fn second() -> i32 { 2 }
+```
+
+```rust
+fn third() -> i32 { 3 }
+```
+
+### Very Long Single Line
+
+This is a single line that goes on and on and on without any line breaks to test how the renderer handles horizontal overflow and text wrapping in a paragraph context: Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua ut enim ad minim veniam quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur excepteur sint occaecat cupidatat non proident sunt in culpa qui officia deserunt mollit anim id est laborum.
+
+### Line Breaks in Poetry
+
+Roses are red,
+Violets are blue,
+Markdown preserves
+Line breaks for you.
+
+The fog comes
+on little cat feet.
+It sits looking
+over harbor and city
+on silent haunches
+and then moves on.
+
+---
+
 ## End of Stress Test Document
 
 This document contains:
 - Multiple code blocks with syntax highlighting (Rust, TypeScript, Python, C++, SQL, Go, Java, Bash)
-- Multiple tables with various column counts
+- Multiple tables with various column counts (1-column, 2-column, 4-column, 9-column, 12-column)
 - Deeply nested lists (both ordered and unordered)
-- Blockquotes with multiple nesting levels
+- Blockquotes with multiple nesting levels (up to 5 deep)
 - Mixed inline formatting
 - Long paragraphs
 - Repeated sections for volume
+- Unicode and shortcode emojis (flags, skin tones, ZWJ sequences)
+- Emojis in headers, tables, links, and formatted text
+- Complex Mermaid diagrams (flowchart, sequence, class, state, gantt, ER, journey)
+- Various link types (external, internal anchor, formatted, emoji links)
+- Edge cases (empty tables, long cells, adjacent code blocks, very long lines, poetry)
 
-Total approximate element count: 200+ markdown elements
+Total approximate element count: 350+ markdown elements
