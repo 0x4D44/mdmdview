@@ -3296,11 +3296,11 @@ impl MarkdownRenderer {
         if stripped != g && crate::emoji_catalog::image_bytes_for(&stripped).is_some() {
             return Some(stripped);
         }
-        // If the grapheme explicitly requests emoji presentation (contains VS16),
-        // treat it as an emoji even if we don't have a sprite; fall back to a
-        // generated placeholder via emoji_assets to avoid stray tofu.
-        if g.chars().any(|c| c == '\u{FE0F}') {
-            return Some(stripped); // prefer stripped as the texture key
+        // If the grapheme contains VS16, only treat it as an emoji if we have a
+        // procedural fallback. Otherwise let the system font render it naturally
+        // instead of producing a grey circle placeholder.
+        if g.chars().any(|c| c == '\u{FE0F}') && emoji_assets::has_fallback(&stripped) {
+            return Some(stripped);
         }
         None
     }
@@ -3443,24 +3443,34 @@ impl MarkdownRenderer {
     fn is_known_emoji(c: char) -> bool {
         matches!(
             c,
-            '\u{1f389}' // 🎉
-                | '\u{2705}' // ✅
-                | '\u{1f680}' // 🚀
-                | '\u{1f642}' // 🙂
-                | '\u{1f600}' // 😀
-                | '\u{1f609}' // 😉
-                | '\u{2b50}'  // ⭐
-                | '\u{1f525}' // 🔥
-                | '\u{1f44d}' // 👍
-                | '\u{1f44e}' // 👎
-                | '\u{1f4a1}' // 💡
-                | '\u{2753}'  // ❓
-                | '\u{2757}'  // ❗
-                | '\u{1f4dd}' // 📝
-                | '\u{1f9e0}' // 🧠
-                | '\u{1f9ea}' // 🧪
-                | '\u{1f4e6}' // 📦
-                | '\u{1f527}' // 🔧
+            // Original 18
+            '\u{1f389}' | '\u{2705}' | '\u{1f680}' | '\u{1f642}' | '\u{1f600}'
+                | '\u{1f609}' | '\u{2b50}' | '\u{1f525}' | '\u{1f44d}' | '\u{1f44e}'
+                | '\u{1f4a1}' | '\u{2753}' | '\u{2757}' | '\u{1f4dd}' | '\u{1f9e0}'
+                | '\u{1f9ea}' | '\u{1f4e6}' | '\u{1f527}'
+                // Status/Indicators
+                | '\u{26a0}' | '\u{274c}' | '\u{2728}' | '\u{1f4af}' | '\u{23f3}'
+                | '\u{1f504}' | '\u{2714}' | '\u{274e}' | '\u{1f6ab}'
+                // Objects/Tools
+                | '\u{1f517}' | '\u{1f4cb}' | '\u{1f4c1}' | '\u{1f4c2}' | '\u{1f512}'
+                | '\u{1f513}' | '\u{2699}' | '\u{1f50d}' | '\u{1f4ca}' | '\u{1f4c8}'
+                | '\u{1f4c9}' | '\u{1f4cc}' | '\u{1f528}' | '\u{270f}'
+                // Arrows
+                | '\u{27a1}' | '\u{2b06}' | '\u{2b07}' | '\u{2b05}'
+                // Communication
+                | '\u{1f4ac}' | '\u{1f4e2}' | '\u{1f4e7}'
+                // Nature/Symbols
+                | '\u{2764}' | '\u{1f48e}' | '\u{1f31f}' | '\u{1f3af}' | '\u{1f3a8}'
+                | '\u{1f6e1}' | '\u{1f30a}' | '\u{26a1}'
+                // People/Faces
+                | '\u{1f440}' | '\u{1f914}' | '\u{1f44b}' | '\u{1f64f}' | '\u{1f4aa}'
+                // Dev/Tech
+                | '\u{1f41b}' | '\u{1f6a7}' | '\u{1f3d7}' | '\u{1f4bb}' | '\u{1f5a5}'
+                | '\u{2328}'
+                // Misc
+                | '\u{1f3c6}' | '\u{1f3aa}' | '\u{1f4d6}' | '\u{1f4da}' | '\u{1f514}'
+                | '\u{1f515}' | '\u{1f5c2}' | '\u{2139}' | '\u{1f534}' | '\u{1f7e2}'
+                | '\u{1f7e1}' | '\u{1f535}' | '\u{2611}'
         )
     }
 
@@ -3604,6 +3614,7 @@ impl MarkdownRenderer {
         let r = (size as i32) / 2 - 2;
 
         let (base, accent) = match emoji {
+            // Original 18
             "\u{1f389}" => (C::from_rgb(255, 215, 0), C::from_rgb(255, 80, 80)),
             "\u{2705}" => (C::from_rgb(30, 150, 30), C::WHITE),
             "\u{1f680}" => (C::from_rgb(70, 70, 200), C::from_rgb(255, 100, 100)),
@@ -3620,6 +3631,73 @@ impl MarkdownRenderer {
             "\u{1f9ea}" => (C::from_rgb(180, 220, 255), C::from_rgb(120, 160, 240)),
             "\u{1f4e6}" => (C::from_rgb(205, 170, 125), C::from_rgb(150, 110, 70)),
             "\u{1f527}" => (C::from_rgb(160, 170, 180), C::from_rgb(220, 220, 220)),
+            // Status/Indicators
+            "\u{26a0}" => (C::from_rgb(255, 200, 0), C::from_rgb(60, 60, 60)),
+            "\u{274c}" => (C::from_rgb(220, 50, 50), C::WHITE),
+            "\u{2728}" => (C::from_rgb(255, 220, 100), C::from_rgb(255, 255, 200)),
+            "\u{1f4af}" => (C::from_rgb(220, 50, 50), C::WHITE),
+            "\u{23f3}" => (C::from_rgb(200, 180, 140), C::from_rgb(255, 220, 160)),
+            "\u{1f504}" => (C::from_rgb(80, 180, 80), C::from_rgb(200, 255, 200)),
+            "\u{2714}" => (C::from_rgb(30, 150, 30), C::WHITE),
+            "\u{274e}" => (C::from_rgb(220, 50, 50), C::from_rgb(80, 80, 80)),
+            "\u{1f6ab}" => (C::from_rgb(220, 50, 50), C::WHITE),
+            // Objects/Tools
+            "\u{1f517}" => (C::from_rgb(100, 140, 200), C::from_rgb(180, 200, 240)),
+            "\u{1f4cb}" => (C::from_rgb(200, 180, 140), C::from_rgb(255, 255, 255)),
+            "\u{1f4c1}" => (C::from_rgb(255, 200, 80), C::from_rgb(200, 160, 60)),
+            "\u{1f4c2}" => (C::from_rgb(255, 200, 80), C::from_rgb(240, 240, 200)),
+            "\u{1f512}" => (C::from_rgb(255, 200, 80), C::from_rgb(160, 160, 160)),
+            "\u{1f513}" => (C::from_rgb(160, 160, 160), C::from_rgb(255, 200, 80)),
+            "\u{2699}" => (C::from_rgb(140, 140, 160), C::from_rgb(200, 200, 220)),
+            "\u{1f50d}" => (C::from_rgb(100, 140, 200), C::from_rgb(220, 220, 240)),
+            "\u{1f4ca}" => (C::from_rgb(80, 140, 200), C::from_rgb(200, 220, 255)),
+            "\u{1f4c8}" => (C::from_rgb(50, 180, 80), C::from_rgb(200, 255, 200)),
+            "\u{1f4c9}" => (C::from_rgb(220, 60, 60), C::from_rgb(255, 200, 200)),
+            "\u{1f4cc}" => (C::from_rgb(220, 60, 60), C::from_rgb(180, 180, 180)),
+            "\u{1f528}" => (C::from_rgb(160, 140, 120), C::from_rgb(200, 200, 200)),
+            "\u{270f}" => (C::from_rgb(255, 220, 60), C::from_rgb(60, 60, 60)),
+            // Arrows
+            "\u{27a1}" | "\u{2b06}" | "\u{2b07}" | "\u{2b05}" => {
+                (C::from_rgb(60, 120, 200), C::WHITE)
+            }
+            // Communication
+            "\u{1f4ac}" => (C::from_rgb(200, 200, 200), C::from_rgb(120, 120, 120)),
+            "\u{1f4e2}" => (C::from_rgb(100, 140, 200), C::from_rgb(220, 220, 240)),
+            "\u{1f4e7}" => (C::from_rgb(100, 140, 200), C::WHITE),
+            // Nature/Symbols
+            "\u{2764}" => (C::from_rgb(220, 20, 60), C::from_rgb(255, 120, 120)),
+            "\u{1f48e}" => (C::from_rgb(80, 160, 255), C::from_rgb(200, 230, 255)),
+            "\u{1f31f}" => (C::from_rgb(255, 215, 0), C::from_rgb(255, 255, 200)),
+            "\u{1f3af}" => (C::from_rgb(220, 50, 50), C::WHITE),
+            "\u{1f3a8}" => (C::from_rgb(255, 200, 80), C::from_rgb(80, 160, 255)),
+            "\u{1f6e1}" => (C::from_rgb(100, 140, 200), C::from_rgb(200, 200, 200)),
+            "\u{1f30a}" => (C::from_rgb(60, 140, 220), C::from_rgb(180, 220, 255)),
+            "\u{26a1}" => (C::from_rgb(255, 220, 0), C::from_rgb(255, 255, 200)),
+            // People/Faces
+            "\u{1f440}" => (C::from_rgb(255, 255, 255), C::from_rgb(40, 40, 40)),
+            "\u{1f914}" => (C::from_rgb(255, 205, 64), C::from_rgb(90, 60, 10)),
+            "\u{1f44b}" | "\u{1f64f}" | "\u{1f4aa}" => {
+                (C::from_rgb(255, 205, 120), C::from_rgb(200, 160, 80))
+            }
+            // Dev/Tech
+            "\u{1f41b}" => (C::from_rgb(80, 180, 80), C::from_rgb(40, 80, 40)),
+            "\u{1f6a7}" => (C::from_rgb(255, 160, 0), C::from_rgb(255, 255, 255)),
+            "\u{1f3d7}" => (C::from_rgb(255, 200, 80), C::from_rgb(160, 160, 160)),
+            "\u{1f4bb}" => (C::from_rgb(160, 170, 180), C::from_rgb(100, 180, 255)),
+            "\u{1f5a5}" | "\u{2328}" => (C::from_rgb(60, 60, 80), C::from_rgb(200, 200, 200)),
+            // Misc
+            "\u{1f3c6}" => (C::from_rgb(255, 200, 0), C::from_rgb(255, 255, 200)),
+            "\u{1f3aa}" => (C::from_rgb(220, 50, 80), C::from_rgb(255, 200, 80)),
+            "\u{1f4d6}" => (C::from_rgb(240, 240, 200), C::from_rgb(140, 140, 140)),
+            "\u{1f4da}" => (C::from_rgb(100, 140, 200), C::from_rgb(255, 200, 80)),
+            "\u{1f514}" => (C::from_rgb(255, 200, 0), C::from_rgb(200, 160, 0)),
+            "\u{1f515}" => (C::from_rgb(160, 160, 160), C::from_rgb(120, 120, 120)),
+            "\u{1f5c2}" => (C::from_rgb(100, 140, 200), C::from_rgb(200, 200, 220)),
+            "\u{2139}" | "\u{2611}" => (C::from_rgb(60, 120, 200), C::WHITE),
+            "\u{1f534}" => (C::from_rgb(220, 50, 50), C::from_rgb(255, 120, 120)),
+            "\u{1f7e2}" => (C::from_rgb(50, 180, 50), C::from_rgb(120, 255, 120)),
+            "\u{1f7e1}" => (C::from_rgb(255, 200, 0), C::from_rgb(255, 255, 120)),
+            "\u{1f535}" => (C::from_rgb(60, 120, 200), C::from_rgb(120, 180, 255)),
             _ => (C::from_rgb(180, 180, 180), C::WHITE),
         };
 
