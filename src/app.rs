@@ -38,6 +38,7 @@ const ASYNC_LOAD_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_HISTORY_SIZE: usize = 100;
 
 /// Cached result of MDMDVIEW_DEBUG_REPAINT environment variable check
+#[cfg(not(test))]
 static DEBUG_REPAINT: OnceLock<bool> = OnceLock::new();
 /// Log file for debug repaint output (writes to repaint_debug.log in current dir)
 static DEBUG_LOG_FILE: OnceLock<std::sync::Mutex<Option<std::fs::File>>> = OnceLock::new();
@@ -55,6 +56,10 @@ thread_local! {
 
 #[cfg(test)]
 static FORCE_THREAD_SPAWN_ERROR: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FORCE_DEBUG_REPAINT: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+static FORCE_DEBUG_SCROLL: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
 fn app_action_triggered(triggered: bool, action: &'static str) -> bool {
@@ -2322,7 +2327,12 @@ impl MarkdownViewerApp {
         }
 
         // Debug: log repaint causes and input state when MDMDVIEW_DEBUG_REPAINT is set
-        if *DEBUG_REPAINT.get_or_init(|| std::env::var("MDMDVIEW_DEBUG_REPAINT").is_ok()) {
+        #[cfg(test)]
+        let debug_repaint_enabled = FORCE_DEBUG_REPAINT.load(Ordering::Relaxed);
+        #[cfg(not(test))]
+        let debug_repaint_enabled =
+            *DEBUG_REPAINT.get_or_init(|| std::env::var("MDMDVIEW_DEBUG_REPAINT").is_ok());
+        if debug_repaint_enabled {
             let log_mutex = DEBUG_LOG_FILE.get_or_init(|| {
                 let file = std::fs::File::create("repaint_debug.log").ok();
                 std::sync::Mutex::new(file)
@@ -2659,10 +2669,15 @@ impl MarkdownViewerApp {
             // Debug scroll logging - writes to file to track content size changes
             {
                 use std::io::Write;
-                static DEBUG_SCROLL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                let enabled = *DEBUG_SCROLL.get_or_init(|| {
-                    std::env::var("MDMDVIEW_DEBUG_SCROLL").is_ok()
-                });
+                #[cfg(test)]
+                let enabled = FORCE_DEBUG_SCROLL.load(Ordering::Relaxed);
+                #[cfg(not(test))]
+                let enabled = {
+                    static DEBUG_SCROLL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    *DEBUG_SCROLL.get_or_init(|| {
+                        std::env::var("MDMDVIEW_DEBUG_SCROLL").is_ok()
+                    })
+                };
                 if enabled {
                     let max_scroll = (scroll_output.content_size.y - scroll_output.inner_rect.height()).max(0.0);
                     let scroll_pct = if max_scroll > 0.0 {
@@ -2670,10 +2685,14 @@ impl MarkdownViewerApp {
                     } else {
                         0
                     };
+                    #[cfg(test)]
+                    let scroll_log_path = std::env::temp_dir().join("scroll-trace-test.log");
+                    #[cfg(not(test))]
+                    let scroll_log_path = std::path::PathBuf::from(r"c:\tmp\scroll-trace.log");
                     if let Ok(mut f) = std::fs::OpenOptions::new()
                         .create(true)
                         .append(true)
-                        .open(r"c:\tmp\scroll-trace.log")
+                        .open(&scroll_log_path)
                     {
                         let _ = writeln!(
                             f,
@@ -7606,5 +7625,218 @@ The end.
         assert!(stats.flesch_ease < 50.0); // Should be difficult
         assert_eq!(stats.word_count, 12);
         assert_eq!(stats.sentences, 1);
+    }
+
+    #[test]
+    fn test_poll_readability_discards_stale_result() {
+        let mut app = MarkdownViewerApp::new();
+        // Set current request ID to 5
+        app.readability_request_id = 5;
+        // Send a stale result with ID 3 (mismatches)
+        let _ = app.readability_tx.send(ReadabilityRequest {
+            id: 3,
+            content: "Stale content here.".to_string(),
+        });
+        // Give the background thread time to process
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        app.poll_readability();
+        // Stale result should be discarded
+        assert!(app.readability_stats.is_none());
+
+        // Now send a matching result
+        let _ = app.readability_tx.send(ReadabilityRequest {
+            id: 5,
+            content: "Matching content here.".to_string(),
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        app.poll_readability();
+        // Matching result should be accepted
+        assert!(app.readability_stats.is_some());
+    }
+
+    #[test]
+    fn test_spawn_readability_worker_error_path() {
+        MarkdownViewerApp::force_thread_spawn_error_for_test();
+        let (_tx, _rx) = MarkdownViewerApp::spawn_readability_worker();
+        // The error path prints to stderr and returns defunct channels.
+        // Verify we got the channels back (they just won't process).
+    }
+
+    #[test]
+    fn test_render_status_bar_with_readability_stats() {
+        let mut app = MarkdownViewerApp::new();
+        app.current_content = "Hello world.".to_string();
+        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+            "Hello world.".to_string(),
+        )])];
+
+        // Set readability stats with a high Flesch score (Very Easy)
+        app.readability_stats = Some(ReadabilityStats {
+            flesch_ease: 95.0,
+            grade_level: 3.0,
+            word_count: 2,
+            sentences: 1,
+            syllables: 3,
+        });
+
+        let _actions = ForcedAppActions::new(&["status_hover"]);
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            app.render_status_bar(ctx);
+        });
+    }
+
+    #[test]
+    fn test_render_status_tooltip_all_reading_levels() {
+        let ctx = egui::Context::default();
+
+        // Test each Flesch score bracket
+        let brackets: &[(f32, &str)] = &[
+            (95.0, "Very Easy"),
+            (85.0, "Easy"),
+            (75.0, "Fairly Easy"),
+            (65.0, "Standard"),
+            (55.0, "Fairly Difficult"),
+            (40.0, "Difficult"),
+            (20.0, "Very Difficult"),
+        ];
+
+        for &(flesch, _expected_level) in brackets {
+            let mut app = MarkdownViewerApp::new();
+            app.current_content = "Test.".to_string();
+            app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+                "Test.".to_string(),
+            )])];
+            app.readability_stats = Some(ReadabilityStats {
+                flesch_ease: flesch,
+                grade_level: 5.0,
+                word_count: 10,
+                sentences: 2,
+                syllables: 15,
+            });
+
+            let _actions = ForcedAppActions::new(&["status_hover"]);
+            let _ = ctx.run(default_input(), |ctx| {
+                app.render_status_bar(ctx);
+            });
+        }
+    }
+
+    #[test]
+    fn test_render_status_bar_no_readability_with_content() {
+        let mut app = MarkdownViewerApp::new();
+        app.current_content = "Some content here.".to_string();
+        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+            "Some content here.".to_string(),
+        )])];
+        // readability_stats is None, but content is non-empty -> shows "Flesch: ..."
+        app.readability_stats = None;
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            app.render_status_bar(ctx);
+        });
+    }
+
+    #[test]
+    fn test_menu_allow_remote_images_toggle() {
+        let mut app = MarkdownViewerApp::new();
+        let initial = app.allow_remote_images;
+
+        let _actions = ForcedAppActions::new(&["menu_allow_remote_images"]);
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            CentralPanel::default().show(ctx, |ui| {
+                app.render_view_menu_contents(ui, ctx, false, Color32::WHITE);
+            });
+        });
+
+        assert_ne!(app.allow_remote_images, initial);
+    }
+
+    #[test]
+    fn test_render_status_bar_empty_content_no_readability() {
+        // Covers the None => String::new() branch for readability when content is empty
+        // and the format without readability string
+        let mut app = MarkdownViewerApp::new();
+        app.current_content.clear();
+        app.readability_stats = None;
+        // Still set some parsed elements so the status bar renders the stats section
+        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+            String::new(),
+        )])];
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            app.render_status_bar(ctx);
+        });
+    }
+
+    #[test]
+    fn test_render_status_bar_readability_pending_with_content() {
+        // readability_stats is None, content is non-empty -> shows "Flesch: ..."
+        // then the readability string is non-empty -> triggers the else branch at line 2177
+        let mut app = MarkdownViewerApp::new();
+        app.current_content = "A sentence with some words.".to_string();
+        app.readability_stats = None;
+        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+            "A sentence with some words.".to_string(),
+        )])];
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            app.render_status_bar(ctx);
+        });
+    }
+
+    #[test]
+    fn test_debug_repaint_logging_path() {
+        // Enable the debug repaint flag for this test
+        FORCE_DEBUG_REPAINT.store(true, Ordering::Relaxed);
+
+        let mut app = MarkdownViewerApp::new();
+        app.current_content = "Test content.".to_string();
+        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+            "Test content.".to_string(),
+        )])];
+
+        let ctx = egui::Context::default();
+        // Run two frames - one idle, one with events to cover both branches
+        let _ = ctx.run(default_input(), |ctx| {
+            app.update_impl(ctx);
+        });
+        // Second frame with a key event to trigger the activity branch
+        let mut input = default_input();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::A,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        let _ = ctx.run(input, |ctx| {
+            app.update_impl(ctx);
+        });
+
+        FORCE_DEBUG_REPAINT.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn test_debug_scroll_logging_path() {
+        // Enable the debug scroll flag for this test
+        FORCE_DEBUG_SCROLL.store(true, Ordering::Relaxed);
+
+        let mut app = MarkdownViewerApp::new();
+        app.current_content = "Scroll test content.\n".repeat(100);
+        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+            "Scroll test content.".to_string(),
+        )])];
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            app.update_impl(ctx);
+        });
+
+        FORCE_DEBUG_SCROLL.store(false, Ordering::Relaxed);
     }
 }

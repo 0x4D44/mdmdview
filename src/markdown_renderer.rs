@@ -2913,11 +2913,11 @@ impl MarkdownRenderer {
                 }
 
                 // Attach context menu to the last rendered widget
-                if let Some(r) = last_r {
+                if let Some(_r) = last_r {
                     #[cfg(test)]
                     self.render_link_context_menu(ui, text, url);
                     #[cfg(not(test))]
-                    r.context_menu(|ui| {
+                    _r.context_menu(|ui| {
                         self.render_link_context_menu(ui, text, url);
                     });
                 }
@@ -4507,10 +4507,11 @@ impl MarkdownRenderer {
                                     );
                                     header_height_actual
                                         .set(header_height_actual.get().max(cell_height));
-                                    // NOTE: Do NOT capture ui.min_rect().width() here - that's the content width,
-                                    // not the column width. Column widths are captured from body.widths() below.
-                                    // Extend header_rect (not body_rect) for accurate header bounds.
-                                    Self::extend_table_rect(&mut header_rect, ui.min_rect());
+                                    // NOTE: Use ui.max_rect() (allocated cell bounds), not ui.min_rect()
+                                    // (content bounds). The allocated rect matches what egui uses for
+                                    // striped backgrounds, ensuring the border aligns with the stripe extent.
+                                    // Column widths are captured separately from body.widths() below.
+                                    Self::extend_table_rect(&mut header_rect, ui.max_rect());
                                     if header_clip_rect.is_none() {
                                         header_clip_rect = Some(ui.clip_rect());
                                     }
@@ -4550,8 +4551,8 @@ impl MarkdownRenderer {
                                             ci,
                                             halign,
                                         );
-                                        // Extend body_rect (not header_rect) for accurate body bounds.
-                                        Self::extend_table_rect(&mut body_rect, ui.min_rect());
+                                        // Use max_rect() for allocated bounds; see header comment above.
+                                        Self::extend_table_rect(&mut body_rect, ui.max_rect());
                                         if body_clip_rect.borrow().is_none() {
                                             *body_clip_rect.borrow_mut() = Some(ui.clip_rect());
                                         }
@@ -13317,5 +13318,78 @@ contexts:
         assert_eq!(headers.len(), 1);
         assert_eq!(rows.len(), 1);
         Ok(())
+    }
+
+    #[test]
+    fn test_allow_remote_images_getter() {
+        let renderer = MarkdownRenderer::new();
+        assert!(!renderer.allow_remote_images());
+        renderer.set_allow_remote_images(true);
+        assert!(renderer.allow_remote_images());
+        renderer.set_allow_remote_images(false);
+        assert!(!renderer.allow_remote_images());
+    }
+
+    #[test]
+    fn test_render_link_with_emoji_characters() {
+        let renderer = MarkdownRenderer::new();
+        // Create a link whose text contains actual emoji characters (triggers emoji link path)
+        let md = "[🚀 Launch](https://example.com)\n";
+        let elements = renderer.parse(md).expect("parse ok");
+        with_test_ui(|_, ui| {
+            renderer.render_to_ui(ui, &elements);
+        });
+    }
+
+    #[test]
+    fn test_render_link_with_mixed_emoji_and_text() {
+        let renderer = MarkdownRenderer::new();
+        let md = "[Hello 🌍 World](https://example.com)\n";
+        let elements = renderer.parse(md).expect("parse ok");
+        with_test_ui(|_, ui| {
+            renderer.render_to_ui(ui, &elements);
+        });
+    }
+
+    #[test]
+    fn test_render_text_with_search_highlighting_active() {
+        let renderer = MarkdownRenderer::new();
+        let md = "This is a test paragraph with some searchable words in it.\n";
+        let elements = renderer.parse(md).expect("parse ok");
+        renderer.set_highlight_phrase(Some("searchable"));
+        with_test_ui(|_, ui| {
+            renderer.render_to_ui(ui, &elements);
+        });
+    }
+
+    #[test]
+    fn test_render_strong_link_with_emoji() {
+        let renderer = MarkdownRenderer::new();
+        // Bold link with emoji in text
+        let md = "[**🎉 Celebration**](https://example.com)\n";
+        let elements = renderer.parse(md).expect("parse ok");
+        with_test_ui(|_, ui| {
+            renderer.render_to_ui(ui, &elements);
+        });
+    }
+
+    #[test]
+    fn test_render_text_with_emojis_and_styles() {
+        let renderer = MarkdownRenderer::new();
+        let md = "Text with 🚀 emoji and **bold** and *italic* and `code` inline.\n";
+        let elements = renderer.parse(md).expect("parse ok");
+        with_test_ui(|_, ui| {
+            renderer.render_to_ui(ui, &elements);
+        });
+    }
+
+    #[test]
+    fn test_render_link_context_menu_in_test_mode() {
+        let renderer = MarkdownRenderer::new();
+        let md = "[Click here](https://example.com)\n";
+        let elements = renderer.parse(md).expect("parse ok");
+        with_test_ui(|_, ui| {
+            renderer.render_to_ui(ui, &elements);
+        });
     }
 }
