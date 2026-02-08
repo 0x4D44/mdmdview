@@ -1,13 +1,11 @@
 use std::collections::HashMap;
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone)]
 pub struct RowMetrics {
     pub max_height: f32,
     pub dirty: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone)]
 pub struct TableMetricEntry {
     pub rows: Vec<RowMetrics>,
@@ -144,7 +142,6 @@ impl TableMetricEntry {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone)]
 pub struct TableMetrics {
     tables: HashMap<u64, TableMetricEntry>,
@@ -172,7 +169,6 @@ impl TableMetrics {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone)]
 pub struct CacheStats {
     pub hits: u64,

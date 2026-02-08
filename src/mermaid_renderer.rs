@@ -1936,7 +1936,7 @@ impl MermaidWorker {
             }
             Ok(())
         });
-        Self::map_init_result(init_result)?;
+        init_result.map_err(|err| format!("Mermaid init error: {}", err))?;
         if worker_idx == 0 {
             eprintln!(
                 "Mermaid embedded bytes: {}",
@@ -1988,13 +1988,6 @@ impl MermaidWorker {
         self.engine.rt.run_gc();
         self.deadline_ms.store(0, Ordering::Relaxed);
         Self::format_render_result(result, deadline, Self::now_ms())
-    }
-
-    fn map_init_result(init_result: Result<(), String>) -> Result<(), String> {
-        match init_result {
-            Ok(()) => Ok(()),
-            Err(err) => Err(format!("Mermaid init error: {}", err)),
-        }
     }
 
     fn format_render_result(
@@ -2681,20 +2674,7 @@ impl MermaidWorker {
     }
 
     fn replace_svg_attr(tag: &str, name: &str, value: &str) -> String {
-        let needle = format!("{name}=\"");
-        let start = match tag.find(&needle) {
-            Some(idx) => idx + needle.len(),
-            None => return tag.to_string(),
-        };
-        let end = match tag[start..].find('"') {
-            Some(idx) => start + idx,
-            None => return tag.to_string(),
-        };
-        let mut out = String::with_capacity(tag.len() + value.len());
-        out.push_str(&tag[..start]);
-        out.push_str(value);
-        out.push_str(&tag[end..]);
-        out
+        Self::replace_attr(tag, name, value)
     }
 
     fn remove_svg_attr(tag: &str, name: &str) -> String {
@@ -2817,10 +2797,7 @@ impl MermaidWorker {
                 }
 
                 // Convert escaped HTML tags (like &lt;i&gt;) to SVG tspan elements
-                let converted_svg = Self::convert_html_tags_to_tspan(&svg);
-                if converted_svg != svg {
-                    svg = converted_svg;
-                }
+                svg = Self::convert_html_tags_to_tspan(&svg);
 
                 Self::maybe_dump_svg(svg_key, code_ref, &svg);
                 match self.rasterize_svg(&svg, width_bucket, scale_bucket, bg) {
@@ -2901,8 +2878,7 @@ impl MermaidWorker {
             ..Default::default()
         };
 
-        let tree = usvg::Tree::from_data(svg.as_bytes(), &opt).map_err(|e| format!("{}", e))?;
-        let mut tree = tree;
+        let mut tree = usvg::Tree::from_data(svg.as_bytes(), &opt).map_err(|e| format!("{}", e))?;
         let sz = tree.size().to_int_size();
         let (mut w, mut h) = (sz.width(), sz.height());
         let viewbox_dims = Self::find_svg_attr(svg, "viewBox")
@@ -4635,11 +4611,6 @@ function __mdmdview_make_element(tag, ownerDoc, ns) {
     }
   };
   node.classList = classList;
-  Object.defineProperty(node, 'className', {
-    get: function() { return node.getAttribute ? (node.getAttribute('class') || '') : ''; },
-    set: function(value) { node.setAttribute('class', value); },
-    configurable: true
-  });
   Object.defineProperty(node, 'innerHTML', {
     get: function() { return this.__rawInnerHTML || __mdmdview_serialize_children(this); },
     set: function(value) {
@@ -5196,9 +5167,6 @@ if (!Object.prototype.hasOwnProperty('previousSibling')) {
     configurable: true
   });
 }
-window.getComputedStyle = function(el) {
-  return (el && el.style) ? el.style : __mdmdview_make_style();
-};
 window.__mdmdview_timer_queue = [];
 window.__mdmdview_timer_map = {};
 window.__mdmdview_next_timer_id = 1;
@@ -5573,11 +5541,28 @@ mod tests {
             .expect("env lock")
     }
 
-    fn restore_env_var(key: &'static str, previous: Option<String>) {
-        if let Some(value) = previous {
-            std::env::set_var(key, value);
-        } else {
-            std::env::remove_var(key);
+    /// Creates a font database with system fonts loaded, wrapped in Arc.
+    #[cfg(feature = "mermaid-quickjs")]
+    fn test_fontdb() -> Arc<usvg::fontdb::Database> {
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        Arc::new(fontdb)
+    }
+
+    /// Creates a MermaidWorker with system fonts loaded (worker index 0).
+    #[cfg(feature = "mermaid-quickjs")]
+    fn test_worker() -> MermaidWorker {
+        MermaidWorker::new(0, test_fontdb()).expect("worker init")
+    }
+
+    /// Creates an egui::RawInput with the given screen dimensions.
+    fn test_raw_input(width: f32, height: f32) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(width, height),
+            )),
+            ..Default::default()
         }
     }
 
@@ -6332,10 +6317,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_mermaid_quickjs_render_smoke() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = std::sync::Arc::new(fontdb);
-        let mut worker = MermaidWorker::new(0, fontdb).expect("worker init");
+        let mut worker = test_worker();
 
         let flow = "graph TD; A-->B;";
         let seq = "sequenceDiagram\nAlice->>Bob: Hello\nBob-->>Alice: Hi";
@@ -6408,10 +6390,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_mermaid_quickjs_render_with_html_tags_in_label() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = std::sync::Arc::new(fontdb);
-        let mut worker = MermaidWorker::new(0, fontdb).expect("worker init");
+        let mut worker = test_worker();
 
         // HTML tags in labels - rendered as SVG text (not foreignObject) since htmlLabels=false
         let diagram = r#"graph TD; A[hello<br/><i>world</i>]-->B"#;
@@ -6436,10 +6415,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_mermaid_quickjs_render_subgraph_with_html_tags() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = std::sync::Arc::new(fontdb);
-        let mut worker = MermaidWorker::new(0, fontdb).expect("worker init");
+        let mut worker = test_worker();
 
         // Complex diagram with HTML tags - should render using SVG text elements
         let diagram = r#"graph TB
@@ -6479,10 +6455,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_mermaid_quickjs_render_with_ampersand() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = std::sync::Arc::new(fontdb);
-        let mut worker = MermaidWorker::new(0, fontdb).expect("worker init");
+        let mut worker = test_worker();
 
         // Ampersands in labels - must be escaped for valid SVG
         let diagram = r#"graph TD; A[SIP Parsing & Auth]-->B[Types & Errors]"#;
@@ -6512,11 +6485,7 @@ mod tests {
     fn test_mermaid_worker_dom_debug_env() {
         let _lock = env_lock();
         let _guard = EnvGuard::set("MDMDVIEW_MERMAID_DOM_DEBUG", "1");
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = Arc::new(fontdb);
-        let worker = MermaidWorker::new(0, fontdb);
-        assert!(worker.is_ok());
+        assert!(MermaidWorker::new(0, test_fontdb()).is_ok());
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -6565,9 +6534,7 @@ mod tests {
     fn test_mermaid_worker_new_fails_when_js_empty() {
         let _lock = env_lock();
         let _guard = MermaidJsEmptyGuard::set(true);
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let err = MermaidWorker::new(0, Arc::new(fontdb))
+        let err = MermaidWorker::new(0, test_fontdb())
             .err()
             .expect("expected error");
         assert!(err.contains("No embedded Mermaid JS"));
@@ -6577,9 +6544,7 @@ mod tests {
     #[test]
     fn test_measure_text_native_handles_optional_weight() {
         let _lock = env_lock();
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let worker = MermaidWorker::new(0, Arc::new(fontdb)).expect("worker init");
+        let worker = test_worker();
         worker.engine.ctx.with(|ctx| {
             let with_weight: Vec<f64> = ctx
                 .eval("__mdmdview_measure_text_native('abc', 12, 700)")
@@ -6595,9 +6560,12 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_map_init_result_variants() {
-        assert!(MermaidWorker::map_init_result(Ok(())).is_ok());
-        let err = MermaidWorker::map_init_result(Err("oops".to_string())).unwrap_err();
-        assert!(err.contains("Mermaid init error: oops"));
+        // Tests the inlined init-error mapping pattern used in MermaidWorker::new
+        let ok: Result<(), String> = Ok(());
+        assert!(ok.map_err(|err| format!("Mermaid init error: {}", err)).is_ok());
+        let err: Result<(), String> = Err("oops".to_string());
+        let msg = err.map_err(|err| format!("Mermaid init error: {}", err)).unwrap_err();
+        assert!(msg.contains("Mermaid init error: oops"));
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -6618,10 +6586,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_process_job_missing_code_returns_error() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = std::sync::Arc::new(fontdb);
-        let mut worker = MermaidWorker::new(0, fontdb).expect("worker init");
+        let mut worker = test_worker();
 
         let job = MermaidRequest {
             svg_key: 1,
@@ -6644,10 +6609,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_rasterize_svg_invalid_returns_error() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = std::sync::Arc::new(fontdb);
-        let worker = MermaidWorker::new(0, fontdb).expect("worker init");
+        let worker = test_worker();
 
         let err = worker
             .rasterize_svg("not svg", 100, MermaidRenderer::scale_bucket(1.0), None)
@@ -6660,10 +6622,7 @@ mod tests {
     fn test_rasterize_svg_logs_when_env_set() {
         let _lock = env_lock();
         let _guard = EnvGuard::set("MDMDVIEW_MERMAID_LOG_RASTER", "1");
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = std::sync::Arc::new(fontdb);
-        let worker = MermaidWorker::new(0, fontdb).expect("worker init");
+        let worker = test_worker();
         let svg = r#"<svg width="4" height="4" xmlns="http://www.w3.org/2000/svg"></svg>"#;
         let (data, w, h) = worker
             .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
@@ -6674,9 +6633,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_rasterize_svg_viewbox_filter_rejects_small() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let worker = MermaidWorker::new(0, Arc::new(fontdb)).expect("worker init");
+        let worker = test_worker();
         let svg = r#"<svg width="100" height="100" viewBox="0 0 0 0" xmlns="http://www.w3.org/2000/svg"></svg>"#;
         let (data, w, h) = worker
             .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
@@ -6687,9 +6644,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_rasterize_svg_skips_resize_when_bbox_exceeds_cap() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let worker = MermaidWorker::new(0, Arc::new(fontdb)).expect("worker init");
+        let worker = test_worker();
         let svg = r#"<svg width="10" height="10" viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><rect width="1000" height="1000" fill="red"/></svg>"#;
         let (_data, w, h) = worker
             .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
@@ -6700,9 +6655,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_rasterize_svg_oversize_bbox_translates() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let worker = MermaidWorker::new(0, Arc::new(fontdb)).expect("worker init");
+        let worker = test_worker();
         let svg = r#"<svg width="100" height="50" xmlns="http://www.w3.org/2000/svg"><rect x="-60" y="0" width="200" height="50" fill="red"/></svg>"#;
         let (_data, w, h) = worker
             .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
@@ -6714,9 +6667,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_rasterize_svg_oversize_bbox_translate_y_only() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let worker = MermaidWorker::new(0, Arc::new(fontdb)).expect("worker init");
+        let worker = test_worker();
         let svg = r#"<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="0" width="100" height="200" fill="red"/></svg>"#;
         let (_data, w, h) = worker
             .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
@@ -6728,9 +6679,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_rasterize_svg_clamps_large_width() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let worker = MermaidWorker::new(0, Arc::new(fontdb)).expect("worker init");
+        let worker = test_worker();
         let svg = r#"<svg width="4100" height="10" xmlns="http://www.w3.org/2000/svg"><rect width="4100" height="10" fill="red"/></svg>"#;
         let (_data, w, h) = worker
             .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
@@ -6742,9 +6691,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_rasterize_svg_clamps_large_height() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let worker = MermaidWorker::new(0, Arc::new(fontdb)).expect("worker init");
+        let worker = test_worker();
         let svg = r#"<svg width="10" height="10000" xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10000" fill="red"/></svg>"#;
         let (_data, w, h) = worker
             .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
@@ -6756,9 +6703,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_rasterize_svg_tiny_bbox_keeps_dimensions() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let worker = MermaidWorker::new(0, Arc::new(fontdb)).expect("worker init");
+        let worker = test_worker();
         let svg = r#"<svg width="10" height="10" viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><rect width="0.1" height="0.1" fill="red"/></svg>"#;
         let (_data, w, h) = worker
             .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
@@ -6770,9 +6715,7 @@ mod tests {
     #[test]
     fn test_rasterize_svg_raw_tree_parse_failure_fallback() {
         let _lock = env_lock();
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let worker = MermaidWorker::new(0, Arc::new(fontdb)).expect("worker init");
+        let worker = test_worker();
         force_raw_tree_parse_fail_for_test();
         let svg = r#"<svg width="10" height="10" viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><rect width="20" height="20" fill="red"/></svg>"#;
         let (data, w, h) = worker
@@ -6823,10 +6766,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_process_job_svg_input_rasterize_error() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = std::sync::Arc::new(fontdb);
-        let mut worker = MermaidWorker::new(0, fontdb).expect("worker init");
+        let mut worker = test_worker();
 
         let job = MermaidRequest {
             svg_key: 2,
@@ -6849,10 +6789,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_rasterize_svg_adjusts_for_oversized_bbox() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = std::sync::Arc::new(fontdb);
-        let worker = MermaidWorker::new(0, fontdb).expect("worker init");
+        let worker = test_worker();
 
         let svg = r#"<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
 <rect x="-50" y="-50" width="200" height="200" fill="red"/>
@@ -6867,10 +6804,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_rasterize_svg_viewbox_filter_skips_small_dims() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = std::sync::Arc::new(fontdb);
-        let worker = MermaidWorker::new(0, fontdb).expect("worker init");
+        let worker = test_worker();
 
         let svg = r#"<svg width="10" height="12" viewBox="0 0 0.1 0.1" xmlns="http://www.w3.org/2000/svg">
  <rect width="0.1" height="0.1" fill="red"/>
@@ -6884,10 +6818,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_rasterize_svg_keeps_dimensions_for_small_bbox() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = std::sync::Arc::new(fontdb);
-        let worker = MermaidWorker::new(0, fontdb).expect("worker init");
+        let worker = test_worker();
 
         let svg = r#"<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
  <rect x="10" y="10" width="20" height="20" fill="red"/>
@@ -6901,10 +6832,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_rasterize_svg_clamps_to_max_side() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = std::sync::Arc::new(fontdb);
-        let worker = MermaidWorker::new(0, fontdb).expect("worker init");
+        let worker = test_worker();
 
         let svg = r#"<svg width="10000" height="10000" viewBox="0 0 10000 10000" xmlns="http://www.w3.org/2000/svg">
 <rect width="10000" height="10000" fill="blue"/>
@@ -6919,10 +6847,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_rasterize_svg_applies_background_fill() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = std::sync::Arc::new(fontdb);
-        let worker = MermaidWorker::new(0, fontdb).expect("worker init");
+        let worker = test_worker();
 
         let svg = r#"<svg width="4" height="4" xmlns="http://www.w3.org/2000/svg"></svg>"#;
         let bg = Some([10, 20, 30, 200]);
@@ -6944,10 +6869,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_process_job_applies_svg_fixups() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = std::sync::Arc::new(fontdb);
-        let mut worker = MermaidWorker::new(0, fontdb).expect("worker init");
+        let mut worker = test_worker();
 
         let svg = r#"<svg width="120" height="120" viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
 <switch>
@@ -7063,17 +6985,7 @@ mod tests {
     #[test]
     fn test_poll_mermaid_results_handles_variants() {
         let (result_tx, result_rx) = bounded(10);
-        let renderer = MermaidRenderer {
-            mermaid_textures: RefCell::new(TextureCache::new(4, 10 * 1024 * 1024)),
-            mermaid_pending: RefCell::new(std::collections::HashSet::new()),
-            mermaid_frame_pending: std::cell::Cell::new(false),
-            mermaid_svg_cache: RefCell::new(SvgCache::new(4, 1024 * 1024)),
-            mermaid_errors: RefCell::new(LruCache::new(4)),
-            mermaid_texture_errors: RefCell::new(LruCache::new(4)),
-            mermaid_job_tx: None,
-            mermaid_result_rx: result_rx,
-            worker_handles: Vec::new(),
-        };
+        let renderer = test_renderer_with_channels(None, result_rx);
         let ctx = egui::Context::default();
 
         renderer
@@ -7452,13 +7364,7 @@ mod tests {
         std::env::remove_var("MDMDVIEW_MERMAID_RENDERER");
         let renderer = MermaidRenderer::new();
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(800.0, 600.0),
-            )),
-            ..Default::default()
-        };
+        let input = test_raw_input(800.0, 600.0);
 
         let mut rendered = true;
         let _ = ctx.run(input.clone(), |ctx| {
@@ -7498,13 +7404,7 @@ mod tests {
         let (_tx, rx) = bounded(1);
         let renderer = test_renderer_with_channels(None, rx);
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(800.0, 600.0),
-            )),
-            ..Default::default()
-        };
+        let input = test_raw_input(800.0, 600.0);
 
         let mut rendered = true;
         let _ = ctx.run(input, |ctx| {
@@ -7522,13 +7422,7 @@ mod tests {
         std::env::remove_var("MDMDVIEW_MERMAID_RENDERER");
         let renderer = MermaidRenderer::new();
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(800.0, 600.0),
-            )),
-            ..Default::default()
-        };
+        let input = test_raw_input(800.0, 600.0);
 
         let mut rendered = true;
         let _ = ctx.run(input, |ctx| {
@@ -7552,13 +7446,7 @@ mod tests {
         std::env::remove_var("MDMDVIEW_MERMAID_RENDERER");
         let renderer = MermaidRenderer::new();
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(20.0, 200.0),
-            )),
-            ..Default::default()
-        };
+        let input = test_raw_input(20.0, 200.0);
 
         let mut rendered = true;
         let _ = ctx.run(input, |ctx| {
@@ -7583,13 +7471,7 @@ mod tests {
         let (_result_tx, result_rx) = bounded(1);
         let renderer = test_renderer_with_channels(None, result_rx);
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(240.0, 160.0),
-            )),
-            ..Default::default()
-        };
+        let input = test_raw_input(240.0, 160.0);
         let code = "graph TD; A-->B;";
         let mut rendered_large = false;
         let mut rendered_small = false;
@@ -7648,13 +7530,7 @@ mod tests {
             .borrow_mut()
             .insert(svg_key, "boom".to_string());
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(240.0, 160.0),
-            )),
-            ..Default::default()
-        };
+        let input = test_raw_input(240.0, 160.0);
         let mut rendered = false;
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -7686,13 +7562,7 @@ mod tests {
         job_tx.send(request).expect("fill queue");
 
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(240.0, 160.0),
-            )),
-            ..Default::default()
-        };
+        let input = test_raw_input(240.0, 160.0);
         let mut rendered = false;
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -7712,13 +7582,7 @@ mod tests {
         let (_result_tx, result_rx) = bounded(1);
         let renderer = test_renderer_with_channels(None, result_rx);
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(240.0, 160.0),
-            )),
-            ..Default::default()
-        };
+        let input = test_raw_input(240.0, 160.0);
         let code = "graph TD; A-->B;";
         let mut rendered = false;
         let _ = ctx.run(input, |ctx| {
@@ -7752,13 +7616,7 @@ mod tests {
             .expect("send svg");
 
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(200.0, 120.0),
-            )),
-            ..Default::default()
-        };
+        let input = test_raw_input(200.0, 120.0);
         let code = "timeline\n  title Demo";
         let mut rendered_first = false;
         let mut rendered_second = false;
@@ -8093,29 +7951,13 @@ mod tests {
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
-    fn test_patch_mermaid_js_debug_false_branch() {
+    fn test_patch_mermaid_js_debug_off_still_patches() {
         let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_PATCH_DEBUG", "1");
-        let previous = std::env::var("MDMDVIEW_MERMAID_PATCH_DEBUG").ok();
         std::env::remove_var("MDMDVIEW_MERMAID_PATCH_DEBUG");
         let js =
             "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run()";
         let output = MermaidWorker::patch_mermaid_js(js);
         assert!(output.contains("breadthfirst"));
-        restore_env_var("MDMDVIEW_MERMAID_PATCH_DEBUG", previous);
-    }
-
-    #[cfg(feature = "mermaid-quickjs")]
-    #[test]
-    fn test_patch_mermaid_js_debug_restore_when_missing() {
-        let _lock = env_lock();
-        std::env::remove_var("MDMDVIEW_MERMAID_PATCH_DEBUG");
-        let previous = std::env::var("MDMDVIEW_MERMAID_PATCH_DEBUG").ok();
-        let js =
-            "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run()";
-        let output = MermaidWorker::patch_mermaid_js(js);
-        assert!(output.contains("breadthfirst"));
-        restore_env_var("MDMDVIEW_MERMAID_PATCH_DEBUG", previous);
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -8308,9 +8150,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_text_measurer_non_finite_font_size_uses_default() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let measurer = TextMeasurer::new(Arc::new(fontdb));
+        let measurer = TextMeasurer::new(test_fontdb());
         let (width, height) = measurer.measure_text("abc", f32::NAN, None);
         assert!(width > 0.0);
         assert!(height > 0.0);
@@ -8319,9 +8159,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_text_measurer_missing_glyph_uses_fallback_advance() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let measurer = TextMeasurer::new(Arc::new(fontdb));
+        let measurer = TextMeasurer::new(test_fontdb());
         let (width, height) = measurer.measure_text("\u{10FFFF}", 16.0, None);
         assert!(width > 0.0);
         assert!(height > 0.0);
@@ -8330,9 +8168,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_text_measurer_forced_face_parse_error_falls_back() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let measurer = TextMeasurer::new(Arc::new(fontdb));
+        let measurer = TextMeasurer::new(test_fontdb());
         force_mermaid_face_parse_error_once();
         let (width, height) = measurer.measure_text("abc", 16.0, None);
         assert!(width > 0.0);
@@ -8342,9 +8178,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_text_measurer_bold_adjusts_when_faces_match() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = Arc::new(fontdb);
+        let fontdb = test_fontdb();
         let face_id = fontdb.query(&usvg::fontdb::Query {
             families: &[usvg::fontdb::Family::SansSerif],
             ..Default::default()
@@ -8362,9 +8196,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_text_measurer_empty_text_returns_zero() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let measurer = TextMeasurer::new(Arc::new(fontdb));
+        let measurer = TextMeasurer::new(test_fontdb());
         let (width, height) = measurer.measure_text("", 16.0, None);
         assert_eq!(width, 0.0);
         assert_eq!(height, 0.0);
@@ -8381,10 +8213,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_text_measurer_kerning_adjusts_width_when_available() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = Arc::new(fontdb);
-        let measurer = TextMeasurer::new(Arc::clone(&fontdb));
+        let measurer = TextMeasurer::new(test_fontdb());
         let (w_av, _) = measurer.measure_text("AV", 16.0, None);
         let (w_a, _) = measurer.measure_text("A", 16.0, None);
         let (w_v, _) = measurer.measure_text("V", 16.0, None);
@@ -8444,13 +8273,7 @@ mod tests {
             .borrow_mut()
             .insert(svg_key, "<svg></svg>".to_string());
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(240.0, 120.0),
-            )),
-            ..Default::default()
-        };
+        let input = test_raw_input(240.0, 120.0);
         let mut rendered = false;
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -8511,9 +8334,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_mermaid_worker_init_error_stages() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = Arc::new(fontdb);
+        let fontdb = test_fontdb();
 
         force_mermaid_init_error_once(1);
         let err = MermaidWorker::new(0, Arc::clone(&fontdb))
@@ -8528,12 +8349,11 @@ mod tests {
         assert!(err.contains("Mermaid text measure init error"));
 
         force_mermaid_init_error_once(3);
-        let err = MermaidWorker::new(0, fontdb).err().expect("stage 3 err");
+        let err = MermaidWorker::new(0, Arc::clone(&fontdb))
+            .err()
+            .expect("stage 3 err");
         assert!(err.contains("Mermaid DOM shim"));
 
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = Arc::new(fontdb);
         force_mermaid_init_error_once(4);
         let err = MermaidWorker::new(0, Arc::clone(&fontdb))
             .err()
@@ -8541,18 +8361,17 @@ mod tests {
         assert!(err.contains("Mermaid JS"));
 
         force_mermaid_init_error_once(5);
-        let err = MermaidWorker::new(0, fontdb).err().expect("stage 5 err");
+        let err = MermaidWorker::new(0, Arc::clone(&fontdb))
+            .err()
+            .expect("stage 5 err");
         assert!(err.contains("Mermaid init"));
     }
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_mermaid_worker_new_runtime_error_forced() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = Arc::new(fontdb);
         force_mermaid_runtime_error_once();
-        let err = MermaidWorker::new(0, Arc::clone(&fontdb))
+        let err = MermaidWorker::new(0, test_fontdb())
             .err()
             .expect("runtime err");
         assert!(err.contains("Mermaid runtime init error"));
@@ -8577,11 +8396,8 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_mermaid_worker_new_context_error_forced() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = Arc::new(fontdb);
         force_mermaid_context_error_once();
-        let err = MermaidWorker::new(0, Arc::clone(&fontdb))
+        let err = MermaidWorker::new(0, test_fontdb())
             .err()
             .expect("context err");
         assert!(err.contains("Mermaid context init error"));
@@ -8590,11 +8406,8 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_mermaid_worker_new_utf8_error_forced() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = Arc::new(fontdb);
         force_mermaid_utf8_error_once();
-        let err = MermaidWorker::new(0, Arc::clone(&fontdb))
+        let err = MermaidWorker::new(0, test_fontdb())
             .err()
             .expect("utf8 err");
         assert!(err.contains("Mermaid JS is not valid UTF-8"));
@@ -8603,10 +8416,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_mermaid_render_svg_forced_eval_error() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = Arc::new(fontdb);
-        let mut worker = MermaidWorker::new(0, Arc::clone(&fontdb)).expect("worker init");
+        let mut worker = test_worker();
         force_mermaid_render_eval_error_once();
         let err = worker
             .render_svg(1, "graph TD; A-->B;", 480, 320)
@@ -8617,10 +8427,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_mermaid_render_svg_forced_call_error() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = Arc::new(fontdb);
-        let mut worker = MermaidWorker::new(0, Arc::clone(&fontdb)).expect("worker init");
+        let mut worker = test_worker();
         force_mermaid_render_call_error_once();
         let err = worker
             .render_svg(2, "graph TD; A-->B;", 480, 320)
@@ -8639,10 +8446,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_rasterize_svg_forced_pixmap_alloc_error() {
-        let mut fontdb = usvg::fontdb::Database::new();
-        fontdb.load_system_fonts();
-        let fontdb = Arc::new(fontdb);
-        let worker = MermaidWorker::new(0, Arc::clone(&fontdb)).expect("worker init");
+        let worker = test_worker();
         force_mermaid_pixmap_alloc_fail_once();
         let err = worker
             .rasterize_svg(

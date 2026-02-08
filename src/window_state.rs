@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy)]
@@ -16,7 +16,6 @@ pub struct AppSettings {
 }
 
 fn config_dir() -> Option<PathBuf> {
-    // Cross‑platform config dir without extra deps
     #[cfg(target_os = "windows")]
     {
         if let Ok(appdata) = std::env::var("APPDATA") {
@@ -56,6 +55,19 @@ fn state_path() -> Option<PathBuf> {
     })
 }
 
+/// Ensures the config directory exists and creates a file within it.
+/// Returns `Ok(None)` when no config directory is available.
+fn create_config_file(filename: &str) -> std::io::Result<Option<fs::File>> {
+    let Some(mut dir) = config_dir() else {
+        return Ok(None);
+    };
+    if !dir.exists() {
+        fs::create_dir_all(&dir)?;
+    }
+    dir.push(filename);
+    fs::File::create(&dir).map(Some)
+}
+
 pub fn load_window_state() -> Option<WindowState> {
     #[cfg(windows)]
     {
@@ -64,10 +76,7 @@ pub fn load_window_state() -> Option<WindowState> {
         }
     }
     let path = state_path()?;
-    let mut f = fs::File::open(path).ok()?;
-    let mut s = String::new();
-    f.read_to_string(&mut s).ok()?;
-    // expected format: "x y w h max"
+    let s = fs::read_to_string(path).ok()?;
     let parts: Vec<&str> = s.split_whitespace().collect();
     if parts.len() < 5 {
         return None;
@@ -91,19 +100,13 @@ pub fn save_window_state(state: &WindowState) -> std::io::Result<()> {
             eprintln!("Failed to write window state to registry: {e}");
         }
     }
-    if let Some(mut dir) = config_dir() {
-        if !dir.exists() {
-            fs::create_dir_all(&dir)?;
-        }
-        dir.push("window_state.txt");
-        let mut f = fs::File::create(&dir)?;
+    if let Some(mut f) = create_config_file("window_state.txt")? {
         write_window_state(&mut f, state)?;
     }
     Ok(())
 }
 
 fn write_window_state(writer: &mut dyn Write, state: &WindowState) -> std::io::Result<()> {
-    // simple whitespace separated format
     #[cfg(test)]
     if take_forced_file_write_error() {
         return Err(std::io::Error::other("forced write error"));
@@ -112,12 +115,10 @@ fn write_window_state(writer: &mut dyn Write, state: &WindowState) -> std::io::R
         writer,
         "{} {} {} {} {}",
         state.pos[0], state.pos[1], state.size[0], state.size[1], state.maximized as u8
-    )?;
-    Ok(())
+    )
 }
 
 pub fn sanitize_window_state(ws: WindowState) -> Option<WindowState> {
-    // Basic sanity: finite values
     if !ws.pos[0].is_finite()
         || !ws.pos[1].is_finite()
         || !ws.size[0].is_finite()
@@ -126,21 +127,20 @@ pub fn sanitize_window_state(ws: WindowState) -> Option<WindowState> {
         return None;
     }
 
-    // Clamp to reasonable ranges
-    let min_w = 600.0f32;
-    let min_h = 400.0f32;
-    let max_w = 10000.0f32;
-    let max_h = 10000.0f32;
-    let max_pos = 20000.0f32; // avoid absurdly large coordinates
-
-    let w = ws.size[0].clamp(min_w, max_w);
-    let h = ws.size[1].clamp(min_h, max_h);
-    let x = ws.pos[0].max(0.0).min(max_pos);
-    let y = ws.pos[1].max(0.0).min(max_pos);
+    const MIN_SIZE: f32 = 400.0;
+    const MIN_WIDTH: f32 = 600.0;
+    const MAX_SIZE: f32 = 10000.0;
+    const MAX_POS: f32 = 20000.0;
 
     Some(WindowState {
-        pos: [x, y],
-        size: [w, h],
+        pos: [
+            ws.pos[0].clamp(0.0, MAX_POS),
+            ws.pos[1].clamp(0.0, MAX_POS),
+        ],
+        size: [
+            ws.size[0].clamp(MIN_WIDTH, MAX_SIZE),
+            ws.size[1].clamp(MIN_SIZE, MAX_SIZE),
+        ],
         maximized: ws.maximized,
     })
 }
@@ -226,17 +226,8 @@ pub fn save_app_settings(settings: &AppSettings) -> std::io::Result<()> {
             eprintln!("Failed to write app settings to registry: {e}");
         }
     }
-    if let Some(mut dir) = config_dir() {
-        if !dir.exists() {
-            fs::create_dir_all(&dir)?;
-        }
-        dir.push("settings.txt");
-        let mut f = fs::File::create(&dir)?;
-        writeln!(
-            f,
-            "allow_remote_images={}",
-            settings.allow_remote_images as u8
-        )?;
+    if let Some(mut f) = create_config_file("settings.txt")? {
+        writeln!(f, "allow_remote_images={}", settings.allow_remote_images as u8)?;
     }
     Ok(())
 }
