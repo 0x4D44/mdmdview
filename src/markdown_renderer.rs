@@ -6,7 +6,7 @@ use crate::table_support::{
 };
 use crate::{emoji_assets, emoji_catalog};
 use anyhow::Result;
-use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use egui::{
     text::{Galley, LayoutJob, TextWrapping},
     Align, Color32, Context, FontSelection, Painter, RichText, Stroke, Vec2, Visuals,
@@ -121,6 +121,23 @@ impl Default for FontSizes {
             h6: 14.0,
             code: 12.0,
         }
+    }
+}
+
+impl FontSizes {
+    /// Apply a transformation to every font size field, clamping each result
+    /// to its field-specific bounds. The closure receives (current_value,
+    /// default_value, min, max) and returns the new value.
+    fn transform_all(&mut self, f: impl Fn(f32, f32, f32, f32) -> f32) {
+        let d = FontSizes::default();
+        self.body = f(self.body, d.body, 8.0, 32.0);
+        self.h1 = f(self.h1, d.h1, 16.0, 48.0);
+        self.h2 = f(self.h2, d.h2, 14.0, 42.0);
+        self.h3 = f(self.h3, d.h3, 12.0, 36.0);
+        self.h4 = f(self.h4, d.h4, 11.0, 32.0);
+        self.h5 = f(self.h5, d.h5, 10.0, 28.0);
+        self.h6 = f(self.h6, d.h6, 9.0, 24.0);
+        self.code = f(self.code, d.code, 8.0, 20.0);
     }
 }
 
@@ -1127,13 +1144,12 @@ impl MarkdownRenderer {
             if in_table {
                 if let Some((level, rest)) = Self::table_line_info_in_list(line, table_list_indent)
                 {
-                    if table_blockquote_level == Some(level) {
-                        let candidate = Some(rest);
-                        if candidate.is_some_and(Self::is_table_row_candidate) {
-                            out.push_str(&Self::escape_pipes_in_inline_code_line(line));
-                            i += 1;
-                            continue;
-                        }
+                    if table_blockquote_level == Some(level)
+                        && Self::is_table_row_candidate(rest)
+                    {
+                        out.push_str(&Self::escape_pipes_in_inline_code_line(line));
+                        i += 1;
+                        continue;
                     }
                 }
                 in_table = false;
@@ -1165,36 +1181,36 @@ impl MarkdownRenderer {
                 };
 
                 if let Some((next_level, next_rest)) = next_info {
-                    if level == next_level && Self::is_table_row_candidate(header_line) {
-                        let delimiter_line = Some(next_rest);
-                        if delimiter_line.is_some_and(Self::is_table_delimiter_line) {
-                            if !header_from_list_marker && i > 0 {
-                                // Add blank line separator when the previous line has content
-                                // at the same level, to help CommonMark parsers recognize tables.
-                                // Skip this for plain list items (no blockquote) where the
-                                // indentation alone is sufficient.
-                                let in_blockquote = level > 0;
-                                let (prev_level, prev_rest) =
-                                    Self::table_line_info_with_list(lines[i - 1], list_indent);
-                                if prev_level == level
-                                    && !prev_rest.trim().is_empty()
-                                    && (list_indent.is_none() || in_blockquote)
-                                {
-                                    let prefix_len = line.len().saturating_sub(rest.len());
-                                    out.push_str(&line[..prefix_len]);
-                                    let newline =
-                                        if line.ends_with("\r\n") { "\r\n" } else { "\n" };
-                                    out.push_str(newline);
-                                }
+                    if level == next_level
+                        && Self::is_table_row_candidate(header_line)
+                        && Self::is_table_delimiter_line(next_rest)
+                    {
+                        if !header_from_list_marker && i > 0 {
+                            // Add blank line separator when the previous line has content
+                            // at the same level, to help CommonMark parsers recognize tables.
+                            // Skip this for plain list items (no blockquote) where the
+                            // indentation alone is sufficient.
+                            let in_blockquote = level > 0;
+                            let (prev_level, prev_rest) =
+                                Self::table_line_info_with_list(lines[i - 1], list_indent);
+                            if prev_level == level
+                                && !prev_rest.trim().is_empty()
+                                && (list_indent.is_none() || in_blockquote)
+                            {
+                                let prefix_len = line.len().saturating_sub(rest.len());
+                                out.push_str(&line[..prefix_len]);
+                                let newline =
+                                    if line.ends_with("\r\n") { "\r\n" } else { "\n" };
+                                out.push_str(newline);
                             }
-                            out.push_str(&Self::escape_pipes_in_inline_code_line(line));
-                            out.push_str(lines[i + 1]);
-                            in_table = true;
-                            table_blockquote_level = Some(level);
-                            table_list_indent = list_indent;
-                            i += 2;
-                            continue;
                         }
+                        out.push_str(&Self::escape_pipes_in_inline_code_line(line));
+                        out.push_str(lines[i + 1]);
+                        in_table = true;
+                        table_blockquote_level = Some(level);
+                        table_list_indent = list_indent;
+                        i += 2;
+                        continue;
                     }
                 }
             }
@@ -1738,8 +1754,7 @@ impl MarkdownRenderer {
                     Tag::Image(LinkType::Inline, "".into(), "".into()),
                     false,
                 );
-                let mut spans: Vec<InlineSpan> = Vec::new();
-                spans.push(InlineSpan::Image {
+                let spans = vec![InlineSpan::Image {
                     src: url.to_string(),
                     alt,
                     title: if title.is_empty() {
@@ -1747,22 +1762,14 @@ impl MarkdownRenderer {
                     } else {
                         Some(title.to_string())
                     },
-                });
+                }];
                 elements.push(MarkdownElement::Paragraph(spans));
                 next_idx
             }
             Event::Start(Tag::Heading(level, _, _)) => {
                 let (spans, next_idx) =
                     self.parse_inline_spans(events, start + 1, Tag::Heading(*level, None, vec![]));
-                let title_text = Self::spans_plain_text(&spans);
-                let base = Self::slugify(&title_text);
-                let count = slug_counts.entry(base.clone()).or_insert(0);
-                let id = if *count == 0 {
-                    base.clone()
-                } else {
-                    format!("{}-{}", base, *count)
-                };
-                *count += 1;
+                let id = Self::make_header_id(&spans, slug_counts);
                 elements.push(MarkdownElement::Header {
                     level: *level as u8,
                     spans,
@@ -1839,6 +1846,24 @@ impl MarkdownRenderer {
             out.pop();
         }
         out
+    }
+
+    /// Generate a de-duplicated header slug and return the id string.
+    /// Tracks occurrence counts in `slug_counts` to append `-N` suffixes for duplicates.
+    fn make_header_id(
+        spans: &[InlineSpan],
+        slug_counts: &mut HashMap<String, usize>,
+    ) -> String {
+        let title_text = Self::spans_plain_text(spans);
+        let base = Self::slugify(&title_text);
+        let count = slug_counts.entry(base.clone()).or_insert(0);
+        let id = if *count == 0 {
+            base.clone()
+        } else {
+            format!("{}-{}", base, *count)
+        };
+        *count += 1;
+        id
     }
 
     fn spans_plain_text(spans: &[InlineSpan]) -> String {
@@ -1970,15 +1995,7 @@ impl MarkdownRenderer {
                     flush_inline(&mut blocks, &mut spans);
                     let (ps, next) =
                         self.parse_inline_spans(events, i + 1, Tag::Heading(*level, None, vec![]));
-                    let title_text = Self::spans_plain_text(&ps);
-                    let base = Self::slugify(&title_text);
-                    let count = slug_counts.entry(base.clone()).or_insert(0);
-                    let id = if *count == 0 {
-                        base.clone()
-                    } else {
-                        format!("{}-{}", base, *count)
-                    };
-                    *count += 1;
+                    let id = Self::make_header_id(&ps, slug_counts);
                     blocks.push(MarkdownElement::Header {
                         level: *level as u8,
                         spans: ps,
@@ -2407,15 +2424,7 @@ impl MarkdownRenderer {
                                     i + 1,
                                     Tag::Heading(*level, None, vec![]),
                                 );
-                                let title_text = Self::spans_plain_text(&ps);
-                                let base = Self::slugify(&title_text);
-                                let count = slug_counts.entry(base.clone()).or_insert(0);
-                                let id = if *count == 0 {
-                                    base.clone()
-                                } else {
-                                    format!("{}-{}", base, *count)
-                                };
-                                *count += 1;
+                                let id = Self::make_header_id(&ps, slug_counts);
                                 blocks.push(MarkdownElement::Header {
                                     level: *level as u8,
                                     spans: ps,
@@ -2809,7 +2818,7 @@ impl MarkdownRenderer {
         self.fix_unicode_chars(text)
     }
 
-    /// Render a single inline span    /// Render a single inline span
+    /// Render a single inline span
     fn render_inline_span(
         &self,
         ui: &mut egui::Ui,
@@ -3149,11 +3158,25 @@ impl MarkdownRenderer {
         self.render_plain_segment(ui, &expanded, size, style);
     }
 
-    fn render_plain_segment(&self, ui: &mut egui::Ui, text: &str, size: f32, style: InlineStyle) {
+    /// Renders a text segment with optional search highlight background.
+    /// When `highlighted` is true, applies the selection background color and
+    /// uses the selection stroke color as a fallback text color.
+    /// When `highlighted` is false, renders plain text with an optional
+    /// override_text_color fallback for strong text.
+    fn render_text_segment(
+        &self,
+        ui: &mut egui::Ui,
+        text: &str,
+        size: f32,
+        style: InlineStyle,
+        highlighted: bool,
+    ) {
         if text.is_empty() {
             return;
         }
         let mut rich = RichText::new(text).size(size);
+
+        // Apply formatting styles
         if style.strong {
             rich = rich.strong();
         }
@@ -3163,18 +3186,27 @@ impl MarkdownRenderer {
         if style.strike {
             rich = rich.strikethrough();
         }
-        let mut text_color = style.color;
-        if text_color.is_none() && style.strong {
-            if let Some(override_color) = ui.visuals().override_text_color {
-                text_color = Some(override_color);
+
+        // Apply color and optional highlight background
+        if highlighted {
+            let visuals = ui.visuals();
+            rich = rich.background_color(visuals.selection.bg_fill);
+            rich = rich.color(style.color.unwrap_or(visuals.selection.stroke.color));
+        } else {
+            let mut text_color = style.color;
+            if text_color.is_none() && style.strong {
+                if let Some(override_color) = ui.visuals().override_text_color {
+                    text_color = Some(override_color);
+                }
+            }
+            if let Some(color) = text_color {
+                rich = rich.color(color);
             }
         }
-        if let Some(color) = text_color {
-            rich = rich.color(color);
-        }
+
         let response = ui.add(egui::Label::new(rich).wrap(true));
 
-        // Add context menu for text
+        // Context menu for text segment
         // Note: Due to egui limitations, selection is cleared on right-click
         // As a workaround, we provide "Copy Text" for the segment
         #[cfg(test)]
@@ -3188,6 +3220,12 @@ impl MarkdownRenderer {
         });
     }
 
+    /// Convenience wrapper: renders a plain (non-highlighted) text segment.
+    fn render_plain_segment(&self, ui: &mut egui::Ui, text: &str, size: f32, style: InlineStyle) {
+        self.render_text_segment(ui, text, size, style, false);
+    }
+
+    /// Convenience wrapper: renders a search-highlighted text segment.
     fn render_highlighted_segment(
         &self,
         ui: &mut egui::Ui,
@@ -3195,39 +3233,7 @@ impl MarkdownRenderer {
         size: f32,
         style: InlineStyle,
     ) {
-        if text.is_empty() {
-            return;
-        }
-        let visuals = ui.visuals();
-        let bg = visuals.selection.bg_fill;
-        let fallback_color = visuals.selection.stroke.color;
-        let text_color = style.color.unwrap_or(fallback_color);
-
-        let mut rich = RichText::new(text)
-            .size(size)
-            .background_color(bg)
-            .color(text_color);
-        if style.strong {
-            rich = rich.strong();
-        }
-        if style.italics {
-            rich = rich.italics();
-        }
-        if style.strike {
-            rich = rich.strikethrough();
-        }
-        let response = ui.add(egui::Label::new(rich).wrap(true));
-
-        // Add context menu for highlighted text
-        #[cfg(test)]
-        {
-            let _ = &response;
-            self.render_text_context_menu(ui, text);
-        }
-        #[cfg(not(test))]
-        response.context_menu(|ui| {
-            self.render_text_context_menu(ui, text);
-        });
+        self.render_text_segment(ui, text, size, style, true);
     }
 
     fn render_text_context_menu(&self, ui: &mut egui::Ui, text: &str) {
@@ -4654,9 +4660,7 @@ impl MarkdownRenderer {
         // Combine header and body clip rects to ensure dividers respect scroll bounds.
         let clip_rect = match (header_clip_rect, body_clip) {
             (Some(h), Some(b)) => Some(h.union(b)),
-            (Some(h), None) => Some(h),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
+            (h, b) => h.or(b),
         };
 
         // Calculate accurate table width from column widths.
@@ -4688,11 +4692,8 @@ impl MarkdownRenderer {
             _ => None,
         };
 
-        let rect = table_rect.unwrap_or_else(|| {
-            layout_rect.unwrap_or_else(|| {
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(0.0, 0.0))
-            })
-        });
+        let zero_rect = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(0.0, 0.0));
+        let rect = table_rect.or(layout_rect).unwrap_or(zero_rect);
         let clip_rect = clip_rect.unwrap_or(rect);
         (rect, clip_rect)
     }
@@ -5252,8 +5253,7 @@ impl MarkdownRenderer {
             .highlight_phrase
             .borrow()
             .as_ref()
-            .map(|s| Self::hash_str(s))
-            .unwrap_or(0);
+            .map_or(0, |s| Self::hash_str(s));
         let content_hash = Self::hash_inline_spans(spans);
         let text_color = style.visuals.text_color().to_array();
         let key = CellLayoutKey {
@@ -5528,11 +5528,7 @@ impl MarkdownRenderer {
 
     /// Set the base directory for resolving relative image paths
     pub fn set_base_dir(&self, dir: Option<&Path>) {
-        if let Some(d) = dir {
-            self.base_dir.borrow_mut().replace(d.to_path_buf());
-        } else {
-            self.base_dir.borrow_mut().take();
-        }
+        *self.base_dir.borrow_mut() = dir.map(Path::to_path_buf);
     }
 
     fn poll_image_results(&self, ctx: &egui::Context) -> bool {
@@ -5565,11 +5561,7 @@ impl MarkdownRenderer {
     }
 
     fn enqueue_image_job(&self, request: ImageLoadRequest) -> Result<(), ()> {
-        match self.image_job_tx.try_send(request) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(()),
-            Err(TrySendError::Disconnected(_)) => Err(()),
-        }
+        self.image_job_tx.try_send(request).map_err(|_| ())
     }
 
     fn should_retry_image(&self, key: &str) -> bool {
@@ -5679,12 +5671,7 @@ impl MarkdownRenderer {
         cached_modified: Option<SystemTime>,
         current: Option<SystemTime>,
     ) -> bool {
-        match (cached_modified, current) {
-            (Some(prev), Some(cur)) => prev != cur,
-            (Some(_), None) => true,
-            (None, Some(_)) => true,
-            (None, None) => false,
-        }
+        cached_modified != current
     }
 
     fn image_source_stale(cached_modified: Option<SystemTime>, path: &Path) -> bool {
@@ -5832,27 +5819,15 @@ impl MarkdownRenderer {
 
     /// Zoom in (increase font sizes)
     pub fn zoom_in(&mut self) {
-        self.font_sizes.body = (self.font_sizes.body * 1.1).min(32.0);
-        self.font_sizes.h1 = (self.font_sizes.h1 * 1.1).min(48.0);
-        self.font_sizes.h2 = (self.font_sizes.h2 * 1.1).min(42.0);
-        self.font_sizes.h3 = (self.font_sizes.h3 * 1.1).min(36.0);
-        self.font_sizes.h4 = (self.font_sizes.h4 * 1.1).min(32.0);
-        self.font_sizes.h5 = (self.font_sizes.h5 * 1.1).min(28.0);
-        self.font_sizes.h6 = (self.font_sizes.h6 * 1.1).min(24.0);
-        self.font_sizes.code = (self.font_sizes.code * 1.1).min(20.0);
+        self.font_sizes
+            .transform_all(|cur, _default, _min, max| (cur * 1.1).min(max));
         self.clear_table_layout_cache();
     }
 
     /// Zoom out (decrease font sizes)
     pub fn zoom_out(&mut self) {
-        self.font_sizes.body = (self.font_sizes.body * 0.9).max(8.0);
-        self.font_sizes.h1 = (self.font_sizes.h1 * 0.9).max(16.0);
-        self.font_sizes.h2 = (self.font_sizes.h2 * 0.9).max(14.0);
-        self.font_sizes.h3 = (self.font_sizes.h3 * 0.9).max(12.0);
-        self.font_sizes.h4 = (self.font_sizes.h4 * 0.9).max(11.0);
-        self.font_sizes.h5 = (self.font_sizes.h5 * 0.9).max(10.0);
-        self.font_sizes.h6 = (self.font_sizes.h6 * 0.9).max(9.0);
-        self.font_sizes.code = (self.font_sizes.code * 0.9).max(8.0);
+        self.font_sizes
+            .transform_all(|cur, _default, min, _max| (cur * 0.9).max(min));
         self.clear_table_layout_cache();
     }
 
@@ -5865,15 +5840,8 @@ impl MarkdownRenderer {
     /// Set zoom scale relative to default font sizes.
     pub fn set_zoom_scale(&mut self, scale: f32) {
         let scale = scale.clamp(0.5, 4.0);
-        let default = FontSizes::default();
-        self.font_sizes.body = (default.body * scale).clamp(8.0, 32.0);
-        self.font_sizes.h1 = (default.h1 * scale).clamp(16.0, 48.0);
-        self.font_sizes.h2 = (default.h2 * scale).clamp(14.0, 42.0);
-        self.font_sizes.h3 = (default.h3 * scale).clamp(12.0, 36.0);
-        self.font_sizes.h4 = (default.h4 * scale).clamp(11.0, 32.0);
-        self.font_sizes.h5 = (default.h5 * scale).clamp(10.0, 28.0);
-        self.font_sizes.h6 = (default.h6 * scale).clamp(9.0, 24.0);
-        self.font_sizes.code = (default.code * scale).clamp(8.0, 20.0);
+        self.font_sizes
+            .transform_all(|_cur, default, min, max| (default * scale).clamp(min, max));
         self.clear_table_layout_cache();
     }
 }
@@ -6019,14 +5987,7 @@ mod tests {
         F: FnOnce(&egui::Context, &mut egui::Ui),
     {
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(1024.0, 768.0),
-            )),
-            ..Default::default()
-        };
-        ctx.begin_frame(input);
+        ctx.begin_frame(screen_input(1024.0, 768.0));
         egui::CentralPanel::default().show(&ctx, |ui| {
             f(&ctx, ui);
         });
@@ -6072,13 +6033,7 @@ mod tests {
     }
 
     fn input_with_click(pos: egui::Pos2, button: egui::PointerButton) -> egui::RawInput {
-        let mut input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(320.0, 240.0),
-            )),
-            ..Default::default()
-        };
+        let mut input = screen_input(320.0, 240.0);
         input.events.push(egui::Event::PointerMoved(pos));
         input.events.push(egui::Event::PointerButton {
             pos,
@@ -6107,84 +6062,133 @@ mod tests {
         out
     }
 
+    /// Creates a test ImageCacheEntry with the given pixel size inside a with_test_ui context.
+    fn make_test_cache_entry(size: [usize; 2]) -> ImageCacheEntry {
+        let mut entry_slot = None;
+        with_test_ui(|ctx, _ui| {
+            let tex = ctx.load_texture(
+                "test_entry",
+                egui::ColorImage::new(size, Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            entry_slot = Some(ImageCacheEntry {
+                texture: tex,
+                size: [size[0] as u32, size[1] as u32],
+                modified: None,
+                byte_size: ImageCacheEntry::estimate_bytes([size[0] as u32, size[1] as u32]),
+            });
+        });
+        entry_slot.expect("texture")
+    }
+
+    /// Creates an egui::RawInput with the specified screen dimensions.
+    fn screen_input(width: f32, height: f32) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(width, height),
+            )),
+            ..Default::default()
+        }
+    }
+
+    /// Returns the rocket emoji character from the shortcode map.
+    fn rocket_emoji() -> &'static str {
+        crate::emoji_catalog::shortcode_map()
+            .get(":rocket:")
+            .expect("rocket shortcode")
+    }
+
+    /// Asserts that inline code pipes were escaped (sentinel is present).
+    fn assert_pipes_escaped(prepared: &str) {
+        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
+        assert!(
+            prepared.contains(&expected),
+            "expected pipe sentinel in: {}",
+            prepared
+        );
+    }
+
+    /// Asserts that inline code pipes were NOT escaped (original backtick content preserved).
+    fn assert_pipes_preserved(prepared: &str) {
+        assert!(
+            prepared.contains("`a|b|c`"),
+            "expected preserved pipes in: {}",
+            prepared
+        );
+        assert!(
+            !prepared.contains(PIPE_SENTINEL),
+            "unexpected pipe sentinel in: {}",
+            prepared
+        );
+    }
+
+    /// Finds the first table in a slice of parsed elements and returns its (headers, rows, alignments).
+    fn find_table(
+        elements: &[MarkdownElement],
+    ) -> Option<(
+        &Vec<Vec<InlineSpan>>,
+        &Vec<Vec<Vec<InlineSpan>>>,
+        &Vec<Alignment>,
+    )> {
+        elements.iter().find_map(|el| match el {
+            MarkdownElement::Table {
+                headers,
+                rows,
+                alignments,
+            } => Some((headers, rows, alignments)),
+            _ => None,
+        })
+    }
+
+    /// Creates a ColumnSpec with Resizable policy for test use.
+    fn resizable_spec(col: usize, name: &str, min: f32, preferred: f32) -> ColumnSpec {
+        ColumnSpec::new(
+            col,
+            name,
+            ColumnPolicy::Resizable {
+                min,
+                preferred,
+                clip: false,
+            },
+            None,
+        )
+    }
+
+    /// Creates a ColumnSpec with Fixed policy for test use.
+    fn fixed_spec(col: usize, name: &str, width: f32) -> ColumnSpec {
+        ColumnSpec::new(
+            col,
+            name,
+            ColumnPolicy::Fixed {
+                width,
+                clip: false,
+            },
+            None,
+        )
+    }
+
     #[test]
     fn test_image_cache_get_missing_and_insert_empty_order() {
         let mut cache = ImageCache::new(1);
         assert!(cache.get("missing").is_none());
 
-        let mut entry_slot = None;
-        with_test_ui(|ctx, _ui| {
-            let tex = ctx.load_texture(
-                "cache_test",
-                egui::ColorImage::new([1, 1], Color32::WHITE),
-                egui::TextureOptions::LINEAR,
-            );
-            entry_slot = Some(ImageCacheEntry {
-                texture: tex,
-                size: [1, 1],
-                modified: None,
-                byte_size: ImageCacheEntry::estimate_bytes([1, 1]),
-            });
-        });
-        let entry = entry_slot.expect("texture");
-        cache.entries.insert(
-            "a".to_string(),
-            ImageCacheEntry {
-                texture: entry.texture.clone(),
-                size: entry.size,
-                modified: entry.modified,
-                byte_size: entry.byte_size,
-            },
-        );
+        let entry = make_test_cache_entry([1, 1]);
+        cache.entries.insert("a".to_string(), entry.clone());
         cache.order.clear();
-        cache.insert(
-            "b".to_string(),
-            ImageCacheEntry {
-                texture: entry.texture.clone(),
-                size: entry.size,
-                modified: entry.modified,
-                byte_size: entry.byte_size,
-            },
-        );
+        cache.insert("b".to_string(), entry);
         assert!(cache.contains_key("b"));
     }
 
     #[test]
     fn test_image_cache_insert_existing_key_updates_entry() {
         let mut cache = ImageCache::new(2);
-        let mut entry_slot = None;
-        with_test_ui(|ctx, _ui| {
-            let tex = ctx.load_texture(
-                "cache_update",
-                egui::ColorImage::new([1, 1], Color32::WHITE),
-                egui::TextureOptions::LINEAR,
-            );
-            entry_slot = Some(ImageCacheEntry {
-                texture: tex,
-                size: [1, 1],
-                modified: None,
-                byte_size: ImageCacheEntry::estimate_bytes([1, 1]),
-            });
-        });
-        let entry = entry_slot.expect("texture");
-        cache.insert(
-            "a".to_string(),
-            ImageCacheEntry {
-                texture: entry.texture.clone(),
-                size: [1, 1],
-                modified: entry.modified,
-                byte_size: ImageCacheEntry::estimate_bytes([1, 1]),
-            },
-        );
-        cache.insert(
-            "a".to_string(),
-            ImageCacheEntry {
-                texture: entry.texture.clone(),
-                size: [2, 2],
-                modified: entry.modified,
-                byte_size: ImageCacheEntry::estimate_bytes([2, 2]),
-            },
-        );
+        let entry = make_test_cache_entry([1, 1]);
+        cache.insert("a".to_string(), entry);
+
+        let entry2 = make_test_cache_entry([2, 2]);
+        cache.insert("a".to_string(), entry2);
+
         let stored = cache.get("a").expect("stored");
         assert_eq!(stored.size, [2, 2]);
     }
@@ -6192,39 +6196,9 @@ mod tests {
     #[test]
     fn test_image_cache_evicts_oldest_entry() {
         let mut cache = ImageCache::new(1);
-        let mut entry_slot = None;
-        with_test_ui(|ctx, _ui| {
-            let tex = ctx.load_texture(
-                "cache_evict",
-                egui::ColorImage::new([1, 1], Color32::WHITE),
-                egui::TextureOptions::LINEAR,
-            );
-            entry_slot = Some(ImageCacheEntry {
-                texture: tex,
-                size: [1, 1],
-                modified: None,
-                byte_size: ImageCacheEntry::estimate_bytes([1, 1]),
-            });
-        });
-        let entry = entry_slot.expect("texture");
-        cache.insert(
-            "a".to_string(),
-            ImageCacheEntry {
-                texture: entry.texture.clone(),
-                size: entry.size,
-                modified: entry.modified,
-                byte_size: entry.byte_size,
-            },
-        );
-        cache.insert(
-            "b".to_string(),
-            ImageCacheEntry {
-                texture: entry.texture.clone(),
-                size: entry.size,
-                modified: entry.modified,
-                byte_size: entry.byte_size,
-            },
-        );
+        let entry = make_test_cache_entry([1, 1]);
+        cache.insert("a".to_string(), entry.clone());
+        cache.insert("b".to_string(), entry);
         assert!(cache.contains_key("b"));
         assert!(!cache.contains_key("a"));
     }
@@ -6235,59 +6209,21 @@ mod tests {
         let mut cache = ImageCache::new(100);
         cache.max_bytes = 32; // 8 pixels worth (2x2 RGBA = 16 bytes each)
 
-        let mut entry_slot = None;
-        with_test_ui(|ctx, _ui| {
-            let tex = ctx.load_texture(
-                "cache_mem",
-                egui::ColorImage::new([2, 2], Color32::WHITE),
-                egui::TextureOptions::LINEAR,
-            );
-            entry_slot = Some(ImageCacheEntry {
-                texture: tex,
-                size: [2, 2],
-                modified: None,
-                byte_size: ImageCacheEntry::estimate_bytes([2, 2]), // 16 bytes
-            });
-        });
-        let entry = entry_slot.expect("texture");
+        let entry = make_test_cache_entry([2, 2]);
 
         // Insert first entry (16 bytes)
-        cache.insert(
-            "a".to_string(),
-            ImageCacheEntry {
-                texture: entry.texture.clone(),
-                size: entry.size,
-                modified: entry.modified,
-                byte_size: entry.byte_size,
-            },
-        );
+        cache.insert("a".to_string(), entry.clone());
         assert_eq!(cache.current_bytes(), 16);
         assert!(cache.contains_key("a"));
 
         // Insert second entry (16 bytes) - should fit within 32 byte limit
-        cache.insert(
-            "b".to_string(),
-            ImageCacheEntry {
-                texture: entry.texture.clone(),
-                size: entry.size,
-                modified: entry.modified,
-                byte_size: entry.byte_size,
-            },
-        );
+        cache.insert("b".to_string(), entry.clone());
         assert_eq!(cache.current_bytes(), 32);
         assert!(cache.contains_key("a"));
         assert!(cache.contains_key("b"));
 
         // Insert third entry - should evict "a" due to memory limit
-        cache.insert(
-            "c".to_string(),
-            ImageCacheEntry {
-                texture: entry.texture.clone(),
-                size: entry.size,
-                modified: entry.modified,
-                byte_size: entry.byte_size,
-            },
-        );
+        cache.insert("c".to_string(), entry);
         // Memory should still be at 32 bytes (evicted "a", added "c")
         assert_eq!(cache.current_bytes(), 32);
         assert!(!cache.contains_key("a")); // Evicted due to memory limit
@@ -6298,31 +6234,8 @@ mod tests {
     #[test]
     fn test_image_cache_remove_decrements_bytes() {
         let mut cache = ImageCache::new(10);
-        let mut entry_slot = None;
-        with_test_ui(|ctx, _ui| {
-            let tex = ctx.load_texture(
-                "cache_remove_bytes",
-                egui::ColorImage::new([4, 4], Color32::WHITE),
-                egui::TextureOptions::LINEAR,
-            );
-            entry_slot = Some(ImageCacheEntry {
-                texture: tex,
-                size: [4, 4],
-                modified: None,
-                byte_size: ImageCacheEntry::estimate_bytes([4, 4]), // 64 bytes
-            });
-        });
-        let entry = entry_slot.expect("texture");
-
-        cache.insert(
-            "x".to_string(),
-            ImageCacheEntry {
-                texture: entry.texture.clone(),
-                size: entry.size,
-                modified: entry.modified,
-                byte_size: entry.byte_size,
-            },
-        );
+        let entry = make_test_cache_entry([4, 4]);
+        cache.insert("x".to_string(), entry);
         assert_eq!(cache.current_bytes(), 64);
 
         cache.remove("x");
@@ -6588,16 +6501,7 @@ mod tests {
     #[test]
     fn test_persist_resizable_widths_returns_on_empty_widths() {
         let renderer = MarkdownRenderer::new();
-        let spec = ColumnSpec::new(
-            0,
-            "A",
-            ColumnPolicy::Resizable {
-                min: 20.0,
-                preferred: 80.0,
-                clip: false,
-            },
-            None,
-        );
+        let spec = resizable_spec(0, "A", 20.0, 80.0);
         let table_id = 7u64;
         renderer.persist_resizable_widths(table_id, &[spec], &[]);
         let metrics = renderer.table_metrics.borrow();
@@ -6612,13 +6516,7 @@ mod tests {
             url: "https://example.com".to_string(),
         }];
         let ctx = egui::Context::default();
-        let mut input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(320.0, 240.0),
-            )),
-            ..Default::default()
-        };
+        let mut input = screen_input(320.0, 240.0);
         input
             .events
             .push(egui::Event::PointerMoved(egui::pos2(200.0, 200.0)));
@@ -6953,16 +6851,7 @@ mod tests {
     fn font_size_change_does_not_repersist_stale_widths() {
         let mut renderer = MarkdownRenderer::new();
         let table_id = 7u64;
-        let specs = vec![ColumnSpec::new(
-            0,
-            "A",
-            ColumnPolicy::Resizable {
-                min: 20.0,
-                preferred: 100.0,
-                clip: false,
-            },
-            None,
-        )];
+        let specs = vec![resizable_spec(0, "A", 20.0, 100.0)];
         let widths = vec![100.0f32];
 
         // Initial persist at default font size.
@@ -6999,16 +6888,7 @@ mod tests {
     fn highlight_phrase_keeps_persisted_table_widths() {
         let renderer = MarkdownRenderer::new();
         let table_id = 11u64;
-        let specs = vec![ColumnSpec::new(
-            0,
-            "A",
-            ColumnPolicy::Resizable {
-                min: 20.0,
-                preferred: 100.0,
-                clip: false,
-            },
-            None,
-        )];
+        let specs = vec![resizable_spec(0, "A", 20.0, 100.0)];
         let widths = vec![120.0f32];
         let policy_hash = specs[0].policy_hash;
 
@@ -7532,9 +7412,7 @@ mod tests {
     #[test]
     fn test_cell_fragments_detect_single_emoji_cell() {
         let renderer = MarkdownRenderer::new();
-        let rocket = crate::emoji_catalog::shortcode_map()
-            .get(":rocket:")
-            .expect("rocket shortcode");
+        let rocket = rocket_emoji();
         let spans = vec![InlineSpan::Strong((*rocket).to_string())];
         let fragments = renderer.cell_fragments(&spans);
         assert_eq!(fragments.len(), 1);
@@ -7548,9 +7426,7 @@ mod tests {
     #[test]
     fn test_cell_single_emoji_emphasis() {
         let renderer = MarkdownRenderer::new();
-        let rocket = crate::emoji_catalog::shortcode_map()
-            .get(":rocket:")
-            .expect("rocket shortcode");
+        let rocket = rocket_emoji();
         let spans = vec![InlineSpan::Emphasis((*rocket).to_string())];
         assert!(renderer.cell_single_emoji(&spans).is_some());
     }
@@ -7558,9 +7434,7 @@ mod tests {
     #[test]
     fn test_cell_single_emoji_strikethrough() {
         let renderer = MarkdownRenderer::new();
-        let rocket = crate::emoji_catalog::shortcode_map()
-            .get(":rocket:")
-            .expect("rocket shortcode");
+        let rocket = rocket_emoji();
         let spans = vec![InlineSpan::Strikethrough((*rocket).to_string())];
         assert!(renderer.cell_single_emoji(&spans).is_some());
     }
@@ -7568,9 +7442,7 @@ mod tests {
     #[test]
     fn test_cell_single_emoji_returns_none_for_code_and_link() {
         let renderer = MarkdownRenderer::new();
-        let rocket = crate::emoji_catalog::shortcode_map()
-            .get(":rocket:")
-            .expect("rocket shortcode");
+        let rocket = rocket_emoji();
         let code_spans = vec![InlineSpan::Code((*rocket).to_string())];
         assert!(renderer.cell_single_emoji(&code_spans).is_none());
 
@@ -7591,9 +7463,7 @@ mod tests {
     #[test]
     fn test_get_or_make_emoji_texture_falls_back_on_decode_error() {
         let renderer = MarkdownRenderer::new();
-        let rocket = crate::emoji_catalog::shortcode_map()
-            .get(":rocket:")
-            .expect("rocket shortcode");
+        let rocket = rocket_emoji();
         force_emoji_decode_error_once();
         with_test_ui(|_, ui| {
             let _ = renderer.get_or_make_emoji_texture(ui, rocket);
@@ -7628,9 +7498,7 @@ mod tests {
     #[test]
     fn test_cell_fragments_inline_emoji_stays_text() {
         let renderer = MarkdownRenderer::new();
-        let rocket = crate::emoji_catalog::shortcode_map()
-            .get(":rocket:")
-            .expect("rocket shortcode");
+        let rocket = rocket_emoji();
         let spans = vec![
             InlineSpan::Text((*rocket).to_string()),
             InlineSpan::Text("tail".into()),
@@ -7657,9 +7525,7 @@ mod tests {
     #[test]
     fn test_cell_fragments_keep_link_emoji_interactive() {
         let renderer = MarkdownRenderer::new();
-        let rocket = crate::emoji_catalog::shortcode_map()
-            .get(":rocket:")
-            .expect("rocket shortcode");
+        let rocket = rocket_emoji();
         let spans = vec![InlineSpan::Link {
             text: (*rocket).to_string(),
             url: "https://example.com".to_string(),
@@ -7686,18 +7552,10 @@ mod tests {
     #[test]
     fn test_render_overhauled_cell_handles_emoji_fragment() {
         let renderer = MarkdownRenderer::new();
-        let rocket = crate::emoji_catalog::shortcode_map()
-            .get(":rocket:")
-            .expect("rocket shortcode");
+        let rocket = rocket_emoji();
         let spans = vec![InlineSpan::Text((*rocket).to_string())];
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(240.0, 120.0),
-            )),
-            ..Default::default()
-        };
+        let input = screen_input(240.0, 120.0);
         run_frame_with_input(&ctx, input, |_, ui| {
             let _ =
                 renderer.render_overhauled_cell(ui, &spans, 120.0, false, Some(0), 0, Align::LEFT);
@@ -8043,8 +7901,7 @@ Intro
     | --- | --- |
     | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        assert!(prepared.contains("`a|b|c`"));
-        assert!(!prepared.contains(PIPE_SENTINEL));
+        assert_pipes_preserved(&prepared);
     }
 
     #[test]
@@ -8054,16 +7911,14 @@ Intro
 > | --- | --- |
 > | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
     }
 
     #[test]
     fn blockquote_tab_table_inline_code_escapes_pipes() {
         let md = ">\t| Col | Notes |\n>\t| --- | --- |\n>\t| code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
     }
 
     #[test]
@@ -8131,8 +7986,7 @@ Prelude
 >     | --- | --- |
 >     | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        assert!(prepared.contains("`a|b|c`"));
-        assert!(!prepared.contains(PIPE_SENTINEL));
+        assert_pipes_preserved(&prepared);
     }
 
     #[test]
@@ -8144,8 +7998,7 @@ Prelude
 > | code | `a|b|c` |
 > ```";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        assert!(prepared.contains("`a|b|c`"));
-        assert!(!prepared.contains(PIPE_SENTINEL));
+        assert_pipes_preserved(&prepared);
     }
 
     #[test]
@@ -8157,8 +8010,7 @@ Prelude
   | code | `a|b|c` |
   ```";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        assert!(prepared.contains("`a|b|c`"));
-        assert!(!prepared.contains(PIPE_SENTINEL));
+        assert_pipes_preserved(&prepared);
     }
 
     #[test]
@@ -8171,8 +8023,7 @@ Prelude
     > | code | `a|b|c` |
     > ```";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        assert!(prepared.contains("`a|b|c`"));
-        assert!(!prepared.contains(PIPE_SENTINEL));
+        assert_pipes_preserved(&prepared);
     }
 
     #[test]
@@ -8185,8 +8036,7 @@ Prelude
       | code | `a|b|c` |
       ```";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        assert!(prepared.contains("`a|b|c`"));
-        assert!(!prepared.contains(PIPE_SENTINEL));
+        assert_pipes_preserved(&prepared);
     }
 
     #[test]
@@ -8197,8 +8047,7 @@ Prelude
       | --- | --- |
       | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        assert!(prepared.contains("`a|b|c`"));
-        assert!(!prepared.contains(PIPE_SENTINEL));
+        assert_pipes_preserved(&prepared);
     }
 
     #[test]
@@ -8209,16 +8058,14 @@ Prelude
     | --- | --- |
     | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
     }
 
     #[test]
     fn nested_list_tab_table_inline_code_escapes_pipes() {
         let md = "- Outer\n\t- | Col | Notes |\n\t  | --- | --- |\n\t  | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
     }
 
     #[test]
@@ -8229,8 +8076,7 @@ Prelude
       | --- | --- |
       | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
     }
 
     #[test]
@@ -8240,8 +8086,7 @@ Prelude
      | --- | --- |
      | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
     }
 
     #[test]
@@ -8252,8 +8097,7 @@ Prelude
         | --- | --- |
         | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        assert!(prepared.contains("`a|b|c`"));
-        assert!(!prepared.contains(PIPE_SENTINEL));
+        assert_pipes_preserved(&prepared);
     }
 
     #[test]
@@ -8265,8 +8109,7 @@ Prelude
           | --- | --- |
           | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
     }
 
     #[test]
@@ -8277,8 +8120,7 @@ Prelude
     > | --- | --- |
     > | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
     }
 
     #[test]
@@ -8288,8 +8130,7 @@ Prelude
   > | --- | --- |
   > | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
     }
 
     #[test]
@@ -8299,8 +8140,7 @@ Prelude
 | --- | --- |
 | row | ok |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        assert!(prepared.contains("`a|b|c`"));
-        assert!(!prepared.contains(PIPE_SENTINEL));
+        assert_pipes_preserved(&prepared);
     }
 
     #[test]
@@ -8310,8 +8150,7 @@ Prelude
 >   | --- | --- |
 >   | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
     }
 
     #[test]
@@ -8322,8 +8161,7 @@ Prelude
     | --- | --- |
     | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
     }
 
     #[test]
@@ -8351,8 +8189,7 @@ Prelude
 | code | `a|b|c` |
 Paragraph with `x|y` inline.";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
         assert!(prepared.contains("`x|y`"));
     }
 
@@ -8364,8 +8201,7 @@ Paragraph with `x|y` inline.";
 | code | `a|b|c` |
 Paragraph with escaped \\| pipe.";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
         assert!(prepared.contains("escaped \\| pipe"));
     }
 
@@ -8377,8 +8213,7 @@ Paragraph with escaped \\| pipe.";
   | code | `a|b|c` |
 Paragraph with `x|y` and pipe | outside.";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
         assert!(prepared.contains("`x|y`"));
     }
 
@@ -8391,8 +8226,7 @@ Paragraph with `x|y` and pipe | outside.";
     | code | `a|b|c` |
   Paragraph with `x|y` and pipe | outside.";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
         assert!(prepared.contains("`x|y`"));
     }
 
@@ -8401,8 +8235,7 @@ Paragraph with `x|y` and pipe | outside.";
         let md =
             "- Outer\n\t- | Col | Notes |\n\t  | --- | --- |\n\t  | code | `a|b|c` |\nParagraph with `x|y` and pipe | outside.";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
         assert!(prepared.contains("`x|y`"));
     }
 
@@ -8415,8 +8248,7 @@ Paragraph with `x|y` and pipe | outside.";
     | --- | --- |
     | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
     }
 
     #[test]
@@ -8459,8 +8291,7 @@ Not a table";
       | --- | --- |
       | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
     }
 
     #[test]
@@ -8471,8 +8302,7 @@ Not a table";
   | --- | --- |
   | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
     }
 
     #[test]
@@ -8482,17 +8312,15 @@ Not a table";
 | --- | --- |
 > | code | `a|b|c` |";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        assert!(prepared.contains("`a|b|c`"));
-        assert!(!prepared.contains(PIPE_SENTINEL));
+        assert_pipes_preserved(&prepared);
     }
 
     #[test]
     fn table_inserts_blank_line_before_header_with_crlf() {
         let md = "Intro line\r\n| Col | Notes |\r\n| --- | --- |\r\n| code | `a|b|c` |\r\n";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        let expected = format!("`a{}b{}c`", PIPE_SENTINEL, PIPE_SENTINEL);
         assert!(prepared.contains("\r\n\r\n| Col | Notes |"));
-        assert!(prepared.contains(&expected));
+        assert_pipes_escaped(&prepared);
     }
 
     #[test]
@@ -8505,8 +8333,7 @@ Not a table";
 > | code | `a|b|c` |
 > ```";
         let prepared = MarkdownRenderer::escape_table_pipes_in_inline_code(md);
-        assert!(prepared.contains("`a|b|c`"));
-        assert!(!prepared.contains(PIPE_SENTINEL));
+        assert_pipes_preserved(&prepared);
     }
 
     #[test]
@@ -8915,26 +8742,8 @@ fn main() {}
     fn test_estimate_table_column_widths_scales_down() {
         let renderer = MarkdownRenderer::new();
         let specs = vec![
-            ColumnSpec::new(
-                0,
-                "A",
-                ColumnPolicy::Resizable {
-                    min: 100.0,
-                    preferred: 100.0,
-                    clip: false,
-                },
-                None,
-            ),
-            ColumnSpec::new(
-                1,
-                "B",
-                ColumnPolicy::Resizable {
-                    min: 100.0,
-                    preferred: 100.0,
-                    clip: false,
-                },
-                None,
-            ),
+            resizable_spec(0, "A", 100.0, 100.0),
+            resizable_spec(1, "B", 100.0, 100.0),
         ];
 
         let widths = renderer.estimate_table_column_widths(&specs, 150.0, 10.0);
@@ -8947,15 +8756,7 @@ fn main() {}
         let renderer = MarkdownRenderer::new();
         let min_floor = renderer.table_min_column_width();
         let specs = vec![
-            ColumnSpec::new(
-                0,
-                "Ord",
-                ColumnPolicy::Fixed {
-                    width: 80.0,
-                    clip: false,
-                },
-                None,
-            ),
+            fixed_spec(0, "Ord", 80.0),
             ColumnSpec::new(1, "Params", ColumnPolicy::Remainder { clip: false }, None),
         ];
         let resolved = vec![80.0, min_floor];
@@ -10836,13 +10637,7 @@ contexts:
     fn test_wait_for_image_with_limit_returns_none() {
         let renderer = MarkdownRenderer::new();
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(320.0, 240.0),
-            )),
-            ..Default::default()
-        };
+        let input = screen_input(320.0, 240.0);
         run_frame_with_input(&ctx, input, |_, ui| {
             let missing = wait_for_image_with_limit(&renderer, &ctx, ui, "missing", 0);
             assert!(missing.is_none());
@@ -10875,13 +10670,7 @@ contexts:
         ]];
 
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(1200.0, 720.0),
-            )),
-            ..Default::default()
-        };
+        let input = screen_input(1200.0, 720.0);
         run_frame_with_input(&ctx, input, |ctx, ui| {
             let tex = ctx.load_texture(
                 "table-image",
@@ -10900,13 +10689,7 @@ contexts:
             let table_id = renderer.compute_table_id(&headers, &rows, &[], 12);
             renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
         });
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(1200.0, 720.0),
-            )),
-            ..Default::default()
-        };
+        let input = screen_input(1200.0, 720.0);
         run_frame_with_input(&ctx, input, |_, ui| {
             let table_id = renderer.compute_table_id(&headers, &rows, &[], 12);
             renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
@@ -11042,13 +10825,7 @@ contexts:
             vec![InlineSpan::Text("Long text 3".to_string())],
         ]];
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(120.0, 120.0),
-            )),
-            ..Default::default()
-        };
+        let input = screen_input(120.0, 120.0);
         run_frame_with_input(&ctx, input, |_, ui| {
             let table_id = renderer.compute_table_id(&headers, &rows, &[], 15);
             renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
@@ -11147,13 +10924,7 @@ contexts:
             .collect();
         let rows = vec![row];
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(200.0, 120.0),
-            )),
-            ..Default::default()
-        };
+        let input = screen_input(200.0, 120.0);
         run_frame_with_input(&ctx, input, |_, ui| {
             let table_id = renderer.compute_table_id(&headers, &rows, &[], 10);
             renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
@@ -11195,13 +10966,7 @@ contexts:
             vec![InlineSpan::Text(long_text)],
         ]];
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(180.0, 120.0),
-            )),
-            ..Default::default()
-        };
+        let input = screen_input(180.0, 120.0);
         run_frame_with_input(&ctx, input, |_, ui| {
             let table_id = renderer.compute_table_id(&headers, &rows, &[], 11);
             renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
@@ -11482,13 +11247,7 @@ contexts:
         run_frame_with_input(&ctx, click, |_, ui| {
             renderer.render_inline_span(ui, &code_span, None, None);
         });
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(320.0, 240.0),
-            )),
-            ..Default::default()
-        };
+        let input = screen_input(320.0, 240.0);
         run_frame_with_input(&ctx, input, |_, ui| {
             renderer.render_inline_span(ui, &code_span, None, None);
         });
@@ -11502,13 +11261,7 @@ contexts:
         run_frame_with_input(&ctx, click, |_, ui| {
             renderer.render_inline_span(ui, &link_span, None, None);
         });
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(320.0, 240.0),
-            )),
-            ..Default::default()
-        };
+        let input = screen_input(320.0, 240.0);
         run_frame_with_input(&ctx, input, |_, ui| {
             renderer.render_inline_span(ui, &link_span, None, None);
         });
@@ -11518,13 +11271,7 @@ contexts:
     fn test_render_inline_span_image_scale_and_title() {
         let renderer = MarkdownRenderer::new();
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(40.0, 240.0),
-            )),
-            ..Default::default()
-        };
+        let input = screen_input(40.0, 240.0);
         run_frame_with_input(&ctx, input, |_, ui| {
             let color_image = egui::ColorImage::new([200, 120], Color32::WHITE);
             let tex =
@@ -11557,13 +11304,7 @@ contexts:
         }];
         let ctx = egui::Context::default();
         let click_pos = std::cell::Cell::new(egui::pos2(1.0, 1.0));
-        let layout_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(220.0, 120.0),
-            )),
-            ..Default::default()
-        };
+        let layout_input = screen_input(220.0, 120.0);
         run_frame_with_input(&ctx, layout_input, |_, ui| {
             ui.allocate_ui_at_rect(
                 egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 80.0)),
@@ -11609,13 +11350,7 @@ contexts:
         }];
         let ctx = egui::Context::default();
         let hover_pos = std::cell::Cell::new(egui::pos2(1.0, 1.0));
-        let layout_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(220.0, 120.0),
-            )),
-            ..Default::default()
-        };
+        let layout_input = screen_input(220.0, 120.0);
         run_frame_with_input(&ctx, layout_input, |_, ui| {
             ui.allocate_ui_at_rect(
                 egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 80.0)),
@@ -11634,13 +11369,7 @@ contexts:
             );
         });
 
-        let mut input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(220.0, 120.0),
-            )),
-            ..Default::default()
-        };
+        let mut input = screen_input(220.0, 120.0);
         input
             .events
             .push(egui::Event::PointerMoved(hover_pos.get()));
@@ -11662,13 +11391,7 @@ contexts:
     fn test_render_inline_span_image_empty_title() {
         let renderer = MarkdownRenderer::new();
         let ctx = egui::Context::default();
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(120.0, 120.0),
-            )),
-            ..Default::default()
-        };
+        let input = screen_input(120.0, 120.0);
         run_frame_with_input(&ctx, input, |_, ui| {
             let color_image = egui::ColorImage::new([20, 12], Color32::WHITE);
             let tex = ui.ctx().load_texture(
@@ -11754,24 +11477,8 @@ contexts:
         assert_eq!(empty, vec![120.0]);
 
         let specs = vec![
-            ColumnSpec::new(
-                0,
-                "A".to_string(),
-                ColumnPolicy::Fixed {
-                    width: 100.0,
-                    clip: false,
-                },
-                None,
-            ),
-            ColumnSpec::new(
-                1,
-                "B".to_string(),
-                ColumnPolicy::Fixed {
-                    width: 100.0,
-                    clip: false,
-                },
-                None,
-            ),
+            fixed_spec(0, "A", 100.0),
+            fixed_spec(1, "B", 100.0),
         ];
         let widths = renderer.estimate_table_column_widths(&specs, 100.0, 10.0);
         assert_eq!(widths.len(), 2);
@@ -11783,24 +11490,8 @@ contexts:
     fn test_estimate_table_column_widths_no_scale_when_available() {
         let renderer = MarkdownRenderer::new();
         let specs = vec![
-            ColumnSpec::new(
-                0,
-                "A",
-                ColumnPolicy::Fixed {
-                    width: 80.0,
-                    clip: false,
-                },
-                None,
-            ),
-            ColumnSpec::new(
-                1,
-                "B",
-                ColumnPolicy::Fixed {
-                    width: 60.0,
-                    clip: false,
-                },
-                None,
-            ),
+            fixed_spec(0, "A", 80.0),
+            fixed_spec(1, "B", 60.0),
         ];
         let widths = renderer.estimate_table_column_widths(&specs, 300.0, 10.0);
         assert_eq!(widths, vec![80.0, 60.0]);
@@ -12392,13 +12083,7 @@ contexts:
                 ColumnPolicy::Auto,
                 ColumnPolicy::Remainder { clip: false },
             ]);
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::pos2(0.0, 0.0),
-                    egui::vec2(*width, 120.0),
-                )),
-                ..Default::default()
-            };
+            let input = screen_input(*width, 120.0);
             run_frame_with_input(&ctx, input, |_, ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let table_id = renderer.compute_table_id(&headers, &rows, &[], 90 + idx as u64);
@@ -12420,13 +12105,7 @@ contexts:
         run_frame_with_input(&ctx, click, |_, ui| {
             renderer.render_code_block(ui, Some("rust"), "fn main() {}", None);
         });
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(320.0, 240.0),
-            )),
-            ..Default::default()
-        };
+        let input = screen_input(320.0, 240.0);
         run_frame_with_input(&ctx, input, |_, ui| {
             renderer.render_code_block(ui, Some("rust"), "fn main() {}", None);
         });
@@ -12620,16 +12299,7 @@ contexts:
             entry.resolved_widths = vec![f32::NAN, -5.0];
         }
         let specs = vec![
-            ColumnSpec::new(
-                0,
-                "A",
-                ColumnPolicy::Resizable {
-                    min: 20.0,
-                    preferred: 40.0,
-                    clip: false,
-                },
-                None,
-            ),
+            resizable_spec(0, "A", 20.0, 40.0),
             ColumnSpec::new(1, "B", ColumnPolicy::Auto, None),
         ];
         let widths = renderer.resolve_table_column_widths(table_id, &specs, 30.0);
@@ -12640,16 +12310,7 @@ contexts:
     fn test_persist_resizable_widths_stores_new_width() {
         let renderer = MarkdownRenderer::new();
         let table_id = 200u64;
-        let specs = vec![ColumnSpec::new(
-            0,
-            "A",
-            ColumnPolicy::Resizable {
-                min: 20.0,
-                preferred: 100.0,
-                clip: false,
-            },
-            None,
-        )];
+        let specs = vec![resizable_spec(0, "A", 20.0, 100.0)];
         let widths = vec![140.0f32];
         renderer.persist_resizable_widths(table_id, &specs, &widths);
         let metrics = renderer.table_metrics.borrow();
@@ -12661,16 +12322,7 @@ contexts:
     fn test_persist_resizable_widths_skips_small_delta() {
         let renderer = MarkdownRenderer::new();
         let table_id = 201u64;
-        let spec = ColumnSpec::new(
-            0,
-            "A",
-            ColumnPolicy::Resizable {
-                min: 20.0,
-                preferred: 100.0,
-                clip: false,
-            },
-            None,
-        );
+        let spec = resizable_spec(0, "A", 20.0, 100.0);
         let hash = spec.policy_hash;
         let specs = vec![spec];
         renderer.persist_resizable_widths(table_id, &specs, &[120.0]);
@@ -12685,16 +12337,7 @@ contexts:
     fn test_persist_resizable_widths_updates_on_large_delta() {
         let renderer = MarkdownRenderer::new();
         let table_id = 202u64;
-        let spec = ColumnSpec::new(
-            0,
-            "A",
-            ColumnPolicy::Resizable {
-                min: 20.0,
-                preferred: 100.0,
-                clip: false,
-            },
-            None,
-        );
+        let spec = resizable_spec(0, "A", 20.0, 100.0);
         let hash = spec.policy_hash;
         let specs = vec![spec];
         renderer.persist_resizable_widths(table_id, &specs, &[120.0]);
@@ -12861,13 +12504,7 @@ contexts:
         }];
         let ctx = egui::Context::default();
         let outside_pos = std::cell::Cell::new(egui::pos2(1.0, 1.0));
-        let layout_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(220.0, 120.0),
-            )),
-            ..Default::default()
-        };
+        let layout_input = screen_input(220.0, 120.0);
         run_frame_with_input(&ctx, layout_input, |_, ui| {
             let build = renderer.build_layout_job(ui.style(), &spans, 40.0, false, Align::LEFT);
             let galley = ui.fonts(|f| f.layout_job(build.job.clone()));
@@ -12881,13 +12518,7 @@ contexts:
             outside_pos.set(pos);
         });
 
-        let mut input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(220.0, 120.0),
-            )),
-            ..Default::default()
-        };
+        let mut input = screen_input(220.0, 120.0);
         input
             .events
             .push(egui::Event::PointerMoved(outside_pos.get()));
@@ -12912,13 +12543,7 @@ contexts:
         }];
         let ctx = egui::Context::default();
         let click_pos = std::cell::Cell::new(egui::pos2(1.0, 1.0));
-        let layout_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(220.0, 120.0),
-            )),
-            ..Default::default()
-        };
+        let layout_input = screen_input(220.0, 120.0);
         run_frame_with_input(&ctx, layout_input, |_, ui| {
             let build = renderer.build_layout_job(ui.style(), &spans, 40.0, false, Align::LEFT);
             let galley = ui.fonts(|f| f.layout_job(build.job.clone()));
@@ -12929,13 +12554,7 @@ contexts:
             click_pos.set(text_origin + egui::vec2(2.0, 2.0));
         });
 
-        let mut input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::pos2(0.0, 0.0),
-                egui::vec2(220.0, 120.0),
-            )),
-            ..Default::default()
-        };
+        let mut input = screen_input(220.0, 120.0);
         input
             .events
             .push(egui::Event::PointerMoved(click_pos.get()));
@@ -13110,16 +12729,7 @@ contexts:
     #[test]
     fn test_persist_resizable_widths_records_change() {
         let renderer = MarkdownRenderer::new();
-        let spec = ColumnSpec::new(
-            0,
-            "col",
-            ColumnPolicy::Resizable {
-                min: 40.0,
-                preferred: 80.0,
-                clip: false,
-            },
-            None,
-        );
+        let spec = resizable_spec(0, "col", 40.0, 80.0);
         let hash = spec.policy_hash;
         renderer.persist_resizable_widths(42, &[spec], &[120.0]);
         let metrics = renderer.table_metrics.borrow();

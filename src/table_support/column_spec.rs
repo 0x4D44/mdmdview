@@ -1,4 +1,3 @@
-use std::cmp::max;
 use std::hash::{Hash, Hasher};
 
 use egui_extras::Column;
@@ -417,14 +416,12 @@ fn classify_column(
 }
 
 fn column_needs_remainder(stat: Option<&ColumnStat>) -> bool {
-    if let Some(stat) = stat {
-        stat.rich_content.has_image
-            || stat.longest_word > 18
-            || stat.max_graphemes > 60
-            || stat.rich_content.has_link
-    } else {
-        false
-    }
+    stat.is_some_and(|s| {
+        s.rich_content.has_image
+            || s.longest_word > 18
+            || s.max_graphemes > 60
+            || s.rich_content.has_link
+    })
 }
 
 fn matches_any(label: &str, needles: &[&str]) -> bool {
@@ -462,10 +459,9 @@ pub fn compute_column_stats(
     rows: &[Vec<Vec<InlineSpan>>],
     max_samples: usize,
 ) -> Vec<ColumnStat> {
-    let column_count = max(
-        headers.len(),
-        rows.iter().map(|row| row.len()).max().unwrap_or(0),
-    );
+    let column_count = headers
+        .len()
+        .max(rows.iter().map(|row| row.len()).max().unwrap_or(0));
     if column_count == 0 {
         return Vec::new();
     }
@@ -476,14 +472,9 @@ pub fn compute_column_stats(
         accumulate_stats_for_cell(header, &mut stats[idx]);
     }
 
-    let mut sampled_rows = 0;
-    for row in rows.iter() {
+    for row in rows.iter().take(max_samples) {
         for (idx, cell) in row.iter().enumerate().take(column_count) {
             accumulate_stats_for_cell(cell, &mut stats[idx]);
-        }
-        sampled_rows += 1;
-        if sampled_rows >= max_samples {
-            break;
         }
     }
 
@@ -514,9 +505,6 @@ fn is_emoji_like(c: char) -> bool {
 }
 
 fn accumulate_stats_for_cell(spans: &[InlineSpan], stat: &mut ColumnStat) {
-    if stat.rich_content.has_image {
-        // rich-content flags persist; skip repeated scans for pure images.
-    }
     let mut has_link = stat.rich_content.has_link;
     let mut has_image = stat.rich_content.has_image;
     let mut has_emoji_like = stat.rich_content.has_emoji_like;

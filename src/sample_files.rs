@@ -177,7 +177,7 @@ Shortcodes like `:rocket:` and `:tada:` are expanded to emoji images in normal t
 [Back to top](#markdown-formatting-guide)
 "#;
 
-/// Code examples with syntax highlighting
+/// Search tips with accent-folding and Unicode-aware matching examples
 const SEARCH_GUIDE_CONTENT: &str = concat!(
     "# Search Tips & Examples\n\n",
     "MarkdownView's search panel is accent-aware and case-insensitive. A single query matches multiple spellings automatically.\n\n",

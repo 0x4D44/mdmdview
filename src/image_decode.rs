@@ -1,3 +1,13 @@
+// Image decoding module for raster (PNG, JPEG, etc.) and SVG images.
+//
+// Provides functions to decode image bytes into egui `ColorImage` values
+// with optional background blending. SVG images are rendered via usvg/resvg
+// and automatically scaled to fit within MAX_IMAGE_SIDE limits. Raster images
+// are validated against size and pixel count limits before decoding.
+//
+// The primary entry point is `bytes_to_color_image_guess`, which tries raster
+// decoding first and falls back to SVG.
+
 use egui::ColorImage;
 #[cfg(test)]
 use std::cell::RefCell;
@@ -46,7 +56,7 @@ pub(crate) fn svg_bytes_to_color_image(bytes: &[u8]) -> Option<(ColorImage, u32,
     svg_bytes_to_color_image_with_bg(bytes, None)
 }
 
-fn guessed_format_for_test(bytes: &[u8]) -> std::io::Result<image::io::Reader<Cursor<&[u8]>>> {
+fn guess_image_format(bytes: &[u8]) -> std::io::Result<image::io::Reader<Cursor<&[u8]>>> {
     #[cfg(test)]
     if take_forced_guess_format_error() {
         return Err(std::io::Error::other("forced guess format error"));
@@ -55,7 +65,7 @@ fn guessed_format_for_test(bytes: &[u8]) -> std::io::Result<image::io::Reader<Cu
 }
 
 fn raster_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    let reader = guessed_format_for_test(bytes).ok()?;
+    let reader = guess_image_format(bytes).ok()?;
     reader.into_dimensions().ok()
 }
 

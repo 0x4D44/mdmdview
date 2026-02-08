@@ -1,18 +1,42 @@
+// emoji_assets.rs -- Procedural vector fallback icons for a small subset of emoji.
+//
+// When a Twemoji PNG is unavailable (see emoji_catalog.rs), this module can
+// generate simple rasterised shapes for a handful of commonly used emoji.
+// The fallback set is intentionally small; most emoji are served as embedded
+// PNGs from the catalog.
+//
+// Public API:
+//   make_image(emoji, size) -> Option<ColorImage>  -- render a fallback icon
+//   has_fallback(emoji)     -> bool                 -- cheap membership check
+
 use egui::Color32 as C;
 
-// Draw simple vector fallback icons for a subset of emoji.
+/// Emoji codepoints that have procedural vector fallbacks.
+/// Both `make_image` and `has_fallback` derive from this list, keeping them
+/// automatically in sync.
+const FALLBACK_EMOJI: &[&str] = &[
+    "\u{2705}",  // white check mark
+    "\u{1f389}", // tada / party popper
+    "\u{1f680}", // rocket
+    "\u{2764}",  // red heart
+    "\u{1f496}", // sparkling heart (shares heart renderer)
+    "\u{2b50}",  // star
+    "\u{1f525}", // fire
+];
+
+/// Draw a simple vector fallback icon for a supported emoji.
+///
+/// Returns `None` for emoji not in `FALLBACK_EMOJI`.
 pub fn make_image(emoji: &str, size: usize) -> Option<egui::ColorImage> {
     let mut img = egui::ColorImage::new([size, size], C::TRANSPARENT);
     match emoji {
         "\u{2705}" => {
             draw_circle(&mut img, size, C::from_rgb(34, 139, 34));
             draw_check(&mut img, size, C::WHITE);
-            Some(img)
         }
         "\u{1f389}" => {
             draw_circle(&mut img, size, C::from_rgb(255, 215, 0));
             confetti(&mut img, size);
-            Some(img)
         }
         "\u{1f680}" => {
             draw_circle(&mut img, size, C::from_rgb(60, 60, 170));
@@ -22,31 +46,26 @@ pub fn make_image(emoji: &str, size: usize) -> Option<egui::ColorImage> {
                 C::from_rgb(230, 230, 230),
                 C::from_rgb(255, 110, 60),
             );
-            Some(img)
         }
         "\u{2764}" | "\u{1f496}" => {
             heart(&mut img, size, C::from_rgb(220, 20, 60));
-            Some(img)
         }
         "\u{2b50}" => {
             star(&mut img, size, C::from_rgb(255, 215, 0));
-            Some(img)
         }
         "\u{1f525}" => {
             flame(&mut img, size);
-            Some(img)
         }
-        _ => None,
+        _ => return None,
     }
+    Some(img)
 }
 
-/// Returns true if the emoji has a procedural vector fallback in `make_image()`.
+/// Returns true if the emoji has a procedural vector fallback in `make_image`.
+///
 /// This is a lightweight check that avoids allocating a ColorImage.
 pub fn has_fallback(emoji: &str) -> bool {
-    matches!(
-        emoji,
-        "\u{2705}" | "\u{1f389}" | "\u{1f680}" | "\u{2764}" | "\u{1f496}" | "\u{2b50}" | "\u{1f525}"
-    )
+    FALLBACK_EMOJI.contains(&emoji)
 }
 
 fn draw_circle(img: &mut egui::ColorImage, size: usize, color: C) {
@@ -69,7 +88,6 @@ fn draw_check(img: &mut egui::ColorImage, size: usize, color: C) {
     let mut plot = |x: i32, y: i32| {
         img[(x as usize, y as usize)] = color;
     };
-    // simple check mark
     for i in 0..s / 3 {
         plot(s / 3 - i, s * 2 / 3 + i);
         plot(s / 3 - i + 1, s * 2 / 3 + i);
@@ -181,19 +199,9 @@ mod tests {
 
     #[test]
     fn test_make_image_known_emojis_produce_pixels() {
-        let emojis = [
-            "\u{2705}",
-            "\u{1f389}",
-            "\u{1f680}",
-            "\u{2764}",
-            "\u{1f496}",
-            "\u{2b50}",
-            "\u{1f525}",
-        ];
-
-        for emoji in emojis {
+        for emoji in FALLBACK_EMOJI {
             let img = make_image(emoji, 24).expect("expected fallback image");
-            assert!(has_non_transparent_pixel(&img));
+            assert!(has_non_transparent_pixel(&img), "no pixels for {emoji:?}");
         }
     }
 
@@ -203,15 +211,10 @@ mod tests {
     }
 
     #[test]
-    fn test_has_fallback() {
-        assert!(has_fallback("\u{2705}"));
-        assert!(has_fallback("\u{1f389}"));
-        assert!(has_fallback("\u{1f680}"));
-        assert!(has_fallback("\u{2764}"));
-        assert!(has_fallback("\u{1f496}"));
-        assert!(has_fallback("\u{2b50}"));
-        assert!(has_fallback("\u{1f525}"));
-        // Unknown should return false
+    fn test_has_fallback_matches_make_image() {
+        for emoji in FALLBACK_EMOJI {
+            assert!(has_fallback(emoji), "has_fallback false for {emoji:?}");
+        }
         assert!(!has_fallback("\u{1f47d}"));
         assert!(!has_fallback("\u{26a0}"));
     }

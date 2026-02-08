@@ -280,23 +280,21 @@ impl ScreenshotState {
     }
 
     fn update_stability(&mut self, layout_hash: Option<u64>, scroll_offset: Option<f32>) {
-        let mut changed = false;
-        if let Some(hash) = layout_hash {
-            if self.last_layout_hash != Some(hash) {
-                changed = true;
+        let layout_changed = match layout_hash {
+            Some(hash) => {
+                let changed = self.last_layout_hash != Some(hash);
+                self.last_layout_hash = Some(hash);
+                changed
             }
-            self.last_layout_hash = Some(hash);
-        } else {
-            changed = true;
-        }
+            None => true,
+        };
 
-        if let (Some(prev), Some(current)) = (self.last_scroll_offset, scroll_offset) {
-            if (prev - current).abs() > 0.5 {
-                changed = true;
-            }
-        }
+        let scroll_changed = matches!(
+            (self.last_scroll_offset, scroll_offset),
+            (Some(prev), Some(current)) if (prev - current).abs() > 0.5
+        );
 
-        if changed {
+        if layout_changed || scroll_changed {
             self.stable_frames = 0;
         } else {
             self.stable_frames = self.stable_frames.saturating_add(1);
@@ -431,7 +429,7 @@ impl MarkdownViewerApp {
     fn toggle_write_mode(&mut self, ctx: &Context) {
         if self.write_enabled {
             // About to disable; capture current cursor if in Raw view
-            if matches!(self.view_mode, ViewMode::Raw) {
+            if self.view_mode == ViewMode::Raw {
                 let editor_id = egui::Id::new("raw_editor");
                 if let Some(state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
                     if let Some(range) = state.cursor.char_range() {
@@ -443,14 +441,14 @@ impl MarkdownViewerApp {
         } else {
             // Enabling write mode: ensure the raw editor will gain focus
             self.write_enabled = true;
-            if matches!(self.view_mode, ViewMode::Raw) {
+            if self.view_mode == ViewMode::Raw {
                 self.raw_focus_requested = true;
             }
         }
     }
 
     fn move_raw_cursor_lines(&mut self, ctx: &Context, delta_lines: i32) {
-        if !matches!(self.view_mode, ViewMode::Raw) || !self.write_enabled {
+        if self.view_mode != ViewMode::Raw || !self.write_enabled {
             return;
         }
         let editor_id = egui::Id::new("raw_editor");
@@ -509,22 +507,26 @@ impl MarkdownViewerApp {
         self.pending_scroll_to_element = None;
         self.renderer.set_highlight_phrase(None);
     }
-    fn find_next(&mut self) {
+    /// Prepare the folded search needle, updating `last_query` if the live query is non-empty.
+    /// Returns `None` when there is nothing to search for.
+    fn prepare_search_needle(&mut self) -> Option<String> {
         if self.search_query.is_empty() && self.last_query.is_empty() {
-            return;
+            return None;
         }
-        let needle = if !self.search_query.is_empty() {
+        if !self.search_query.is_empty() {
             self.last_query = self.search_query.clone();
-            Self::fold_for_search(&self.search_query)
-        } else {
-            Self::fold_for_search(&self.last_query)
-        };
-        let mut start = self.last_match_index.unwrap_or(usize::MAX);
-        if start == usize::MAX {
-            start = 0;
-        } else {
-            start = start.saturating_add(1);
         }
+        Some(Self::fold_for_search(&self.last_query))
+    }
+
+    fn find_next(&mut self) {
+        let Some(needle) = self.prepare_search_needle() else {
+            return;
+        };
+        let start = match self.last_match_index {
+            Some(idx) => idx.saturating_add(1),
+            None => 0,
+        };
         // Wrap-around search forward
         let total = self.parsed_elements.len();
         for pass in 0..2 {
@@ -547,14 +549,8 @@ impl MarkdownViewerApp {
     }
 
     fn find_previous(&mut self) {
-        if self.search_query.is_empty() && self.last_query.is_empty() {
+        let Some(needle) = self.prepare_search_needle() else {
             return;
-        }
-        let needle = if !self.search_query.is_empty() {
-            self.last_query = self.search_query.clone();
-            Self::fold_for_search(&self.search_query)
-        } else {
-            Self::fold_for_search(&self.last_query)
         };
         let total = self.parsed_elements.len();
         let mut start = self.last_match_index.unwrap_or(0);
@@ -888,10 +884,9 @@ impl MarkdownViewerApp {
     fn normalize_line_endings(s: &str) -> String {
         // Order matters: replace \r\n first (Windows), then remaining \r (old Mac)
         let normalized = s.replace("\r\n", "\n").replace('\r', "\n");
-        if let Some(stripped) = normalized.strip_prefix('\u{FEFF}') {
-            stripped.to_string()
-        } else {
-            normalized
+        match normalized.strip_prefix('\u{FEFF}') {
+            Some(stripped) => stripped.to_string(),
+            None => normalized,
         }
     }
 
@@ -1026,12 +1021,13 @@ impl MarkdownViewerApp {
             prev_vowel = is_vowel;
         }
 
-        // Adjust for silent 'e' at end
-        if chars.len() > 2 && chars.last() == Some(&'e') {
-            let second_last = chars.get(chars.len() - 2);
-            if second_last.map(|c| !vowels.contains(c)).unwrap_or(false) && count > 1 {
-                count -= 1;
-            }
+        // Adjust for silent 'e' at end (consonant + 'e')
+        if chars.len() > 2
+            && chars.last() == Some(&'e')
+            && !vowels.contains(&chars[chars.len() - 2])
+            && count > 1
+        {
+            count -= 1;
         }
 
         count.max(1) // Every word has at least one syllable
@@ -1316,9 +1312,7 @@ impl MarkdownViewerApp {
 
     /// Reload the currently opened file from disk
     pub fn reload_current_file(&mut self) -> Result<()> {
-        let path = if let Some(p) = self.current_file.clone() {
-            p
-        } else {
+        let Some(path) = self.current_file.clone() else {
             bail!("No file loaded to reload");
         };
         self.load_file(path, false)
@@ -1416,7 +1410,7 @@ impl MarkdownViewerApp {
     /// Toggle between Rendered and Raw view
     fn toggle_view_mode(&mut self, ctx: &Context) {
         // If leaving Raw view while editing, capture cursor before switching
-        if matches!(self.view_mode, ViewMode::Raw) && self.write_enabled {
+        if self.view_mode == ViewMode::Raw && self.write_enabled {
             let editor_id = egui::Id::new("raw_editor");
             if let Some(state) = egui::text_edit::TextEditState::load(ctx, editor_id) {
                 if let Some(range) = state.cursor.char_range() {
@@ -1436,7 +1430,7 @@ impl MarkdownViewerApp {
     /// Handle keyboard shortcuts
     fn handle_shortcuts(&mut self, ctx: &Context) {
         ctx.input_mut(|i| {
-            let in_raw_edit = matches!(self.view_mode, ViewMode::Raw) && self.write_enabled;
+            let in_raw_edit = self.view_mode == ViewMode::Raw && self.write_enabled;
             // Ctrl+O - Open file
             if i.consume_shortcut(&egui::KeyboardShortcut::new(
                 egui::Modifiers::CTRL,
@@ -1820,7 +1814,7 @@ impl MarkdownViewerApp {
         ui.separator();
 
         ui.horizontal(|ui| {
-            let selected = matches!(self.view_mode, ViewMode::Raw);
+            let selected = self.view_mode == ViewMode::Raw;
             let clicked = ui
                 .add(egui::SelectableLabel::new(
                     selected,
@@ -2590,22 +2584,14 @@ impl MarkdownViewerApp {
                                 // If we have a remembered cursor, restore it (clamped)
                                 if let Some(mut idx) = self.raw_cursor.take() {
                                     idx = idx.min(self.raw_buffer.len());
-                                    if let Some(mut state) =
+                                    let mut state =
                                         egui::text_edit::TextEditState::load(ui.ctx(), editor_id)
-                                    {
-                                        let cr = egui::text::CCursorRange::one(
-                                            egui::text::CCursor::new(idx),
-                                        );
-                                        state.cursor.set_char_range(Some(cr));
-                                        state.store(ui.ctx(), editor_id);
-                                    } else {
-                                        let mut state = egui::text_edit::TextEditState::default();
-                                        let cr = egui::text::CCursorRange::one(
-                                            egui::text::CCursor::new(idx),
-                                        );
-                                        state.cursor.set_char_range(Some(cr));
-                                        state.store(ui.ctx(), editor_id);
-                                    }
+                                            .unwrap_or_default();
+                                    let cr = egui::text::CCursorRange::one(
+                                        egui::text::CCursor::new(idx),
+                                    );
+                                    state.cursor.set_char_range(Some(cr));
+                                    state.store(ui.ctx(), editor_id);
                                 }
                                 let before = self.raw_buffer.clone();
                                 let resp = ui.add(
@@ -2668,12 +2654,11 @@ impl MarkdownViewerApp {
             });
             // Debug scroll logging - writes to file to track content size changes
             {
-                use std::io::Write;
                 #[cfg(test)]
                 let enabled = FORCE_DEBUG_SCROLL.load(Ordering::Relaxed);
                 #[cfg(not(test))]
                 let enabled = {
-                    static DEBUG_SCROLL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    static DEBUG_SCROLL: OnceLock<bool> = OnceLock::new();
                     *DEBUG_SCROLL.get_or_init(|| {
                         std::env::var("MDMDVIEW_DEBUG_SCROLL").is_ok()
                     })
@@ -3372,80 +3357,106 @@ mod tests {
         }
     }
 
-    struct ForcedLoadError;
+    /// RAII guard that sets a thread-local `RefCell<bool>` flag to `true` on creation
+    /// and restores it to `false` on drop. Used to inject errors in test paths.
+    struct ForcedFlag {
+        flag: &'static std::thread::LocalKey<RefCell<bool>>,
+    }
 
-    impl ForcedLoadError {
-        fn new() -> Self {
-            FORCED_LOAD_ERROR.with(|flag| {
-                *flag.borrow_mut() = true;
-            });
-            Self
+    impl ForcedFlag {
+        fn new(flag: &'static std::thread::LocalKey<RefCell<bool>>) -> Self {
+            flag.with(|f| *f.borrow_mut() = true);
+            Self { flag }
         }
     }
 
-    impl Drop for ForcedLoadError {
+    impl Drop for ForcedFlag {
         fn drop(&mut self) {
-            FORCED_LOAD_ERROR.with(|flag| {
-                *flag.borrow_mut() = false;
-            });
+            self.flag.with(|f| *f.borrow_mut() = false);
         }
     }
 
-    struct ForcedScanError;
+    fn force_load_error() -> ForcedFlag {
+        ForcedFlag::new(&FORCED_LOAD_ERROR)
+    }
 
-    impl ForcedScanError {
-        fn new() -> Self {
-            FORCED_SCAN_ERROR.with(|flag| {
-                *flag.borrow_mut() = true;
-            });
-            Self
+    fn force_scan_error() -> ForcedFlag {
+        ForcedFlag::new(&FORCED_SCAN_ERROR)
+    }
+
+    fn force_scan_entry_error() -> ForcedFlag {
+        ForcedFlag::new(&FORCED_SCAN_ENTRY_ERROR)
+    }
+
+    fn force_lossy_read_error() -> ForcedFlag {
+        ForcedFlag::new(&FORCED_READ_LOSSY_ERROR)
+    }
+
+    /// Helper to build a ScreenshotConfig with sensible test defaults.
+    /// Only `output_path` is required; all other fields use standard values.
+    fn test_screenshot_config(output_path: PathBuf) -> ScreenshotConfig {
+        ScreenshotConfig {
+            output_path,
+            viewport_width: 100.0,
+            viewport_height: 80.0,
+            content_only: false,
+            scroll_ratio: None,
+            wait_ms: 0,
+            settle_frames: 0,
+            zoom: 1.0,
+            theme: ScreenshotTheme::Light,
+            font_source: None,
         }
     }
 
-    impl Drop for ForcedScanError {
-        fn drop(&mut self) {
-            FORCED_SCAN_ERROR.with(|flag| {
-                *flag.borrow_mut() = false;
-            });
+    /// Helper to build a ScreenshotSnapshot with standard defaults.
+    fn test_screenshot_snapshot(config: ScreenshotConfig) -> ScreenshotSnapshot {
+        ScreenshotSnapshot {
+            config,
+            content_rect: None,
+            pixels_per_point: 1.0,
+            stable_frames: 0,
+            timed_out: false,
+            pending_renders: false,
+            last_scroll_offset: None,
+            started: Instant::now(),
         }
     }
 
-    struct ForcedScanEntryError;
-
-    impl ForcedScanEntryError {
-        fn new() -> Self {
-            FORCED_SCAN_ENTRY_ERROR.with(|flag| {
-                *flag.borrow_mut() = true;
-            });
-            Self
+    /// Helper to construct a key event for shortcut testing.
+    fn key_event(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
         }
     }
 
-    impl Drop for ForcedScanEntryError {
-        fn drop(&mut self) {
-            FORCED_SCAN_ENTRY_ERROR.with(|flag| {
-                *flag.borrow_mut() = false;
-            });
-        }
+    /// Helper to store a TextEditState with a given cursor position into the raw editor.
+    fn store_raw_editor_cursor(ctx: &egui::Context, cursor_pos: usize) {
+        let editor_id = egui::Id::new("raw_editor");
+        let mut state = egui::text_edit::TextEditState::default();
+        let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(cursor_pos));
+        state.cursor.set_char_range(Some(cr));
+        state.store(ctx, editor_id);
     }
 
-    struct ForcedLossyReadError;
-
-    impl ForcedLossyReadError {
-        fn new() -> Self {
-            FORCED_READ_LOSSY_ERROR.with(|flag| {
-                *flag.borrow_mut() = true;
-            });
-            Self
-        }
+    /// Helper to store a TextEditState with no cursor range into the raw editor.
+    fn store_raw_editor_no_cursor(ctx: &egui::Context) {
+        let editor_id = egui::Id::new("raw_editor");
+        let mut state = egui::text_edit::TextEditState::default();
+        state.cursor.set_char_range(None);
+        state.store(ctx, editor_id);
     }
 
-    impl Drop for ForcedLossyReadError {
-        fn drop(&mut self) {
-            FORCED_READ_LOSSY_ERROR.with(|flag| {
-                *flag.borrow_mut() = false;
-            });
-        }
+    /// Helper to set up app in raw write mode with the given buffer content.
+    fn setup_raw_write_mode(app: &mut MarkdownViewerApp, content: &str) {
+        app.view_mode = ViewMode::Raw;
+        app.write_enabled = true;
+        app.raw_buffer = content.to_string();
+        app.current_content = app.raw_buffer.clone();
     }
 
     #[test]
@@ -3603,10 +3614,7 @@ mod tests {
         app.view_mode = ViewMode::Raw;
         app.write_enabled = true;
         let ctx = egui::Context::default();
-        let editor_id = egui::Id::new("raw_editor");
-        let mut state = egui::text_edit::TextEditState::default();
-        state.cursor.set_char_range(None);
-        state.store(&ctx, editor_id);
+        store_raw_editor_no_cursor(&ctx);
 
         app.toggle_view_mode(&ctx);
 
@@ -3786,18 +3794,7 @@ mod tests {
         temp_file.write_all(&payload)?;
         temp_file.flush()?;
 
-        let config = ScreenshotConfig {
-            output_path: temp_file.path().with_extension("png"),
-            viewport_width: 120.0,
-            viewport_height: 80.0,
-            content_only: false,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
-        };
+        let config = test_screenshot_config(temp_file.path().with_extension("png"));
         app.screenshot = Some(ScreenshotState::new(config));
 
         let path = temp_file.path().to_path_buf();
@@ -4011,7 +4008,7 @@ mod tests {
         let temp_file = NamedTempFile::new()?;
         std::fs::write(temp_file.path(), b"Hello\xFFWorld")?;
 
-        let _guard = ForcedLossyReadError::new();
+        let _guard = force_lossy_read_error();
         assert!(MarkdownViewerApp::read_file_lossy(temp_file.path()).is_err());
         Ok(())
     }
@@ -4360,7 +4357,7 @@ The end.
     fn test_scan_directory_entry_error() -> Result<()> {
         let temp_dir = tempfile::TempDir::new()?;
         std::fs::write(temp_dir.path().join("doc.md"), "# Doc")?;
-        let _guard = ForcedScanEntryError::new();
+        let _guard = force_scan_entry_error();
         let app = MarkdownViewerApp::new();
         assert!(app.scan_directory(temp_dir.path()).is_err());
         Ok(())
@@ -4533,11 +4530,7 @@ The end.
         app.raw_focus_requested = false;
 
         let ctx = egui::Context::default();
-        let editor_id = egui::Id::new("raw_editor");
-        let mut state = egui::text_edit::TextEditState::default();
-        let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(3));
-        state.cursor.set_char_range(Some(cr));
-        state.store(&ctx, editor_id);
+        store_raw_editor_cursor(&ctx, 3);
 
         app.toggle_write_mode(&ctx);
         assert!(app.write_enabled);
@@ -4694,18 +4687,11 @@ The end.
     #[test]
     fn test_update_impl_moves_raw_cursor() {
         let mut app = MarkdownViewerApp::new();
-        app.view_mode = ViewMode::Raw;
-        app.write_enabled = true;
-        app.raw_buffer = "Line 1\nLine 2\nLine 3".to_string();
-        app.current_content = app.raw_buffer.clone();
+        setup_raw_write_mode(&mut app, "Line 1\nLine 2\nLine 3");
         app.pending_raw_cursor_line_move = Some(1);
 
         let ctx = egui::Context::default();
-        let editor_id = egui::Id::new("raw_editor");
-        let mut state = egui::text_edit::TextEditState::default();
-        let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(0));
-        state.cursor.set_char_range(Some(cr));
-        state.store(&ctx, editor_id);
+        store_raw_editor_cursor(&ctx, 0);
 
         let input = default_input();
         run_app_frame(&mut app, &ctx, input);
@@ -4739,29 +4725,19 @@ The end.
         let temp_dir = tempfile::TempDir::new()?;
         let output_path = temp_dir.path().join("shot.png");
         let config = ScreenshotConfig {
-            output_path: output_path.clone(),
-            viewport_width: 80.0,
-            viewport_height: 60.0,
             content_only: true,
             scroll_ratio: Some(0.5),
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
             font_source: Some("TestFont".to_string()),
+            ..test_screenshot_config(output_path.clone())
         };
         let snapshot = ScreenshotSnapshot {
-            config,
             content_rect: Some(egui::Rect::from_min_size(
                 egui::pos2(10.0, 5.0),
                 egui::vec2(20.0, 10.0),
             )),
-            pixels_per_point: 1.0,
             stable_frames: 3,
-            timed_out: false,
-            pending_renders: false,
             last_scroll_offset: Some(12.0),
-            started: Instant::now(),
+            ..test_screenshot_snapshot(config)
         };
 
         let mut image = egui::ColorImage::new([80, 60], Color32::BLACK);
@@ -4783,16 +4759,9 @@ The end.
     fn test_update_screenshot_state_requests_and_scrolls() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let config = ScreenshotConfig {
-            output_path: temp_dir.path().join("shot.png"),
-            viewport_width: 100.0,
-            viewport_height: 80.0,
-            content_only: false,
             scroll_ratio: Some(0.5),
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
             theme: ScreenshotTheme::Dark,
-            font_source: None,
+            ..test_screenshot_config(temp_dir.path().join("shot.png"))
         };
 
         let mut app = MarkdownViewerApp::new();
@@ -4828,16 +4797,8 @@ The end.
     fn test_update_screenshot_state_stable_without_timeout() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let config = ScreenshotConfig {
-            output_path: temp_dir.path().join("shot.png"),
-            viewport_width: 120.0,
-            viewport_height: 80.0,
-            content_only: false,
-            scroll_ratio: None,
             wait_ms: 10_000,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(temp_dir.path().join("shot.png"))
         };
         let mut app = MarkdownViewerApp::new();
         app.screenshot = Some(ScreenshotState::new(config));
@@ -4854,16 +4815,9 @@ The end.
     fn test_update_screenshot_state_times_out_before_stable() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let config = ScreenshotConfig {
-            output_path: temp_dir.path().join("shot.png"),
-            viewport_width: 120.0,
-            viewport_height: 80.0,
-            content_only: false,
             scroll_ratio: Some(0.5),
-            wait_ms: 0,
             settle_frames: 5,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(temp_dir.path().join("shot.png"))
         };
         let mut app = MarkdownViewerApp::new();
         app.screenshot = Some(ScreenshotState::new(config));
@@ -4899,16 +4853,9 @@ The end.
 
         let mut app = MarkdownViewerApp::new();
         let config = ScreenshotConfig {
-            output_path: temp_dir.path().join("shot.png"),
             viewport_width: 10.0,
             viewport_height: 10.0,
-            content_only: false,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(temp_dir.path().join("shot.png"))
         };
         app.set_screenshot_mode(config);
         let mut storage = DummyStorage;
@@ -4926,29 +4873,16 @@ The end.
         let temp_dir = TempDir::new()?;
         let output_path = temp_dir.path().join("shot.png");
         let config = ScreenshotConfig {
-            output_path: output_path.clone(),
-            viewport_width: 100.0,
-            viewport_height: 80.0,
             content_only: true,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
             theme: ScreenshotTheme::Dark,
-            font_source: None,
+            ..test_screenshot_config(output_path.clone())
         };
         let snapshot = ScreenshotSnapshot {
-            config,
             content_rect: Some(egui::Rect::from_min_max(
                 egui::pos2(2.0, 2.0),
                 egui::pos2(8.0, 8.0),
             )),
-            pixels_per_point: 1.0,
-            stable_frames: 0,
-            timed_out: false,
-            pending_renders: false,
-            last_scroll_offset: None,
-            started: std::time::Instant::now(),
+            ..test_screenshot_snapshot(config)
         };
         let image = egui::ColorImage::new([10, 10], Color32::from_rgb(10, 20, 30));
         MarkdownViewerApp::save_screenshot_image(&image, &snapshot)?;
@@ -4961,28 +4895,8 @@ The end.
     fn test_save_screenshot_image_no_crop() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let output_path = temp_dir.path().join("shot.png");
-        let config = ScreenshotConfig {
-            output_path: output_path.clone(),
-            viewport_width: 100.0,
-            viewport_height: 80.0,
-            content_only: false,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
-        };
-        let snapshot = ScreenshotSnapshot {
-            config,
-            content_rect: None,
-            pixels_per_point: 1.0,
-            stable_frames: 0,
-            timed_out: false,
-            pending_renders: false,
-            last_scroll_offset: None,
-            started: std::time::Instant::now(),
-        };
+        let config = test_screenshot_config(output_path.clone());
+        let snapshot = test_screenshot_snapshot(config);
         let image = egui::ColorImage::new([10, 10], Color32::from_rgb(10, 20, 30));
         MarkdownViewerApp::save_screenshot_image(&image, &snapshot)?;
         assert!(output_path.exists());
@@ -4994,29 +4908,16 @@ The end.
         let temp_dir = TempDir::new()?;
         let output_path = temp_dir.path().join("shot.png");
         let config = ScreenshotConfig {
-            output_path: output_path.clone(),
-            viewport_width: 100.0,
-            viewport_height: 80.0,
             content_only: true,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
             theme: ScreenshotTheme::Dark,
-            font_source: None,
+            ..test_screenshot_config(output_path.clone())
         };
         let snapshot = ScreenshotSnapshot {
-            config,
             content_rect: Some(egui::Rect::from_min_max(
                 egui::pos2(5.0, 5.0),
                 egui::pos2(5.0, 5.0),
             )),
-            pixels_per_point: 1.0,
-            stable_frames: 0,
-            timed_out: false,
-            pending_renders: false,
-            last_scroll_offset: None,
-            started: std::time::Instant::now(),
+            ..test_screenshot_snapshot(config)
         };
         let image = egui::ColorImage::new([10, 10], Color32::from_rgb(10, 20, 30));
         MarkdownViewerApp::save_screenshot_image(&image, &snapshot)?;
@@ -5031,27 +4932,10 @@ The end.
         let temp_dir = TempDir::new()?;
         let output_path = temp_dir.path().join("shot.png");
         let config = ScreenshotConfig {
-            output_path: output_path.clone(),
-            viewport_width: 100.0,
-            viewport_height: 80.0,
             content_only: true,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(output_path.clone())
         };
-        let snapshot = ScreenshotSnapshot {
-            config,
-            content_rect: None,
-            pixels_per_point: 1.0,
-            stable_frames: 0,
-            timed_out: false,
-            pending_renders: false,
-            last_scroll_offset: None,
-            started: std::time::Instant::now(),
-        };
+        let snapshot = test_screenshot_snapshot(config);
         let image = egui::ColorImage::new([10, 10], Color32::from_rgb(10, 20, 30));
         MarkdownViewerApp::save_screenshot_image(&image, &snapshot)?;
         assert!(output_path.exists());
@@ -5063,29 +4947,15 @@ The end.
         let temp_dir = TempDir::new()?;
         let output_path = temp_dir.path().join("shot.png");
         let config = ScreenshotConfig {
-            output_path: output_path.clone(),
-            viewport_width: 100.0,
-            viewport_height: 80.0,
             content_only: true,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(output_path.clone())
         };
         let snapshot = ScreenshotSnapshot {
-            config,
             content_rect: Some(egui::Rect::from_min_max(
                 egui::pos2(2.0, 2.0),
                 egui::pos2(8.0, 2.0),
             )),
-            pixels_per_point: 1.0,
-            stable_frames: 0,
-            timed_out: false,
-            pending_renders: false,
-            last_scroll_offset: None,
-            started: std::time::Instant::now(),
+            ..test_screenshot_snapshot(config)
         };
         let image = egui::ColorImage::new([10, 10], Color32::from_rgb(10, 20, 30));
         MarkdownViewerApp::save_screenshot_image(&image, &snapshot)?;
@@ -5097,28 +4967,8 @@ The end.
 
     #[test]
     fn test_save_screenshot_image_empty_output_path_errors() {
-        let config = ScreenshotConfig {
-            output_path: PathBuf::new(),
-            viewport_width: 100.0,
-            viewport_height: 80.0,
-            content_only: false,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
-        };
-        let snapshot = ScreenshotSnapshot {
-            config,
-            content_rect: None,
-            pixels_per_point: 1.0,
-            stable_frames: 0,
-            timed_out: false,
-            pending_renders: false,
-            last_scroll_offset: None,
-            started: std::time::Instant::now(),
-        };
+        let config = test_screenshot_config(PathBuf::new());
+        let snapshot = test_screenshot_snapshot(config);
         let image = egui::ColorImage::new([10, 10], Color32::from_rgb(10, 20, 30));
         assert!(MarkdownViewerApp::save_screenshot_image(&image, &snapshot).is_err());
     }
@@ -5129,60 +4979,34 @@ The end.
         let image = egui::ColorImage::new([10, 10], Color32::from_rgb(10, 20, 30));
 
         let make_config = |name: &str| ScreenshotConfig {
-            output_path: temp_dir.path().join(name),
-            viewport_width: 100.0,
-            viewport_height: 80.0,
             content_only: true,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(temp_dir.path().join(name))
         };
 
         let snapshot_y = ScreenshotSnapshot {
-            config: make_config("shot_y.png"),
             content_rect: Some(egui::Rect::from_min_max(
                 egui::pos2(0.0, 2.0),
                 egui::pos2(10.0, 9.0),
             )),
-            pixels_per_point: 1.0,
-            stable_frames: 0,
-            timed_out: false,
-            pending_renders: false,
-            last_scroll_offset: None,
-            started: std::time::Instant::now(),
+            ..test_screenshot_snapshot(make_config("shot_y.png"))
         };
         MarkdownViewerApp::save_screenshot_image(&image, &snapshot_y)?;
 
         let snapshot_w = ScreenshotSnapshot {
-            config: make_config("shot_w.png"),
             content_rect: Some(egui::Rect::from_min_max(
                 egui::pos2(0.0, 0.0),
                 egui::pos2(6.0, 10.0),
             )),
-            pixels_per_point: 1.0,
-            stable_frames: 0,
-            timed_out: false,
-            pending_renders: false,
-            last_scroll_offset: None,
-            started: std::time::Instant::now(),
+            ..test_screenshot_snapshot(make_config("shot_w.png"))
         };
         MarkdownViewerApp::save_screenshot_image(&image, &snapshot_w)?;
 
         let snapshot_h = ScreenshotSnapshot {
-            config: make_config("shot_h.png"),
             content_rect: Some(egui::Rect::from_min_max(
                 egui::pos2(0.0, 0.0),
                 egui::pos2(10.0, 6.0),
             )),
-            pixels_per_point: 1.0,
-            stable_frames: 0,
-            timed_out: false,
-            pending_renders: false,
-            last_scroll_offset: None,
-            started: std::time::Instant::now(),
+            ..test_screenshot_snapshot(make_config("shot_h.png"))
         };
         MarkdownViewerApp::save_screenshot_image(&image, &snapshot_h)?;
 
@@ -5196,18 +5020,7 @@ The end.
     fn test_handle_screenshot_event_saves_file() -> Result<()> {
         let temp_dir = tempfile::TempDir::new()?;
         let output_path = temp_dir.path().join("shot.png");
-        let config = ScreenshotConfig {
-            output_path: output_path.clone(),
-            viewport_width: 40.0,
-            viewport_height: 30.0,
-            content_only: false,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
-        };
+        let config = test_screenshot_config(output_path.clone());
 
         let mut app = MarkdownViewerApp::new();
         app.set_screenshot_mode(config);
@@ -5237,90 +5050,18 @@ The end.
 
         let mut input = default_input();
         input.events.extend([
-            egui::Event::Key {
-                key: egui::Key::F,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::CTRL,
-            },
-            egui::Event::Key {
-                key: egui::Key::R,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::CTRL,
-            },
-            egui::Event::Key {
-                key: egui::Key::E,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::CTRL,
-            },
-            egui::Event::Key {
-                key: egui::Key::Plus,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::CTRL,
-            },
-            egui::Event::Key {
-                key: egui::Key::Minus,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::CTRL,
-            },
-            egui::Event::Key {
-                key: egui::Key::Num0,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::CTRL,
-            },
-            egui::Event::Key {
-                key: egui::Key::ArrowLeft,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::ALT,
-            },
-            egui::Event::Key {
-                key: egui::Key::ArrowRight,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::ALT,
-            },
-            egui::Event::Key {
-                key: egui::Key::F3,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::NONE,
-            },
-            egui::Event::Key {
-                key: egui::Key::F3,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::SHIFT,
-            },
-            egui::Event::Key {
-                key: egui::Key::F11,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::NONE,
-            },
-            egui::Event::Key {
-                key: egui::Key::F5,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::NONE,
-            },
+            key_event(egui::Key::F, egui::Modifiers::CTRL),
+            key_event(egui::Key::R, egui::Modifiers::CTRL),
+            key_event(egui::Key::E, egui::Modifiers::CTRL),
+            key_event(egui::Key::Plus, egui::Modifiers::CTRL),
+            key_event(egui::Key::Minus, egui::Modifiers::CTRL),
+            key_event(egui::Key::Num0, egui::Modifiers::CTRL),
+            key_event(egui::Key::ArrowLeft, egui::Modifiers::ALT),
+            key_event(egui::Key::ArrowRight, egui::Modifiers::ALT),
+            key_event(egui::Key::F3, egui::Modifiers::NONE),
+            key_event(egui::Key::F3, egui::Modifiers::SHIFT),
+            key_event(egui::Key::F11, egui::Modifiers::NONE),
+            key_event(egui::Key::F5, egui::Modifiers::NONE),
         ]);
 
         let ctx = egui::Context::default();
@@ -5342,91 +5083,28 @@ The end.
         let mut app = MarkdownViewerApp::new();
         let ctx = egui::Context::default();
 
-        let mut input = default_input();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::PageUp,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
-        let _ = ctx.run(input, |ctx| {
-            app.handle_shortcuts(ctx);
-        });
-        assert!(matches!(app.nav_request, Some(NavigationRequest::PageUp)));
-
-        app.nav_request = None;
-        let mut input = default_input();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::PageDown,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
-        let _ = ctx.run(input, |ctx| {
-            app.handle_shortcuts(ctx);
-        });
-        assert!(matches!(app.nav_request, Some(NavigationRequest::PageDown)));
-
-        app.nav_request = None;
-        let mut input = default_input();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::Home,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
-        let _ = ctx.run(input, |ctx| {
-            app.handle_shortcuts(ctx);
-        });
-        assert!(matches!(app.nav_request, Some(NavigationRequest::Top)));
-
-        app.nav_request = None;
-        let mut input = default_input();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::End,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
-        let _ = ctx.run(input, |ctx| {
-            app.handle_shortcuts(ctx);
-        });
-        assert!(matches!(app.nav_request, Some(NavigationRequest::Bottom)));
-
-        app.nav_request = None;
-        let mut input = default_input();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::ArrowUp,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
-        let _ = ctx.run(input, |ctx| {
-            app.handle_shortcuts(ctx);
-        });
-        assert!(matches!(app.nav_request, Some(NavigationRequest::ScrollUp)));
-
-        app.nav_request = None;
-        let mut input = default_input();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::ArrowDown,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
-        let _ = ctx.run(input, |ctx| {
-            app.handle_shortcuts(ctx);
-        });
-        assert!(matches!(
-            app.nav_request,
-            Some(NavigationRequest::ScrollDown)
-        ));
+        let nav_cases = [
+            (egui::Key::PageUp, NavigationRequest::PageUp),
+            (egui::Key::PageDown, NavigationRequest::PageDown),
+            (egui::Key::Home, NavigationRequest::Top),
+            (egui::Key::End, NavigationRequest::Bottom),
+            (egui::Key::ArrowUp, NavigationRequest::ScrollUp),
+            (egui::Key::ArrowDown, NavigationRequest::ScrollDown),
+        ];
+        for (key, expected) in nav_cases {
+            app.nav_request = None;
+            let mut input = default_input();
+            input.events.push(key_event(key, egui::Modifiers::NONE));
+            let _ = ctx.run(input, |ctx| {
+                app.handle_shortcuts(ctx);
+            });
+            assert_eq!(
+                std::mem::discriminant(&app.nav_request),
+                std::mem::discriminant(&Some(expected)),
+                "failed for key {:?}",
+                key,
+            );
+        }
     }
 
     #[test]
@@ -5439,13 +5117,7 @@ The end.
         app.pending_scroll_to_element = Some(1);
 
         let mut input = default_input();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::Escape,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
+        input.events.push(key_event(egui::Key::Escape, egui::Modifiers::NONE));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -5513,13 +5185,7 @@ The end.
         let mut app = MarkdownViewerApp::new();
         let mut input = default_input();
         input.modifiers = egui::Modifiers::CTRL;
-        input.events.push(egui::Event::Key {
-            key: egui::Key::A,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::CTRL,
-        });
+        input.events.push(key_event(egui::Key::A, egui::Modifiers::CTRL));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -5535,20 +5201,8 @@ The end.
 
         let mut input = default_input();
         input.events.extend([
-            egui::Event::Key {
-                key: egui::Key::PageUp,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::NONE,
-            },
-            egui::Event::Key {
-                key: egui::Key::PageDown,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::NONE,
-            },
+            key_event(egui::Key::PageUp, egui::Modifiers::NONE),
+            key_event(egui::Key::PageDown, egui::Modifiers::NONE),
         ]);
 
         let ctx = egui::Context::default();
@@ -5589,16 +5243,8 @@ The end.
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let output_path = temp_dir.path().join("shot.png");
         let config = ScreenshotConfig {
-            output_path: output_path.clone(),
-            viewport_width: 100.0,
-            viewport_height: 80.0,
             content_only: true,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(output_path.clone())
         };
 
         assert_eq!(config.metadata_path(), output_path.with_extension("json"));
@@ -5760,17 +5406,10 @@ The end.
     #[test]
     fn test_move_raw_cursor_lines_up_and_down() {
         let mut app = MarkdownViewerApp::new();
-        app.view_mode = ViewMode::Raw;
-        app.write_enabled = true;
-        app.raw_buffer = "Line 1\nLine 2\nLine 3".to_string();
-        app.current_content = app.raw_buffer.clone();
+        setup_raw_write_mode(&mut app, "Line 1\nLine 2\nLine 3");
 
         let ctx = egui::Context::default();
-        let editor_id = egui::Id::new("raw_editor");
-        let mut state = egui::text_edit::TextEditState::default();
-        let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(0));
-        state.cursor.set_char_range(Some(cr));
-        state.store(&ctx, editor_id);
+        store_raw_editor_cursor(&ctx, 0);
 
         app.move_raw_cursor_lines(&ctx, 1);
         let down_idx = app.raw_cursor.unwrap_or(0);
@@ -5810,10 +5449,7 @@ The end.
     #[test]
     fn test_move_raw_cursor_lines_without_text_state() {
         let mut app = MarkdownViewerApp::new();
-        app.view_mode = ViewMode::Raw;
-        app.write_enabled = true;
-        app.raw_buffer = "Line".to_string();
-        app.current_content = app.raw_buffer.clone();
+        setup_raw_write_mode(&mut app, "Line");
 
         let ctx = egui::Context::default();
         app.move_raw_cursor_lines(&ctx, 1);
@@ -5824,17 +5460,11 @@ The end.
     #[test]
     fn test_move_raw_cursor_lines_uses_raw_cursor_when_char_range_missing() {
         let mut app = MarkdownViewerApp::new();
-        app.view_mode = ViewMode::Raw;
-        app.write_enabled = true;
-        app.raw_buffer = "Line 1\nLine 2\nLine 3".to_string();
-        app.current_content = app.raw_buffer.clone();
+        setup_raw_write_mode(&mut app, "Line 1\nLine 2\nLine 3");
         app.raw_cursor = Some(7);
 
         let ctx = egui::Context::default();
-        let editor_id = egui::Id::new("raw_editor");
-        let mut state = egui::text_edit::TextEditState::default();
-        state.cursor.set_char_range(None);
-        state.store(&ctx, editor_id);
+        store_raw_editor_no_cursor(&ctx);
 
         app.move_raw_cursor_lines(&ctx, 1);
 
@@ -5844,17 +5474,10 @@ The end.
     #[test]
     fn test_move_raw_cursor_lines_negative_at_start_no_loop() {
         let mut app = MarkdownViewerApp::new();
-        app.view_mode = ViewMode::Raw;
-        app.write_enabled = true;
-        app.raw_buffer = "Line 1\nLine 2".to_string();
-        app.current_content = app.raw_buffer.clone();
+        setup_raw_write_mode(&mut app, "Line 1\nLine 2");
 
         let ctx = egui::Context::default();
-        let editor_id = egui::Id::new("raw_editor");
-        let mut state = egui::text_edit::TextEditState::default();
-        let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(0));
-        state.cursor.set_char_range(Some(cr));
-        state.store(&ctx, editor_id);
+        store_raw_editor_cursor(&ctx, 0);
 
         app.move_raw_cursor_lines(&ctx, -1);
         assert_eq!(app.raw_cursor, Some(0));
@@ -5863,17 +5486,10 @@ The end.
     #[test]
     fn test_move_raw_cursor_lines_down_without_newline() {
         let mut app = MarkdownViewerApp::new();
-        app.view_mode = ViewMode::Raw;
-        app.write_enabled = true;
-        app.raw_buffer = "Line".to_string();
-        app.current_content = app.raw_buffer.clone();
+        setup_raw_write_mode(&mut app, "Line");
 
         let ctx = egui::Context::default();
-        let editor_id = egui::Id::new("raw_editor");
-        let mut state = egui::text_edit::TextEditState::default();
-        let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(0));
-        state.cursor.set_char_range(Some(cr));
-        state.store(&ctx, editor_id);
+        store_raw_editor_cursor(&ctx, 0);
 
         app.move_raw_cursor_lines(&ctx, 1);
         assert_eq!(app.raw_cursor, Some(app.raw_buffer.len()));
@@ -5882,17 +5498,10 @@ The end.
     #[test]
     fn test_move_raw_cursor_lines_down_at_end_no_loop() {
         let mut app = MarkdownViewerApp::new();
-        app.view_mode = ViewMode::Raw;
-        app.write_enabled = true;
-        app.raw_buffer = "Line 1\nLine 2".to_string();
-        app.current_content = app.raw_buffer.clone();
+        setup_raw_write_mode(&mut app, "Line 1\nLine 2");
 
         let ctx = egui::Context::default();
-        let editor_id = egui::Id::new("raw_editor");
-        let mut state = egui::text_edit::TextEditState::default();
-        let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(app.raw_buffer.len()));
-        state.cursor.set_char_range(Some(cr));
-        state.store(&ctx, editor_id);
+        store_raw_editor_cursor(&ctx, app.raw_buffer.len());
 
         app.move_raw_cursor_lines(&ctx, 1);
         assert_eq!(app.raw_cursor, Some(app.raw_buffer.len()));
@@ -5908,20 +5517,8 @@ The end.
 
         let mut input = default_input();
         input.events.extend([
-            egui::Event::Key {
-                key: egui::Key::O,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::CTRL,
-            },
-            egui::Event::Key {
-                key: egui::Key::O,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::ALT,
-            },
+            key_event(egui::Key::O, egui::Modifiers::CTRL),
+            key_event(egui::Key::O, egui::Modifiers::ALT),
         ]);
 
         let ctx = egui::Context::default();
@@ -5941,34 +5538,10 @@ The end.
 
         let mut input = default_input();
         input.events.extend([
-            egui::Event::Key {
-                key: egui::Key::W,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::ALT,
-            },
-            egui::Event::Key {
-                key: egui::Key::W,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::CTRL,
-            },
-            egui::Event::Key {
-                key: egui::Key::Q,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::ALT,
-            },
-            egui::Event::Key {
-                key: egui::Key::Q,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::CTRL,
-            },
+            key_event(egui::Key::W, egui::Modifiers::ALT),
+            key_event(egui::Key::W, egui::Modifiers::CTRL),
+            key_event(egui::Key::Q, egui::Modifiers::ALT),
+            key_event(egui::Key::Q, egui::Modifiers::CTRL),
         ]);
 
         let ctx = egui::Context::default();
@@ -5988,13 +5561,7 @@ The end.
         app.current_content = "Saved".to_string();
 
         let mut input = default_input();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::S,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::CTRL,
-        });
+        input.events.push(key_event(egui::Key::S, egui::Modifiers::CTRL));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -6158,13 +5725,7 @@ The end.
         });
 
         let mut input = default_input();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::Enter,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
+        input.events.push(key_event(egui::Key::Enter, egui::Modifiers::NONE));
         let _ = ctx.run(input, |ctx| {
             app.render_search_dialog(ctx);
         });
@@ -6224,7 +5785,7 @@ The end.
     fn test_handle_file_drop_scan_error() -> Result<()> {
         let mut app = MarkdownViewerApp::new();
         let temp_dir = tempfile::TempDir::new()?;
-        let _forced = ForcedScanError::new();
+        let _forced = force_scan_error();
 
         app.handle_file_drop(vec![temp_dir.path().to_path_buf()]);
 
@@ -6238,7 +5799,7 @@ The end.
         let temp_dir = tempfile::TempDir::new()?;
         let file_path = temp_dir.path().join("fail.md");
         std::fs::write(&file_path, "# Fail")?;
-        let _forced = ForcedLoadError::new();
+        let _forced = force_load_error();
 
         app.handle_file_drop(vec![file_path]);
 
@@ -6255,13 +5816,7 @@ The end.
         app.last_match_index = None;
 
         let mut input = default_input();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::F,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::CTRL,
-        });
+        input.events.push(key_event(egui::Key::F, egui::Modifiers::CTRL));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -6277,13 +5832,7 @@ The end.
         app.last_match_index = Some(2);
 
         let mut input = default_input();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::F,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::CTRL,
-        });
+        input.events.push(key_event(egui::Key::F, egui::Modifiers::CTRL));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -6340,13 +5889,7 @@ The end.
         app.current_content = "Data".to_string();
 
         let mut input = default_input();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::S,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::CTRL,
-        });
+        input.events.push(key_event(egui::Key::S, egui::Modifiers::CTRL));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -6367,11 +5910,7 @@ The end.
 
         app.view_mode = ViewMode::Raw;
         app.write_enabled = true;
-        let editor_id = egui::Id::new("raw_editor");
-        let mut state = egui::text_edit::TextEditState::default();
-        let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(3));
-        state.cursor.set_char_range(Some(cr));
-        state.store(&ctx, editor_id);
+        store_raw_editor_cursor(&ctx, 3);
 
         app.move_raw_cursor_lines(&ctx, 0);
         app.move_raw_cursor_lines(&ctx, 2);
@@ -6552,10 +6091,7 @@ The end.
     #[test]
     fn test_update_impl_raw_cursor_restore_without_state() {
         let mut app = MarkdownViewerApp::new();
-        app.view_mode = ViewMode::Raw;
-        app.write_enabled = true;
-        app.raw_buffer = "Line 1\nLine 2".to_string();
-        app.current_content = app.raw_buffer.clone();
+        setup_raw_write_mode(&mut app, "Line 1\nLine 2");
         app.raw_cursor = Some(3);
 
         let ctx = egui::Context::default();
@@ -6565,16 +6101,10 @@ The end.
     #[test]
     fn test_update_impl_raw_cursor_without_char_range() {
         let mut app = MarkdownViewerApp::new();
-        app.view_mode = ViewMode::Raw;
-        app.write_enabled = true;
-        app.raw_buffer = "Line".to_string();
-        app.current_content = app.raw_buffer.clone();
+        setup_raw_write_mode(&mut app, "Line");
 
         let ctx = egui::Context::default();
-        let editor_id = egui::Id::new("raw_editor");
-        let mut state = egui::text_edit::TextEditState::default();
-        state.cursor.set_char_range(None);
-        state.store(&ctx, editor_id);
+        store_raw_editor_no_cursor(&ctx);
 
         run_app_frame(&mut app, &ctx, default_input());
 
@@ -6630,16 +6160,9 @@ The end.
     fn test_update_impl_screenshot_scroll_offset() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let config = ScreenshotConfig {
-            output_path: temp_dir.path().join("shot.png"),
             viewport_width: 80.0,
             viewport_height: 60.0,
-            content_only: false,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(temp_dir.path().join("shot.png"))
         };
         let mut app = MarkdownViewerApp::new();
         app.screenshot = Some(ScreenshotState::new(config));
@@ -6655,27 +6178,11 @@ The end.
         let temp_dir = tempfile::TempDir::new()?;
         let nested = temp_dir.path().join("nested").join("shot.png");
         let config = ScreenshotConfig {
-            output_path: nested.clone(),
             viewport_width: 40.0,
             viewport_height: 30.0,
-            content_only: false,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(nested.clone())
         };
-        let snapshot = ScreenshotSnapshot {
-            config,
-            content_rect: None,
-            pixels_per_point: 1.0,
-            stable_frames: 0,
-            timed_out: false,
-            pending_renders: false,
-            last_scroll_offset: None,
-            started: Instant::now(),
-        };
+        let snapshot = test_screenshot_snapshot(config);
         let image = egui::ColorImage::new([40, 30], Color32::WHITE);
         MarkdownViewerApp::save_screenshot_image(&image, &snapshot)?;
         assert!(nested.exists());
@@ -6690,27 +6197,11 @@ The end.
         std::fs::write(&parent_file, "data")?;
         let output_path = parent_file.join("shot.png");
         let config = ScreenshotConfig {
-            output_path,
             viewport_width: 40.0,
             viewport_height: 30.0,
-            content_only: false,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(output_path)
         };
-        let snapshot = ScreenshotSnapshot {
-            config,
-            content_rect: None,
-            pixels_per_point: 1.0,
-            stable_frames: 0,
-            timed_out: false,
-            pending_renders: false,
-            last_scroll_offset: None,
-            started: Instant::now(),
-        };
+        let snapshot = test_screenshot_snapshot(config);
         let image = egui::ColorImage::new([40, 30], Color32::WHITE);
         assert!(MarkdownViewerApp::save_screenshot_image(&image, &snapshot).is_err());
         Ok(())
@@ -6722,27 +6213,11 @@ The end.
         let output_path = temp_dir.path().join("shot.png");
         std::fs::create_dir(output_path.with_extension("json"))?;
         let config = ScreenshotConfig {
-            output_path: output_path.clone(),
             viewport_width: 40.0,
             viewport_height: 30.0,
-            content_only: false,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(output_path.clone())
         };
-        let snapshot = ScreenshotSnapshot {
-            config,
-            content_rect: None,
-            pixels_per_point: 1.0,
-            stable_frames: 0,
-            timed_out: false,
-            pending_renders: false,
-            last_scroll_offset: None,
-            started: Instant::now(),
-        };
+        let snapshot = test_screenshot_snapshot(config);
         let image = egui::ColorImage::new([40, 30], Color32::WHITE);
         assert!(MarkdownViewerApp::save_screenshot_image(&image, &snapshot).is_err());
         assert!(output_path.exists());
@@ -6755,13 +6230,7 @@ The end.
         let ctx = egui::Context::default();
 
         let mut input = default_input();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::A,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
+        input.events.push(key_event(egui::Key::A, egui::Modifiers::NONE));
         let _ = ctx.run(input, |ctx| {
             app.handle_screenshot_events(ctx);
         });
@@ -6778,16 +6247,9 @@ The end.
 
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let config = ScreenshotConfig {
-            output_path: temp_dir.path().to_path_buf(),
             viewport_width: 40.0,
             viewport_height: 30.0,
-            content_only: false,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(temp_dir.path().to_path_buf())
         };
         app.screenshot = Some(ScreenshotState::new(config));
         let state = app.screenshot.as_mut().expect("screenshot state");
@@ -6806,16 +6268,11 @@ The end.
     #[test]
     fn test_screenshot_state_helpers() {
         let config = ScreenshotConfig {
-            output_path: PathBuf::from("dummy.png"),
             viewport_width: 120.0,
-            viewport_height: 80.0,
-            content_only: false,
             scroll_ratio: Some(0.5),
             wait_ms: 500,
             settle_frames: 2,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(PathBuf::from("dummy.png"))
         };
         let mut state = ScreenshotState::new(config);
         assert!(!state.scroll_ready());
@@ -6844,16 +6301,10 @@ The end.
     #[test]
     fn test_record_scroll_without_ratio_returns_false() {
         let config = ScreenshotConfig {
-            output_path: PathBuf::from("dummy.png"),
             viewport_width: 120.0,
-            viewport_height: 80.0,
-            content_only: false,
-            scroll_ratio: None,
             wait_ms: 500,
             settle_frames: 2,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(PathBuf::from("dummy.png"))
         };
         let mut state = ScreenshotState::new(config);
         let snapshot = ScrollSnapshot {
@@ -6872,11 +6323,7 @@ The end.
         app.write_enabled = true;
 
         let ctx = egui::Context::default();
-        let editor_id = egui::Id::new("raw_editor");
-        let mut state = egui::text_edit::TextEditState::default();
-        let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(2));
-        state.cursor.set_char_range(Some(cr));
-        state.store(&ctx, editor_id);
+        store_raw_editor_cursor(&ctx, 2);
 
         app.toggle_write_mode(&ctx);
         assert!(!app.write_enabled);
@@ -6902,10 +6349,7 @@ The end.
         app.write_enabled = true;
 
         let ctx = egui::Context::default();
-        let editor_id = egui::Id::new("raw_editor");
-        let mut state = egui::text_edit::TextEditState::default();
-        state.cursor.set_char_range(None);
-        state.store(&ctx, editor_id);
+        store_raw_editor_no_cursor(&ctx);
 
         app.toggle_write_mode(&ctx);
         assert!(!app.write_enabled);
@@ -6915,17 +6359,10 @@ The end.
     #[test]
     fn test_move_raw_cursor_lines_moves_to_end() {
         let mut app = MarkdownViewerApp::new();
-        app.view_mode = ViewMode::Raw;
-        app.write_enabled = true;
-        app.raw_buffer = "Line 1\nLine 2".to_string();
-        app.current_content = app.raw_buffer.clone();
+        setup_raw_write_mode(&mut app, "Line 1\nLine 2");
 
         let ctx = egui::Context::default();
-        let editor_id = egui::Id::new("raw_editor");
-        let mut state = egui::text_edit::TextEditState::default();
-        let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(0));
-        state.cursor.set_char_range(Some(cr));
-        state.store(&ctx, editor_id);
+        store_raw_editor_cursor(&ctx, 0);
 
         app.move_raw_cursor_lines(&ctx, 2);
         assert_eq!(app.raw_cursor, Some(app.raw_buffer.len()));
@@ -7091,7 +6528,7 @@ The end.
     #[test]
     fn test_navigate_forward_pending_error() {
         let mut app = MarkdownViewerApp::new();
-        let _forced = ForcedLoadError::new();
+        let _forced = force_load_error();
         app.pending_files.push_back(PathBuf::from("missing.md"));
 
         assert!(app.navigate_forward());
@@ -7142,7 +6579,7 @@ The end.
         let open_path = temp_dir.path().join("open.md");
         std::fs::write(&open_path, "# Open")?;
         let _forced_path = ForcedDialogPaths::new(Some(open_path), None);
-        let _forced_load = ForcedLoadError::new();
+        let _forced_load = force_load_error();
 
         app.open_file_dialog();
         assert!(app
@@ -7159,11 +6596,7 @@ The end.
         app.write_enabled = true;
 
         let ctx = egui::Context::default();
-        let editor_id = egui::Id::new("raw_editor");
-        let mut state = egui::text_edit::TextEditState::default();
-        let cr = egui::text::CCursorRange::one(egui::text::CCursor::new(4));
-        state.cursor.set_char_range(Some(cr));
-        state.store(&ctx, editor_id);
+        store_raw_editor_cursor(&ctx, 4);
 
         app.toggle_view_mode(&ctx);
         assert_eq!(app.raw_cursor, Some(4));
@@ -7180,13 +6613,7 @@ The end.
 
         let mut input = default_input();
         input.modifiers = egui::Modifiers::SHIFT;
-        input.events.push(egui::Event::Key {
-            key: egui::Key::F3,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::SHIFT,
-        });
+        input.events.push(key_event(egui::Key::F3, egui::Modifiers::SHIFT));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -7205,13 +6632,7 @@ The end.
         app.search_query = "Nav".to_string();
 
         let mut input = default_input();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::F3,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
+        input.events.push(key_event(egui::Key::F3, egui::Modifiers::NONE));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -7235,13 +6656,7 @@ The end.
 
         let mut input = default_input();
         input.modifiers = egui::Modifiers::ALT;
-        input.events.push(egui::Event::Key {
-            key: egui::Key::F3,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::ALT,
-        });
+        input.events.push(key_event(egui::Key::F3, egui::Modifiers::ALT));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -7342,16 +6757,9 @@ The end.
     fn test_should_persist_window_state_screenshot_blocks() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let config = ScreenshotConfig {
-            output_path: temp_dir.path().join("shot.png"),
             viewport_width: 80.0,
             viewport_height: 60.0,
-            content_only: false,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(temp_dir.path().join("shot.png"))
         };
         let mut app = MarkdownViewerApp::new();
         app.screenshot = Some(ScreenshotState::new(config));
@@ -7496,16 +6904,9 @@ The end.
         let ctx = egui::Context::default();
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let config = ScreenshotConfig {
-            output_path: temp_dir.path().to_path_buf(),
             viewport_width: 40.0,
             viewport_height: 30.0,
-            content_only: false,
-            scroll_ratio: None,
-            wait_ms: 0,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(temp_dir.path().to_path_buf())
         };
         app.screenshot = Some(ScreenshotState::new(config));
 
@@ -7526,16 +6927,12 @@ The end.
     fn test_update_screenshot_state_requests_repaint() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let config = ScreenshotConfig {
-            output_path: temp_dir.path().join("shot.png"),
             viewport_width: 200.0,
             viewport_height: 100.0,
-            content_only: false,
             scroll_ratio: Some(0.5),
             wait_ms: 1000,
             settle_frames: 5,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(temp_dir.path().join("shot.png"))
         };
         let mut app = MarkdownViewerApp::new();
         app.screenshot = Some(ScreenshotState::new(config));
@@ -7548,16 +6945,10 @@ The end.
     fn test_update_screenshot_state_requested_done_skips_repaint() {
         let temp_dir = tempfile::TempDir::new().expect("temp dir");
         let config = ScreenshotConfig {
-            output_path: temp_dir.path().join("shot.png"),
             viewport_width: 200.0,
             viewport_height: 100.0,
-            content_only: false,
-            scroll_ratio: None,
             wait_ms: 1000,
-            settle_frames: 0,
-            zoom: 1.0,
-            theme: ScreenshotTheme::Light,
-            font_source: None,
+            ..test_screenshot_config(temp_dir.path().join("shot.png"))
         };
         let mut state = ScreenshotState::new(config);
         state.requested = true;
@@ -7807,13 +7198,7 @@ The end.
         });
         // Second frame with a key event to trigger the activity branch
         let mut input = default_input();
-        input.events.push(egui::Event::Key {
-            key: egui::Key::A,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        });
+        input.events.push(key_event(egui::Key::A, egui::Modifiers::NONE));
         let _ = ctx.run(input, |ctx| {
             app.update_impl(ctx);
         });

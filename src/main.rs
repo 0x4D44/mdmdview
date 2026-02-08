@@ -1,18 +1,20 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // Hide console in release mode
 
+// Main entry point for the MarkdownView application.
+//
+// A simple, standalone markdown viewer for Windows built with Rust and egui.
+// This application provides a clean interface for viewing markdown files with
+// syntax highlighting, embedded samples, and essential viewing features.
+
+use std::path::PathBuf;
+
 #[cfg(not(test))]
 use mdmdview::app::{ScreenshotConfig, ScreenshotTheme};
-/// Main entry point for the MarkdownView application
-///
-/// A simple, standalone markdown viewer for Windows built with Rust and egui.
-/// This application provides a clean interface for viewing markdown files with
-/// syntax highlighting, embedded samples, and essential viewing features.
 #[cfg(not(test))]
 use mdmdview::{load_window_state, sanitize_window_state, MarkdownViewerApp, APP_TITLE_PREFIX};
 #[cfg(not(test))]
 use std::path::Path;
-use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ThemeChoice {
@@ -61,11 +63,11 @@ where
             }
             "--width" => {
                 let value = next_value(&mut iter, "--width")?;
-                opts.width = Some(parse_f32("--width", &value)?);
+                opts.width = Some(parse_value("--width", &value)?);
             }
             "--height" => {
                 let value = next_value(&mut iter, "--height")?;
-                opts.height = Some(parse_f32("--height", &value)?);
+                opts.height = Some(parse_value("--height", &value)?);
             }
             "--theme" => {
                 let value = next_value(&mut iter, "--theme")?;
@@ -73,21 +75,21 @@ where
             }
             "--zoom" => {
                 let value = next_value(&mut iter, "--zoom")?;
-                opts.zoom = Some(parse_f32("--zoom", &value)?);
+                opts.zoom = Some(parse_value("--zoom", &value)?);
             }
             "--content-only" => opts.content_only = true,
             "--scroll" => {
                 let value = next_value(&mut iter, "--scroll")?;
-                let ratio = parse_f32("--scroll", &value)?.clamp(0.0, 1.0);
+                let ratio = parse_value::<f32>("--scroll", &value)?.clamp(0.0, 1.0);
                 opts.scroll = Some(ratio);
             }
             "--wait-ms" => {
                 let value = next_value(&mut iter, "--wait-ms")?;
-                opts.wait_ms = Some(parse_u64("--wait-ms", &value)?);
+                opts.wait_ms = Some(parse_value("--wait-ms", &value)?);
             }
             "--settle-frames" => {
                 let value = next_value(&mut iter, "--settle-frames")?;
-                opts.settle_frames = Some(parse_u32("--settle-frames", &value)?);
+                opts.settle_frames = Some(parse_value("--settle-frames", &value)?);
             }
             "--test-fonts" => {
                 let value = next_value(&mut iter, "--test-fonts")?;
@@ -133,29 +135,15 @@ fn parse_hex_color32(value: &str) -> Option<egui::Color32> {
 }
 
 fn screenshot_background_color() -> egui::Color32 {
-    if let Ok(hex) = std::env::var("MDMDVIEW_MERMAID_MAIN_BKG") {
-        if let Some(color) = parse_hex_color32(&hex) {
-            return color;
-        }
-    }
-    egui::Color32::from_rgb(255, 248, 219)
+    std::env::var("MDMDVIEW_MERMAID_MAIN_BKG")
+        .ok()
+        .and_then(|hex| parse_hex_color32(&hex))
+        .unwrap_or(egui::Color32::from_rgb(255, 248, 219))
 }
 
-fn parse_f32(flag: &str, value: &str) -> Result<f32, String> {
+fn parse_value<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, String> {
     value
-        .parse::<f32>()
-        .map_err(|_| format!("Invalid {flag} value: {value}"))
-}
-
-fn parse_u32(flag: &str, value: &str) -> Result<u32, String> {
-    value
-        .parse::<u32>()
-        .map_err(|_| format!("Invalid {flag} value: {value}"))
-}
-
-fn parse_u64(flag: &str, value: &str) -> Result<u64, String> {
-    value
-        .parse::<u64>()
+        .parse::<T>()
         .map_err(|_| format!("Invalid {flag} value: {value}"))
 }
 
@@ -237,7 +225,6 @@ fn load_fonts_from_dir(ctx: &egui::Context, dir: &Path) -> Result<(), String> {
 /// Application entry point
 #[cfg(not(test))]
 fn main() -> Result<(), eframe::Error> {
-    // Configure logging for debugging (only in debug builds)
     #[cfg(debug_assertions)]
     env_logger::init();
 
@@ -262,7 +249,6 @@ fn main() -> Result<(), eframe::Error> {
     let window_width = cli.width.unwrap_or(default_width);
     let window_height = cli.height.unwrap_or(default_height);
 
-    // Set up eframe options for the native window
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(format!("{APP_TITLE_PREFIX} - A Simple Markdown Viewer"))
         .with_inner_size(egui::Vec2::new(window_width, window_height))
@@ -278,7 +264,6 @@ fn main() -> Result<(), eframe::Error> {
         // Start hidden to avoid white flash before dark theme is applied
         .with_visible(screenshot_enabled);
 
-    // Restore previous window position/size if available
     if !screenshot_enabled {
         if let Some(ws) = load_window_state() {
             if let Some(ws) = sanitize_window_state(ws) {
@@ -326,7 +311,6 @@ fn main() -> Result<(), eframe::Error> {
         None
     };
 
-    // Launch the application
     eframe::run_native(
         APP_TITLE_PREFIX,
         native_options,
@@ -346,7 +330,6 @@ fn main() -> Result<(), eframe::Error> {
                 cc.egui_ctx.set_visuals(visuals);
             }
 
-            // Configure egui styling for better markdown display
             configure_egui_style(&cc.egui_ctx);
             if let Some(font_dir) = test_fonts.as_ref() {
                 if let Err(err) = load_fonts_from_dir(&cc.egui_ctx, font_dir) {
@@ -362,16 +345,13 @@ fn main() -> Result<(), eframe::Error> {
                 app.set_screenshot_mode(config);
             }
 
-            // Load initial file if provided via command line
             if let Some(file_path) = initial_file {
                 if file_path.exists() && file_path.is_file() {
                     if let Err(e) = app.load_file(file_path, true) {
-                        eprintln!("Failed to load file: {}", e);
-                        // Continue with default welcome screen
+                        eprintln!("Failed to load file: {e}");
                     }
                 } else {
                     eprintln!("File not found: {}", file_path.display());
-                    // Continue with default welcome screen
                 }
             }
 
@@ -458,31 +438,25 @@ fn create_app_icon() -> egui::IconData {
 fn configure_egui_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
 
-    // Configure spacing for better readability
     style.spacing.item_spacing = egui::Vec2::new(8.0, 8.0);
     style.spacing.window_margin = egui::Margin::same(8.0);
     style.spacing.menu_margin = egui::Margin::same(6.0);
 
-    // Configure interaction settings
     style.interaction.resize_grab_radius_side = 8.0;
     style.interaction.resize_grab_radius_corner = 12.0;
 
-    // Configure visuals for better contrast with black background
     style.visuals.window_rounding = egui::Rounding::same(4.0);
     style.visuals.menu_rounding = egui::Rounding::same(4.0);
 
-    // Set to true black background for maximum contrast
+    // True black background for maximum contrast in dark mode
     if style.visuals.dark_mode {
         style.visuals.window_fill = egui::Color32::BLACK;
         style.visuals.panel_fill = egui::Color32::BLACK;
         style.visuals.faint_bg_color = egui::Color32::from_gray(20);
         style.visuals.extreme_bg_color = egui::Color32::BLACK;
-        // The text color will be handled by egui's theme system
     }
 
     ctx.set_style(style);
-
-    // Add system font fallback for symbols not covered by default fonts or Twemoji
     configure_font_fallbacks(ctx);
 }
 
@@ -514,24 +488,19 @@ fn configure_font_fallbacks(ctx: &egui::Context) {
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     let symbol_font_paths: &[&str] = &[];
 
-    // Try to load the first available symbol font
-    for (i, path) in symbol_font_paths.iter().enumerate() {
-        if let Ok(font_data) = std::fs::read(path) {
-            let font_name = format!("symbol_fallback_{}", i);
-            fonts
-                .font_data
-                .insert(font_name.clone(), egui::FontData::from_owned(font_data));
+    // Load the first available symbol font as fallback
+    let font_data = symbol_font_paths.iter().find_map(|p| std::fs::read(p).ok());
+    if let Some(font_data) = font_data {
+        let font_name = "symbol_fallback".to_string();
+        fonts
+            .font_data
+            .insert(font_name.clone(), egui::FontData::from_owned(font_data));
 
-            // Add as last fallback for both proportional and monospace
-            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                family.push(font_name.clone());
-            }
-            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                family.push(font_name);
-            }
-
-            // One fallback font is enough
-            break;
+        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            family.push(font_name.clone());
+        }
+        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+            family.push(font_name);
         }
     }
 
@@ -598,14 +567,6 @@ mod tests {
         assert_eq!(icon.width, 32);
         assert_eq!(icon.height, 32);
         assert_eq!(icon.rgba.len(), 32 * 32 * 4); // RGBA format
-    }
-
-    #[test]
-    fn test_main_function_setup() {
-        // Test that the main function components work
-        // This is a basic smoke test
-        let icon = create_app_icon();
-        assert!(!icon.rgba.is_empty());
     }
 
     #[test]
@@ -835,11 +796,13 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_unsigned_helpers() {
-        assert_eq!(parse_u32("--width", "12").expect("u32"), 12);
-        assert!(parse_u32("--width", "nope").is_err());
-        assert_eq!(parse_u64("--timeout", "42").expect("u64"), 42);
-        assert!(parse_u64("--timeout", "-1").is_err());
+    fn test_parse_value_helpers() {
+        assert_eq!(parse_value::<u32>("--width", "12").expect("u32"), 12);
+        assert!(parse_value::<u32>("--width", "nope").is_err());
+        assert_eq!(parse_value::<u64>("--timeout", "42").expect("u64"), 42);
+        assert!(parse_value::<u64>("--timeout", "-1").is_err());
+        assert_eq!(parse_value::<f32>("--zoom", "1.5").expect("f32"), 1.5);
+        assert!(parse_value::<f32>("--zoom", "abc").is_err());
     }
 
     #[test]
@@ -865,10 +828,8 @@ mod tests {
 
     #[test]
     fn test_env_guard_restores_previous_value() {
-        let key = "MDMDVIEW_MERMAID_MAIN_BKG";
+        let key = "MDMDVIEW_TEST_GUARD_RESTORE";
         let _lock = env_lock();
-        std::env::set_var(key, "preexisting");
-        let previous = std::env::var(key).ok();
         {
             std::env::set_var(key, "orig");
             let guard = EnvGuard {
@@ -876,26 +837,13 @@ mod tests {
                 original: Some("orig".to_string()),
                 _lock,
             };
-            std::env::set_var(key, "new");
+            std::env::set_var(key, "overwritten");
             drop(guard);
         }
         assert_eq!(std::env::var(key).ok().as_deref(), Some("orig"));
+        // Clean up
         let _lock = env_lock();
-        for previous in [previous, None] {
-            match previous {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-        let missing_key = "MDMDVIEW_MERMAID_MAIN_BKG_MISSING";
-        std::env::remove_var(missing_key);
-        let previous = std::env::var(missing_key).ok();
-        for previous in [previous, Some("temp".to_string())] {
-            match previous {
-                Some(value) => std::env::set_var(missing_key, value),
-                None => std::env::remove_var(missing_key),
-            }
-        }
+        std::env::remove_var(key);
     }
 
     #[test]
