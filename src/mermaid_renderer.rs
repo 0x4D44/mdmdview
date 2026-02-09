@@ -1,5 +1,6 @@
 #[cfg(feature = "mermaid-quickjs")]
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
+use crate::ThemeColors;
 use egui::{Color32, RichText, Stroke};
 #[cfg(feature = "mermaid-quickjs")]
 use std::cell::{Cell, RefCell};
@@ -766,15 +767,15 @@ impl MermaidRenderer {
 
         if preference == MermaidRenderPreference::Off {
             egui::Frame::none()
-                .fill(Color32::from_rgb(25, 25, 25))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                .fill(ThemeColors::current(ui.visuals().dark_mode).box_bg)
+                .stroke(Stroke::new(1.0, ThemeColors::current(ui.visuals().dark_mode).box_border))
                 .inner_margin(8.0)
                 .show(ui, |ui| {
                     ui.label(
                         RichText::new(
                             "Mermaid rendering is disabled. Set MDMDVIEW_MERMAID_RENDERER=embedded to enable.",
                         )
-                        .color(Color32::from_rgb(200, 160, 80))
+                        .color(ThemeColors::current(ui.visuals().dark_mode).box_title)
                         .family(egui::FontFamily::Monospace)
                         .size(code_font_size),
                     );
@@ -783,7 +784,7 @@ impl MermaidRenderer {
                         RichText::new(code)
                             .family(egui::FontFamily::Monospace)
                             .size(code_font_size)
-                            .color(Color32::from_rgb(180, 180, 180)),
+                            .color(ThemeColors::current(ui.visuals().dark_mode).box_body),
                     );
                 });
             return true;
@@ -792,15 +793,15 @@ impl MermaidRenderer {
         #[cfg(not(feature = "mermaid-quickjs"))]
         if _explicit && preference == MermaidRenderPreference::Embedded {
             egui::Frame::none()
-                .fill(Color32::from_rgb(25, 25, 25))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                .fill(ThemeColors::current(ui.visuals().dark_mode).box_bg)
+                .stroke(Stroke::new(1.0, ThemeColors::current(ui.visuals().dark_mode).box_border))
                 .inner_margin(8.0)
                 .show(ui, |ui| {
                     ui.label(
                         RichText::new(
                             "Mermaid rendering via embedded JS is unavailable (feature not enabled).",
                         )
-                        .color(Color32::from_rgb(200, 160, 80))
+                        .color(ThemeColors::current(ui.visuals().dark_mode).box_title)
                         .family(egui::FontFamily::Monospace)
                         .size(code_font_size),
                     );
@@ -809,7 +810,7 @@ impl MermaidRenderer {
                         RichText::new(code)
                             .family(egui::FontFamily::Monospace)
                             .size(code_font_size)
-                            .color(Color32::from_rgb(180, 180, 180)),
+                            .color(ThemeColors::current(ui.visuals().dark_mode).box_body),
                     );
                 });
             return true;
@@ -819,15 +820,15 @@ impl MermaidRenderer {
         {
             if mermaid_js_empty() {
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(25, 25, 25))
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                    .fill(ThemeColors::current(ui.visuals().dark_mode).box_bg)
+                    .stroke(Stroke::new(1.0, ThemeColors::current(ui.visuals().dark_mode).box_border))
                     .inner_margin(8.0)
                     .show(ui, |ui| {
                         ui.label(
                             RichText::new(
                                 "Mermaid rendering is unavailable (embedded JS missing).",
                             )
-                            .color(Color32::from_rgb(200, 160, 80))
+                            .color(ThemeColors::current(ui.visuals().dark_mode).box_title)
                             .family(egui::FontFamily::Monospace)
                             .size(code_font_size),
                         );
@@ -836,7 +837,7 @@ impl MermaidRenderer {
                             RichText::new(code)
                                 .family(egui::FontFamily::Monospace)
                                 .size(code_font_size)
-                                .color(Color32::from_rgb(180, 180, 180)),
+                                .color(ThemeColors::current(ui.visuals().dark_mode).box_body),
                         );
                     });
                 return true;
@@ -894,13 +895,13 @@ impl MermaidRenderer {
             let texture_error = self.mermaid_texture_errors.borrow_mut().get(&texture_key);
             if let Some(err) = svg_error.or(texture_error) {
                 egui::Frame::none()
-                    .fill(Color32::from_rgb(25, 25, 25))
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                    .fill(ThemeColors::current(ui.visuals().dark_mode).box_bg)
+                    .stroke(Stroke::new(1.0, ThemeColors::current(ui.visuals().dark_mode).box_border))
                     .inner_margin(8.0)
                     .show(ui, |ui| {
                         ui.label(
                             RichText::new("Mermaid render failed; showing source.")
-                                .color(Color32::from_rgb(200, 160, 80)),
+                                .color(ThemeColors::current(ui.visuals().dark_mode).box_title),
                         );
                         ui.label(
                             RichText::new(format!(
@@ -911,14 +912,14 @@ impl MermaidRenderer {
                             ))
                             .family(egui::FontFamily::Monospace)
                             .size(code_font_size)
-                            .color(Color32::from_rgb(180, 180, 180)),
+                            .color(ThemeColors::current(ui.visuals().dark_mode).box_body),
                         );
                         ui.add_space(6.0);
                         ui.label(
                             RichText::new(code)
                                 .family(egui::FontFamily::Monospace)
                                 .size(code_font_size)
-                                .color(Color32::from_rgb(180, 180, 180)),
+                                .color(ThemeColors::current(ui.visuals().dark_mode).box_body),
                         );
                     });
                 return true;
@@ -959,13 +960,13 @@ impl MermaidRenderer {
                             .borrow_mut()
                             .insert(svg_key, "Mermaid worker pool unavailable".to_string());
                         egui::Frame::none()
-                            .fill(Color32::from_rgb(25, 25, 25))
-                            .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                            .fill(ThemeColors::current(ui.visuals().dark_mode).box_bg)
+                            .stroke(Stroke::new(1.0, ThemeColors::current(ui.visuals().dark_mode).box_border))
                             .inner_margin(8.0)
                             .show(ui, |ui| {
                                 ui.label(
                                     RichText::new("Mermaid worker pool unavailable.")
-                                        .color(Color32::from_rgb(200, 160, 80))
+                                        .color(ThemeColors::current(ui.visuals().dark_mode).box_title)
                                         .family(egui::FontFamily::Monospace)
                                         .size(code_font_size),
                                 );
@@ -974,7 +975,7 @@ impl MermaidRenderer {
                                     RichText::new(code)
                                         .family(egui::FontFamily::Monospace)
                                         .size(code_font_size)
-                                        .color(Color32::from_rgb(180, 180, 180)),
+                                        .color(ThemeColors::current(ui.visuals().dark_mode).box_body),
                                 );
                             });
                         return true;
@@ -985,8 +986,8 @@ impl MermaidRenderer {
             let inflight = self.mermaid_pending.borrow().len();
             self.mermaid_frame_pending.set(true);
             egui::Frame::none()
-                .fill(Color32::from_rgb(25, 25, 25))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                .fill(ThemeColors::current(ui.visuals().dark_mode).box_bg)
+                .stroke(Stroke::new(1.0, ThemeColors::current(ui.visuals().dark_mode).box_border))
                 .inner_margin(8.0)
                 .show(ui, |ui| {
                     // Reserve minimum height for placeholder to reduce layout shift
@@ -999,7 +1000,7 @@ impl MermaidRenderer {
                                 inflight,
                                 Self::MAX_MERMAID_JOBS
                             ))
-                            .color(Color32::from_rgb(200, 160, 80))
+                            .color(ThemeColors::current(ui.visuals().dark_mode).box_title)
                             .family(egui::FontFamily::Monospace)
                             .size(code_font_size),
                         );

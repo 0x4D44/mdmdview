@@ -3,8 +3,8 @@
 /// This module contains the primary app state, UI logic, and event handling
 /// for the markdown viewer application built with egui.
 use crate::{
-    load_app_settings, save_app_settings, AppSettings, MarkdownElement, MarkdownRenderer,
-    SampleFile, WindowState, SAMPLE_FILES,
+    apply_dark_mode_visuals, load_app_settings, save_app_settings, AppSettings, MarkdownElement,
+    MarkdownRenderer, SampleFile, ThemeColors, WindowState, SAMPLE_FILES,
 };
 use anyhow::{bail, Result};
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -393,8 +393,10 @@ pub struct MarkdownViewerApp {
     screenshot: Option<ScreenshotState>,
     /// Last title sent to the viewport (to avoid redundant updates)
     last_sent_title: Option<String>,
-    /// Allow loading images from remote URLs (http/https)
-    allow_remote_images: bool,
+    /// Persisted application settings (dark_mode, allow_remote_images, etc.)
+    settings: AppSettings,
+    /// Set to true when a theme toggle is requested (deferred to avoid borrow conflicts)
+    theme_toggle_requested: bool,
     /// Channel to send readability calculation requests
     readability_tx: Sender<ReadabilityRequest>,
     /// Channel to receive readability calculation results
@@ -625,7 +627,8 @@ impl MarkdownViewerApp {
             pending_files: VecDeque::new(),
             screenshot: None,
             last_sent_title: None,
-            allow_remote_images: settings.allow_remote_images,
+            settings,
+            theme_toggle_requested: false,
             readability_tx,
             readability_rx,
             readability_stats: None,
@@ -634,7 +637,7 @@ impl MarkdownViewerApp {
         };
         // Apply loaded settings to renderer
         app.renderer
-            .set_allow_remote_images(settings.allow_remote_images);
+            .set_allow_remote_images(app.settings.allow_remote_images);
         // Load welcome content by default
         app.load_welcome_from_samples(SAMPLE_FILES, false);
 
@@ -1439,6 +1442,14 @@ impl MarkdownViewerApp {
                 self.open_file_dialog();
             }
 
+            // Ctrl+Shift+T — toggle light/dark theme
+            if i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::CTRL | egui::Modifiers::SHIFT,
+                egui::Key::T,
+            )) {
+                self.theme_toggle_requested = true;
+            }
+
             // Alt-based accelerators for common actions (mnemonics)
             if i.consume_shortcut(&egui::KeyboardShortcut::new(
                 egui::Modifiers::ALT,
@@ -1880,7 +1891,7 @@ impl MarkdownViewerApp {
         ui.horizontal(|ui| {
             let clicked = ui
                 .add(egui::SelectableLabel::new(
-                    self.allow_remote_images,
+                    self.settings.allow_remote_images,
                     Self::menu_text_with_mnemonic(
                         None,
                         "Allow Remote Images",
@@ -1891,14 +1902,10 @@ impl MarkdownViewerApp {
                 ))
                 .clicked();
             if app_action_triggered(clicked, "menu_allow_remote_images") {
-                self.allow_remote_images = !self.allow_remote_images;
+                self.settings.allow_remote_images = !self.settings.allow_remote_images;
                 self.renderer
-                    .set_allow_remote_images(self.allow_remote_images);
-                // Persist setting
-                let settings = AppSettings {
-                    allow_remote_images: self.allow_remote_images,
-                };
-                if let Err(e) = save_app_settings(&settings) {
+                    .set_allow_remote_images(self.settings.allow_remote_images);
+                if let Err(e) = save_app_settings(&self.settings) {
                     eprintln!("Failed to save app settings: {e}");
                 }
             }
@@ -2111,8 +2118,29 @@ impl MarkdownViewerApp {
             ui.close_menu();
         }
     }
+    /// Apply the saved theme preference to egui visuals.
+    pub fn apply_saved_theme(&self, ctx: &Context) {
+        apply_dark_mode_visuals(ctx, self.settings.dark_mode);
+    }
+
+    /// Toggle between dark and light mode: flip setting, update visuals, re-parse content.
+    fn toggle_theme(&mut self, ctx: &Context) {
+        self.settings.dark_mode = !self.settings.dark_mode;
+        apply_dark_mode_visuals(ctx, self.settings.dark_mode);
+        self.renderer.set_dark_mode(self.settings.dark_mode);
+        if !self.current_content.is_empty() {
+            match self.renderer.parse(&self.current_content) {
+                Ok(elements) => self.parsed_elements = elements,
+                Err(e) => {
+                    self.error_message = Some(format!("Failed to parse markdown: {e}"))
+                }
+            }
+        }
+        let _ = save_app_settings(&self.settings);
+    }
+
     /// Render the status bar
-    fn render_status_bar(&self, ctx: &Context) {
+    fn render_status_bar(&mut self, ctx: &Context) {
         TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 // Current file info
@@ -2125,29 +2153,38 @@ impl MarkdownViewerApp {
                 }
 
                 if let Some(pending) = &self.pending_file_load {
+                    let tc = ThemeColors::current(self.settings.dark_mode);
                     ui.separator();
                     ui.label(
                         RichText::new(format!("Loading {}", pending.path.display()))
-                            .color(Color32::from_rgb(120, 200, 255)),
+                            .color(tc.status_loading),
                     );
                 }
 
                 // Show pending file count if files are queued
                 if !self.pending_files.is_empty() {
+                    let tc = ThemeColors::current(self.settings.dark_mode);
                     ui.separator();
                     ui.label(
                         RichText::new(format!("{} files in queue", self.pending_files.len()))
-                            .color(egui::Color32::from_rgb(100, 150, 255)),
+                            .color(tc.status_queue),
                     );
 
                     ui.label(
                         RichText::new("(Alt+Right for next)")
-                            .color(egui::Color32::GRAY)
+                            .color(tc.status_hint)
                             .italics(),
                     );
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Theme toggle button (rightmost)
+                    let label = if self.settings.dark_mode { "Dark" } else { "Light" };
+                    if ui.small_button(label).clicked() {
+                        self.theme_toggle_requested = true;
+                    }
+                    ui.separator();
+
                     // Document stats (word_count from cached readability stats to avoid per-frame calculation)
                     let element_count = self.parsed_elements.len();
                     let word_count = self
@@ -2436,6 +2473,12 @@ impl MarkdownViewerApp {
             self.toggle_fullscreen = false;
             let current_fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(!current_fullscreen));
+        }
+
+        // Handle deferred theme toggle
+        if self.theme_toggle_requested {
+            self.theme_toggle_requested = false;
+            self.toggle_theme(ctx);
         }
 
         // Handle deferred view toggle outside of input context
@@ -7155,7 +7198,7 @@ The end.
     #[test]
     fn test_menu_allow_remote_images_toggle() {
         let mut app = MarkdownViewerApp::new();
-        let initial = app.allow_remote_images;
+        let initial = app.settings.allow_remote_images;
 
         let _actions = ForcedAppActions::new(&["menu_allow_remote_images"]);
         let ctx = egui::Context::default();
@@ -7165,7 +7208,7 @@ The end.
             });
         });
 
-        assert_ne!(app.allow_remote_images, initial);
+        assert_ne!(app.settings.allow_remote_images, initial);
     }
 
     #[test]
@@ -7248,5 +7291,40 @@ The end.
         });
 
         FORCE_DEBUG_SCROLL.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn test_toggle_theme() {
+        let mut app = MarkdownViewerApp::new();
+        assert!(app.settings.dark_mode); // default is dark
+        let ctx = egui::Context::default();
+        app.toggle_theme(&ctx);
+        assert!(!app.settings.dark_mode); // now light
+        app.toggle_theme(&ctx);
+        assert!(app.settings.dark_mode); // back to dark
+    }
+
+    #[test]
+    fn test_ctrl_shift_t_shortcut() {
+        let mut app = MarkdownViewerApp::new();
+        assert!(!app.theme_toggle_requested);
+
+        let ctx = egui::Context::default();
+        let mut input = default_input();
+        input.events.push(egui::Event::Key {
+            key: egui::Key::T,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Default::default()
+            },
+        });
+        let _ = ctx.run(input, |ctx| {
+            app.handle_shortcuts(ctx);
+        });
+        assert!(app.theme_toggle_requested);
     }
 }

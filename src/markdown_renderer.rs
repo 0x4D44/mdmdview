@@ -1,5 +1,6 @@
 use crate::image_decode;
 use crate::mermaid_renderer::MermaidRenderer;
+use crate::ThemeColors;
 use crate::table_support::{
     column_spec::spans_to_text, compute_column_stats, derive_column_specs, ColumnPolicy,
     ColumnSpec, ColumnStat, TableColumnContext, TableMetrics, WidthChange,
@@ -588,6 +589,9 @@ pub struct MarkdownRenderer {
     column_stats_cache: RefCell<HashMap<u64, ColumnStatsCacheEntry>>,
     /// Allow loading images from remote URLs (http/https)
     allow_remote_images: Cell<bool>,
+    /// Current theme mode — true for dark, false for light.
+    /// Used by syntect highlighting at parse time.
+    dark_mode: bool,
 }
 
 impl Default for MarkdownRenderer {
@@ -737,12 +741,13 @@ impl MarkdownRenderer {
                         self.append_code_span(style, &mut job, &mut plain_text, code);
                 }
                 InlineSpan::Link { text, url } => {
+                    let tc = ThemeColors::current(style.visuals.dark_mode);
                     let inline_style = InlineStyle {
                         strong: strong_override,
                         color: Some(if Self::is_external_url(url) {
-                            Color32::from_rgb(120, 190, 255)
+                            tc.link
                         } else {
-                            Color32::LIGHT_BLUE
+                            tc.link_internal
                         }),
                         ..Default::default()
                     };
@@ -868,15 +873,8 @@ impl MarkdownRenderer {
             return 0;
         }
         plain_text.push_str(code);
-        let visuals = &style.visuals;
-        let (bg, fg) = if visuals.dark_mode {
-            (
-                Color32::from_rgb(30, 30, 30),
-                Color32::from_rgb(180, 255, 180),
-            )
-        } else {
-            (Color32::WHITE, Color32::from_rgb(60, 80, 150))
-        };
+        let tc = ThemeColors::current(style.visuals.dark_mode);
+        let (bg, fg) = (tc.inline_code_bg, tc.inline_code_fg);
         let rich = RichText::new(code.to_string())
             .size(self.font_sizes.code)
             .monospace()
@@ -963,7 +961,13 @@ impl MarkdownRenderer {
             table_metrics: RefCell::new(TableMetrics::default()),
             column_stats_cache: RefCell::new(HashMap::new()),
             allow_remote_images: Cell::new(false),
+            dark_mode: true,
         }
+    }
+
+    /// Switch between dark and light theme for syntect highlighting.
+    pub fn set_dark_mode(&mut self, dark: bool) {
+        self.dark_mode = dark;
     }
 
     /// Set whether remote images (http/https URLs) should be loaded
@@ -2633,12 +2637,12 @@ impl MarkdownRenderer {
                 let bar_width = 3.0;
                 let bar_gap = 6.0;
                 let left_pad = 10.0 + (*depth as f32) * (bar_width + bar_gap);
-                // Substack-like styling: dark grey block with orange accent bars and white text
-                let bg = Color32::from_rgb(24, 24, 24);
+                // Substack-like styling: themed block with orange accent bars
+                let tc = ThemeColors::current(ui.visuals().dark_mode);
 
                 let resp = egui::Frame::none()
-                    .fill(bg)
-                    .stroke(Stroke::new(1.0, Color32::from_rgb(40, 40, 40)))
+                    .fill(tc.blockquote_bg)
+                    .stroke(Stroke::new(1.0, tc.blockquote_border))
                     .rounding(egui::Rounding::same(6.0))
                     .inner_margin(egui::Margin {
                         left: left_pad,
@@ -2648,8 +2652,7 @@ impl MarkdownRenderer {
                     })
                     .show(ui, |ui| {
                         let prev_override = ui.style().visuals.override_text_color;
-                        // White text for quote content
-                        ui.style_mut().visuals.override_text_color = Some(Color32::WHITE);
+                        ui.style_mut().visuals.override_text_color = Some(tc.blockquote_text);
                         for block in blocks {
                             self.render_element_body(ui, block);
                         }
@@ -2660,7 +2663,7 @@ impl MarkdownRenderer {
                 let rect = resp.response.rect;
                 let top = rect.top() + 6.0;
                 let bottom = rect.bottom() - 6.0;
-                let bar_color = Color32::from_rgb(255, 103, 25); // Substack-like orange
+                let bar_color = tc.blockquote_bar;
                 for d in 0..*depth {
                     let x = rect.left() + 6.0 + (d as f32) * (bar_width + bar_gap);
                     let bar_rect = egui::Rect::from_min_max(
@@ -2835,16 +2838,8 @@ impl MarkdownRenderer {
             InlineSpan::Code(code) => {
                 // Inline code: adapt style to theme (light vs dark)
                 ui.spacing_mut().item_spacing.x = 0.0;
-                let is_dark = ui.visuals().dark_mode;
-                let (bg, fg) = if is_dark {
-                    (
-                        Color32::from_rgb(30, 30, 30),
-                        Color32::from_rgb(180, 255, 180),
-                    )
-                } else {
-                    // Light theme: white background with readable code color
-                    (Color32::WHITE, Color32::from_rgb(60, 80, 150))
-                };
+                let tc = ThemeColors::current(ui.visuals().dark_mode);
+                let (bg, fg) = (tc.inline_code_bg, tc.inline_code_fg);
                 let response = ui.add(
                     egui::Label::new(
                         RichText::new(code.clone())
@@ -2895,10 +2890,11 @@ impl MarkdownRenderer {
             }
             InlineSpan::Link { text, url } => {
                 let fixed_text = self.fix_unicode_chars(text);
+                let tc = ThemeColors::current(ui.visuals().dark_mode);
                 let color = if Self::is_external_url(url) {
-                    Color32::from_rgb(120, 190, 255)
+                    tc.link
                 } else {
-                    Color32::LIGHT_BLUE
+                    tc.link_internal
                 };
 
                 // Render link content as clickable widgets directly in the parent
@@ -2952,19 +2948,21 @@ impl MarkdownRenderer {
                             }
                             // Subtle caption below image
                             ui.add_space(2.0);
+                            let tc = ThemeColors::current(ui.visuals().dark_mode);
                             ui.label(
                                 RichText::new(t.clone())
                                     .size(self.font_sizes.body - 2.0)
-                                    .color(Color32::from_rgb(140, 140, 140)),
+                                    .color(tc.code_label),
                             );
                         }
                     }
                     ui.add_space(6.0);
                 } else {
                     // Placeholder with alt and error info
+                    let tc = ThemeColors::current(ui.visuals().dark_mode);
                     egui::Frame::none()
-                        .fill(Color32::from_rgb(30, 30, 30))
-                        .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+                        .fill(tc.code_bg)
+                        .stroke(Stroke::new(1.0, tc.code_border))
                         .inner_margin(8.0)
                         .show(ui, |ui| {
                             let pending = self.image_pending.borrow().contains(&resolved);
@@ -3892,9 +3890,10 @@ impl MarkdownRenderer {
             }
         }
 
+        let tc = ThemeColors::current(ui.visuals().dark_mode);
         let frame_response = egui::Frame::none()
-            .fill(Color32::from_rgb(25, 25, 25))
-            .stroke(Stroke::new(1.0, Color32::from_rgb(60, 60, 60)))
+            .fill(tc.code_bg)
+            .stroke(Stroke::new(1.0, tc.code_border))
             .inner_margin(8.0)
             .show(ui, |ui| {
                 ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
@@ -3902,7 +3901,7 @@ impl MarkdownRenderer {
                         ui.label(
                             RichText::new(lang)
                                 .size(self.font_sizes.code - 1.0)
-                                .color(Color32::from_rgb(150, 150, 150))
+                                .color(tc.code_label)
                                 .family(egui::FontFamily::Monospace),
                         );
                         ui.add_space(2.0);
@@ -3960,10 +3959,11 @@ impl MarkdownRenderer {
                         }
                     } else {
                         // Fallback: render as plain text (no highlighting available)
+                        let tc = ThemeColors::current(ui.visuals().dark_mode);
                         ui.label(
                             RichText::new(code)
                                 .size(self.font_sizes.code)
-                                .color(Color32::from_rgb(220, 220, 220))
+                                .color(tc.code_fallback_text)
                                 .family(egui::FontFamily::Monospace),
                         );
                     }
@@ -5776,7 +5776,7 @@ impl MarkdownRenderer {
             .find_syntax_for_language(lang)
             .or_else(|| self.syntax_set.find_syntax_by_first_line(code))?;
 
-        let theme = &self.theme_set.themes["base16-ocean.dark"];
+        let theme = &self.theme_set.themes[ThemeColors::syntect_theme(self.dark_mode)];
         let mut highlighter = HighlightLines::new(syntax, theme);
         let mut highlighted_lines = Vec::new();
 
@@ -12991,5 +12991,40 @@ contexts:
         with_test_ui(|_, ui| {
             renderer.render_to_ui(ui, &elements);
         });
+    }
+
+    #[test]
+    fn test_set_dark_mode() {
+        let mut renderer = MarkdownRenderer::new();
+        assert!(renderer.dark_mode);
+        renderer.set_dark_mode(false);
+        assert!(!renderer.dark_mode);
+        renderer.set_dark_mode(true);
+        assert!(renderer.dark_mode);
+    }
+
+    #[test]
+    fn test_highlight_code_light_theme() {
+        let mut renderer = MarkdownRenderer::new();
+
+        // Parse with dark theme
+        let code = "let x = 42;";
+        let dark_tokens = renderer
+            .highlight_code(Some("rust"), code)
+            .expect("dark highlight");
+
+        // Switch to light theme and re-highlight
+        renderer.set_dark_mode(false);
+        let light_tokens = renderer
+            .highlight_code(Some("rust"), code)
+            .expect("light highlight");
+
+        // The two themes should produce different token colors
+        assert!(!dark_tokens.is_empty());
+        assert!(!light_tokens.is_empty());
+        // At least one token color should differ between themes
+        let dark_first_color = dark_tokens[0][0].color;
+        let light_first_color = light_tokens[0][0].color;
+        assert_ne!(dark_first_color, light_first_color);
     }
 }
