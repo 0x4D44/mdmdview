@@ -16,19 +16,14 @@ permissions:
 
 jobs:
   build:
-    name: Build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
+    name: Build (Windows)
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup MSVC environment (Windows)
-        if: runner.os == 'Windows'
+      - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Install Rust
@@ -45,29 +40,18 @@ jobs:
         env:
           RUSTFLAGS: -D warnings
 
-      - name: Package artifact (Windows)
-        if: runner.os == 'Windows'
+      - name: Package artifact
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target/release/mdmdview.exe dist/mdmdview.exe
           Compress-Archive -Path dist/mdmdview.exe -DestinationPath "mdmdview-${{ github.ref_name }}-windows-x86_64.zip"
 
-      - name: Package artifact (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          mkdir -p dist
-          cp target/release/mdmdview dist/mdmdview
-          tar -C dist -czf "mdmdview-${{ github.ref_name }}-linux-x86_64.tar.gz" mdmdview
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mdmdview-${{ runner.os }}
-          path: |
-            mdmdview-${{ github.ref_name }}-windows-x86_64.zip
-            mdmdview-${{ github.ref_name }}-linux-x86_64.tar.gz
-          if-no-files-found: ignore
+          name: mdmdview-Windows
+          path: mdmdview-${{ github.ref_name }}-windows-x86_64.zip
 
   release:
     name: Publish Release
@@ -88,6 +72,4 @@ jobs:
           name: ${{ github.ref_name }}
           draft: false
           generate_release_notes: true
-          files: |
-            artifacts/*.zip
-            artifacts/*.tar.gz
+          files: artifacts/*.zip
