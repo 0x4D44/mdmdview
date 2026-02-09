@@ -133,10 +133,7 @@ pub fn sanitize_window_state(ws: WindowState) -> Option<WindowState> {
     const MAX_POS: f32 = 20000.0;
 
     Some(WindowState {
-        pos: [
-            ws.pos[0].clamp(0.0, MAX_POS),
-            ws.pos[1].clamp(0.0, MAX_POS),
-        ],
+        pos: [ws.pos[0].clamp(0.0, MAX_POS), ws.pos[1].clamp(0.0, MAX_POS)],
         size: [
             ws.size[0].clamp(MIN_WIDTH, MAX_SIZE),
             ws.size[1].clamp(MIN_SIZE, MAX_SIZE),
@@ -227,7 +224,11 @@ pub fn save_app_settings(settings: &AppSettings) -> std::io::Result<()> {
         }
     }
     if let Some(mut f) = create_config_file("settings.txt")? {
-        writeln!(f, "allow_remote_images={}", settings.allow_remote_images as u8)?;
+        writeln!(
+            f,
+            "allow_remote_images={}",
+            settings.allow_remote_images as u8
+        )?;
     }
     Ok(())
 }

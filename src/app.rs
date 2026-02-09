@@ -2704,9 +2704,10 @@ impl MarkdownViewerApp {
             let ctx_menu_id = egui::Id::new("main_context_menu");
             let secondary_clicked = ctx.input(|i| {
                 i.pointer.secondary_clicked()
-                    && central_response.response.rect.contains(
-                        i.pointer.interact_pos().unwrap_or_default(),
-                    )
+                    && central_response
+                        .response
+                        .rect
+                        .contains(i.pointer.interact_pos().unwrap_or_default())
             });
             if secondary_clicked {
                 let pos = ctx.input(|i| i.pointer.interact_pos().unwrap_or_default());
@@ -5117,7 +5118,9 @@ The end.
         app.pending_scroll_to_element = Some(1);
 
         let mut input = default_input();
-        input.events.push(key_event(egui::Key::Escape, egui::Modifiers::NONE));
+        input
+            .events
+            .push(key_event(egui::Key::Escape, egui::Modifiers::NONE));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -5185,7 +5188,9 @@ The end.
         let mut app = MarkdownViewerApp::new();
         let mut input = default_input();
         input.modifiers = egui::Modifiers::CTRL;
-        input.events.push(key_event(egui::Key::A, egui::Modifiers::CTRL));
+        input
+            .events
+            .push(key_event(egui::Key::A, egui::Modifiers::CTRL));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -5561,7 +5566,9 @@ The end.
         app.current_content = "Saved".to_string();
 
         let mut input = default_input();
-        input.events.push(key_event(egui::Key::S, egui::Modifiers::CTRL));
+        input
+            .events
+            .push(key_event(egui::Key::S, egui::Modifiers::CTRL));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -5725,7 +5732,9 @@ The end.
         });
 
         let mut input = default_input();
-        input.events.push(key_event(egui::Key::Enter, egui::Modifiers::NONE));
+        input
+            .events
+            .push(key_event(egui::Key::Enter, egui::Modifiers::NONE));
         let _ = ctx.run(input, |ctx| {
             app.render_search_dialog(ctx);
         });
@@ -5816,7 +5825,9 @@ The end.
         app.last_match_index = None;
 
         let mut input = default_input();
-        input.events.push(key_event(egui::Key::F, egui::Modifiers::CTRL));
+        input
+            .events
+            .push(key_event(egui::Key::F, egui::Modifiers::CTRL));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -5832,7 +5843,9 @@ The end.
         app.last_match_index = Some(2);
 
         let mut input = default_input();
-        input.events.push(key_event(egui::Key::F, egui::Modifiers::CTRL));
+        input
+            .events
+            .push(key_event(egui::Key::F, egui::Modifiers::CTRL));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -5889,7 +5902,9 @@ The end.
         app.current_content = "Data".to_string();
 
         let mut input = default_input();
-        input.events.push(key_event(egui::Key::S, egui::Modifiers::CTRL));
+        input
+            .events
+            .push(key_event(egui::Key::S, egui::Modifiers::CTRL));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -6230,7 +6245,9 @@ The end.
         let ctx = egui::Context::default();
 
         let mut input = default_input();
-        input.events.push(key_event(egui::Key::A, egui::Modifiers::NONE));
+        input
+            .events
+            .push(key_event(egui::Key::A, egui::Modifiers::NONE));
         let _ = ctx.run(input, |ctx| {
             app.handle_screenshot_events(ctx);
         });
@@ -6613,7 +6630,9 @@ The end.
 
         let mut input = default_input();
         input.modifiers = egui::Modifiers::SHIFT;
-        input.events.push(key_event(egui::Key::F3, egui::Modifiers::SHIFT));
+        input
+            .events
+            .push(key_event(egui::Key::F3, egui::Modifiers::SHIFT));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -6632,7 +6651,9 @@ The end.
         app.search_query = "Nav".to_string();
 
         let mut input = default_input();
-        input.events.push(key_event(egui::Key::F3, egui::Modifiers::NONE));
+        input
+            .events
+            .push(key_event(egui::Key::F3, egui::Modifiers::NONE));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -6656,7 +6677,9 @@ The end.
 
         let mut input = default_input();
         input.modifiers = egui::Modifiers::ALT;
-        input.events.push(key_event(egui::Key::F3, egui::Modifiers::ALT));
+        input
+            .events
+            .push(key_event(egui::Key::F3, egui::Modifiers::ALT));
 
         let ctx = egui::Context::default();
         let _ = ctx.run(input, |ctx| {
@@ -7198,7 +7221,9 @@ The end.
         });
         // Second frame with a key event to trigger the activity branch
         let mut input = default_input();
-        input.events.push(key_event(egui::Key::A, egui::Modifiers::NONE));
+        input
+            .events
+            .push(key_event(egui::Key::A, egui::Modifiers::NONE));
         let _ = ctx.run(input, |ctx| {
             app.update_impl(ctx);
         });
