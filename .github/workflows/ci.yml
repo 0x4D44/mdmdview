@@ -48,6 +48,3 @@ jobs:
         run: cargo test --all-targets -- --nocapture
         env:
           RUSTFLAGS: -D warnings
-
-      - name: Build release (after checks pass)
-        run: cargo build --release
