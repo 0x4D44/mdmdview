@@ -250,7 +250,7 @@ fn main() -> Result<(), eframe::Error> {
     let window_height = cli.height.unwrap_or(default_height);
 
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title(format!("{APP_TITLE_PREFIX} - 0x4D44 Markdown Viewer"))
+        .with_title(APP_TITLE_PREFIX.to_string())
         .with_inner_size(egui::Vec2::new(window_width, window_height))
         .with_min_inner_size(egui::Vec2::new(
             if screenshot_enabled { 100.0 } else { 600.0 },

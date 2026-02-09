@@ -25,8 +25,8 @@ fn main() {
 
         let company_name = first_author(&pkg_authors);
 
-        res.set("ProductName", "0x4D44 Markdown Viewer");
-        res.set("FileDescription", "0x4D44 Markdown Viewer");
+        res.set("ProductName", "Markdown Viewer");
+        res.set("FileDescription", "Markdown Viewer");
         res.set("CompanyName", &company_name);
         res.set("OriginalFilename", &format!("{}.exe", pkg_name));
         res.set("InternalName", &pkg_name);

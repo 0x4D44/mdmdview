@@ -30,7 +30,7 @@ use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 
 /// Prefix used for application/window titles.
-pub const APP_TITLE_PREFIX: &str = "mdmdview";
+pub const APP_TITLE_PREFIX: &str = "Markdown Viewer";
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TIMESTAMP: &str = env!("MDMDVIEW_BUILD_TIMESTAMP");
 const ASYNC_LOAD_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024;
