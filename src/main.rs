@@ -338,6 +338,10 @@ fn main() -> Result<(), eframe::Error> {
             }
 
             let mut app = MarkdownViewerApp::new();
+            // Apply saved theme ONLY when no explicit --theme flag was passed
+            if resolved_theme.is_none() {
+                app.apply_saved_theme(&cc.egui_ctx);
+            }
             if screenshot_zoom != 1.0 {
                 app.set_zoom_scale(screenshot_zoom);
             }

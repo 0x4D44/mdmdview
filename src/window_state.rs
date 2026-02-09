@@ -10,9 +10,19 @@ pub struct WindowState {
 }
 
 /// Application settings that persist across sessions
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct AppSettings {
     pub allow_remote_images: bool,
+    pub dark_mode: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            allow_remote_images: false,
+            dark_mode: true, // dark mode is the default
+        }
+    }
 }
 
 fn config_dir() -> Option<PathBuf> {
@@ -208,8 +218,14 @@ pub fn load_app_settings() -> AppSettings {
     let mut settings = AppSettings::default();
     for line in contents.lines() {
         if let Some((key, value)) = line.split_once('=') {
-            if key.trim() == "allow_remote_images" {
-                settings.allow_remote_images = matches!(value.trim(), "1" | "true");
+            match key.trim() {
+                "allow_remote_images" => {
+                    settings.allow_remote_images = matches!(value.trim(), "1" | "true");
+                }
+                "dark_mode" => {
+                    settings.dark_mode = matches!(value.trim(), "1" | "true");
+                }
+                _ => {}
             }
         }
     }
@@ -229,6 +245,7 @@ pub fn save_app_settings(settings: &AppSettings) -> std::io::Result<()> {
             "allow_remote_images={}",
             settings.allow_remote_images as u8
         )?;
+        writeln!(f, "dark_mode={}", settings.dark_mode as u8)?;
     }
     Ok(())
 }
@@ -240,8 +257,10 @@ fn load_app_settings_registry() -> Option<AppSettings> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let key = hkcu.open_subkey("Software\\MarkdownView").ok()?;
     let allow_remote: u32 = key.get_value("AllowRemoteImages").unwrap_or(0);
+    let dark_mode: u32 = key.get_value("DarkMode").unwrap_or(1);
     Some(AppSettings {
         allow_remote_images: allow_remote != 0,
+        dark_mode: dark_mode != 0,
     })
 }
 
@@ -253,6 +272,7 @@ fn save_app_settings_registry(settings: &AppSettings) -> std::io::Result<()> {
     let (key, _disp) =
         hkcu.create_subkey_with_flags("Software\\MarkdownView", KEY_READ | KEY_WRITE)?;
     key.set_value("AllowRemoteImages", &(settings.allow_remote_images as u32))?;
+    key.set_value("DarkMode", &(settings.dark_mode as u32))?;
     Ok(())
 }
 
@@ -851,6 +871,7 @@ mod tests {
 
         let settings = AppSettings {
             allow_remote_images: true,
+            dark_mode: true,
         };
         save_app_settings(&settings).expect("save");
 
@@ -871,6 +892,7 @@ mod tests {
 
         let settings = AppSettings {
             allow_remote_images: false,
+            dark_mode: true,
         };
         save_app_settings(&settings).expect("save");
 
@@ -887,11 +909,13 @@ mod tests {
 
         let settings = AppSettings {
             allow_remote_images: true,
+            dark_mode: true,
         };
         save_app_settings(&settings).expect("save");
 
         let loaded = load_app_settings();
         assert_eq!(loaded.allow_remote_images, settings.allow_remote_images);
+        assert_eq!(loaded.dark_mode, settings.dark_mode);
     }
 
     #[test]
@@ -914,6 +938,7 @@ mod tests {
 
         let settings = AppSettings {
             allow_remote_images: true,
+            dark_mode: true,
         };
         // Should succeed but do nothing
         save_app_settings(&settings).expect("save ok");
@@ -1015,5 +1040,71 @@ mod tests {
         let path = state_path();
         assert!(path.is_some());
         assert!(path.unwrap().ends_with("window_state.txt"));
+    }
+
+    // ========== dark_mode persistence tests ==========
+
+    #[test]
+    fn test_dark_mode_default_is_true() {
+        assert!(AppSettings::default().dark_mode);
+    }
+
+    #[test]
+    fn test_settings_round_trip_dark_mode_true() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, _config_dir) = set_config_env(temp.path());
+
+        let settings = AppSettings {
+            allow_remote_images: false,
+            dark_mode: true,
+        };
+        save_app_settings(&settings).expect("save");
+        let loaded = load_app_settings();
+        assert!(loaded.dark_mode);
+    }
+
+    #[test]
+    fn test_settings_round_trip_dark_mode_false() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, _config_dir) = set_config_env(temp.path());
+
+        let settings = AppSettings {
+            allow_remote_images: false,
+            dark_mode: false,
+        };
+        save_app_settings(&settings).expect("save");
+        let loaded = load_app_settings();
+        assert!(!loaded.dark_mode);
+    }
+
+    #[test]
+    fn test_settings_missing_dark_mode_defaults_true() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, config_dir) = set_config_env(temp.path());
+
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        let settings_path = config_dir.join("settings.txt");
+        // File with only allow_remote_images — no dark_mode line
+        fs::write(&settings_path, "allow_remote_images=0\n").expect("write");
+
+        let loaded = load_app_settings();
+        assert!(loaded.dark_mode); // default true when missing
+    }
+
+    #[test]
+    fn test_settings_dark_mode_zero_is_false() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, config_dir) = set_config_env(temp.path());
+
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        let settings_path = config_dir.join("settings.txt");
+        fs::write(&settings_path, "dark_mode=0\n").expect("write");
+
+        let loaded = load_app_settings();
+        assert!(!loaded.dark_mode);
     }
 }
