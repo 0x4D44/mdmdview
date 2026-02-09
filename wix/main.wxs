@@ -72,6 +72,40 @@
                         </ProgId>
                     </Component>
 
+                    <!-- Win10/11: register as a known application in Default Apps / Open With -->
+                    <Component Id='AppRegistration' Guid='*'>
+                        <RegistryKey Root='HKLM' Key='SOFTWARE\Classes\Applications\mdmdview.exe'>
+                            <RegistryValue Type='string' Name='FriendlyAppName' Value='Markdown Viewer'/>
+                            <RegistryKey Key='DefaultIcon'>
+                                <RegistryValue Type='string' Value='[#exe0],0'/>
+                            </RegistryKey>
+                            <RegistryKey Key='shell\open\command'>
+                                <RegistryValue Type='string' Value='&quot;[#exe0]&quot; &quot;%1&quot;'/>
+                            </RegistryKey>
+                            <RegistryKey Key='SupportedTypes'>
+                                <RegistryValue Type='string' Name='.md' Value=''/>
+                                <RegistryValue Type='string' Name='.markdown' Value=''/>
+                            </RegistryKey>
+                        </RegistryKey>
+
+                        <RegistryKey Root='HKLM' Key='SOFTWARE\mdmdview\Capabilities'>
+                            <RegistryValue Type='string' Name='ApplicationName' Value='Markdown Viewer'/>
+                            <RegistryValue Type='string' Name='ApplicationDescription' Value='A markdown viewer for Windows'/>
+                            <RegistryValue Type='string' Name='ApplicationIcon' Value='[#exe0],0'/>
+                            <RegistryKey Key='FileAssociations'>
+                                <RegistryValue Type='string' Name='.md' Value='mdmdview.MarkdownFile'/>
+                                <RegistryValue Type='string' Name='.markdown' Value='mdmdview.MarkdownFile'/>
+                            </RegistryKey>
+                        </RegistryKey>
+
+                        <RegistryValue Root='HKLM'
+                            Key='SOFTWARE\RegisteredApplications'
+                            Name='Markdown Viewer'
+                            Type='string'
+                            Value='SOFTWARE\mdmdview\Capabilities'
+                            KeyPath='yes'/>
+                    </Component>
+
                 </Directory>
             </Directory>
             <Directory Id='ProgramMenuFolder' Name='Programs'>
@@ -105,6 +139,7 @@
             Absent='disallow'>
             <ComponentRef Id='License'/>
             <ComponentRef Id='binary0'/>
+            <ComponentRef Id='AppRegistration'/>
             <ComponentRef Id='ApplicationShortcut'/>
         </Feature>
 
