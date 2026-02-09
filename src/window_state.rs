@@ -20,9 +20,34 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             allow_remote_images: false,
-            dark_mode: true, // dark mode is the default
+            dark_mode: detect_os_dark_mode(),
         }
     }
+}
+
+/// Detects the OS-level dark/light theme preference.
+/// On Windows, reads `AppsUseLightTheme` from the Personalize registry key.
+/// Returns `true` for dark mode, `false` for light mode.
+/// Defaults to dark mode if the preference cannot be determined.
+#[cfg(all(windows, not(test)))]
+fn detect_os_dark_mode() -> bool {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let Ok(key) =
+        hkcu.open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize")
+    else {
+        return true; // default to dark if registry key missing
+    };
+    let value: u32 = key.get_value("AppsUseLightTheme").unwrap_or(0);
+    // AppsUseLightTheme: 0 = dark mode, 1 = light mode
+    value == 0
+}
+
+/// Non-Windows fallback: always default to dark mode.
+#[cfg(not(windows))]
+fn detect_os_dark_mode() -> bool {
+    true
 }
 
 fn config_dir() -> Option<PathBuf> {
@@ -257,10 +282,13 @@ fn load_app_settings_registry() -> Option<AppSettings> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let key = hkcu.open_subkey("Software\\MarkdownView").ok()?;
     let allow_remote: u32 = key.get_value("AllowRemoteImages").unwrap_or(0);
-    let dark_mode: u32 = key.get_value("DarkMode").unwrap_or(1);
+    let dark_mode = key
+        .get_value::<u32, _>("DarkMode")
+        .map(|v| v != 0)
+        .unwrap_or_else(|_| detect_os_dark_mode());
     Some(AppSettings {
         allow_remote_images: allow_remote != 0,
-        dark_mode: dark_mode != 0,
+        dark_mode,
     })
 }
 
@@ -278,8 +306,29 @@ fn save_app_settings_registry(settings: &AppSettings) -> std::io::Result<()> {
 
 #[cfg(all(windows, test))]
 thread_local! {
+    static FORCED_OS_DARK_MODE: std::cell::RefCell<Option<bool>> =
+        const { std::cell::RefCell::new(None) };
     static FORCED_SETTINGS_LOAD: std::cell::RefCell<Option<AppSettings>> =
         const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(windows, test))]
+fn detect_os_dark_mode() -> bool {
+    FORCED_OS_DARK_MODE.with(|slot| slot.borrow().unwrap_or(true))
+}
+
+#[cfg(all(windows, test))]
+fn force_os_dark_mode(dark: bool) {
+    FORCED_OS_DARK_MODE.with(|slot| {
+        *slot.borrow_mut() = Some(dark);
+    });
+}
+
+#[cfg(all(windows, test))]
+fn reset_os_dark_mode() {
+    FORCED_OS_DARK_MODE.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
 }
 
 #[cfg(all(windows, test))]
@@ -1045,8 +1094,17 @@ mod tests {
     // ========== dark_mode persistence tests ==========
 
     #[test]
-    fn test_dark_mode_default_is_true() {
+    fn test_dark_mode_default_inherits_os_dark() {
+        force_os_dark_mode(true);
         assert!(AppSettings::default().dark_mode);
+        reset_os_dark_mode();
+    }
+
+    #[test]
+    fn test_dark_mode_default_inherits_os_light() {
+        force_os_dark_mode(false);
+        assert!(!AppSettings::default().dark_mode);
+        reset_os_dark_mode();
     }
 
     #[test]
@@ -1080,18 +1138,37 @@ mod tests {
     }
 
     #[test]
-    fn test_settings_missing_dark_mode_defaults_true() {
+    fn test_settings_missing_dark_mode_inherits_os_dark() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
         let (_guard, config_dir) = set_config_env(temp.path());
 
+        force_os_dark_mode(true);
         fs::create_dir_all(&config_dir).expect("create config dir");
         let settings_path = config_dir.join("settings.txt");
         // File with only allow_remote_images — no dark_mode line
         fs::write(&settings_path, "allow_remote_images=0\n").expect("write");
 
         let loaded = load_app_settings();
-        assert!(loaded.dark_mode); // default true when missing
+        assert!(loaded.dark_mode); // inherits OS dark mode
+        reset_os_dark_mode();
+    }
+
+    #[test]
+    fn test_settings_missing_dark_mode_inherits_os_light() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, config_dir) = set_config_env(temp.path());
+
+        force_os_dark_mode(false);
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        let settings_path = config_dir.join("settings.txt");
+        // File with only allow_remote_images — no dark_mode line
+        fs::write(&settings_path, "allow_remote_images=0\n").expect("write");
+
+        let loaded = load_app_settings();
+        assert!(!loaded.dark_mode); // inherits OS light mode
+        reset_os_dark_mode();
     }
 
     #[test]

@@ -89,7 +89,11 @@ impl ThemeColors {
 
     /// Returns the palette for the given mode.
     pub fn current(dark_mode: bool) -> &'static Self {
-        if dark_mode { &Self::DARK } else { &Self::LIGHT }
+        if dark_mode {
+            &Self::DARK
+        } else {
+            &Self::LIGHT
+        }
     }
 
     /// Returns the syntect theme name for the given mode.

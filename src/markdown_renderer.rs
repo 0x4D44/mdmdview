@@ -1,10 +1,10 @@
 use crate::image_decode;
 use crate::mermaid_renderer::MermaidRenderer;
-use crate::ThemeColors;
 use crate::table_support::{
     column_spec::spans_to_text, compute_column_stats, derive_column_specs, ColumnPolicy,
     ColumnSpec, ColumnStat, TableColumnContext, TableMetrics, WidthChange,
 };
+use crate::ThemeColors;
 use crate::{emoji_assets, emoji_catalog};
 use anyhow::Result;
 use crossbeam_channel::{bounded, Receiver, Sender};

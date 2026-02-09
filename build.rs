@@ -14,7 +14,6 @@ fn main() {
         let mut res = winres::WindowsResource::new();
 
         let pkg_name = env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "mdmdview".to_string());
-        let pkg_description = env::var("CARGO_PKG_DESCRIPTION").unwrap_or_default();
         let pkg_version = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
         let pkg_authors = env::var("CARGO_PKG_AUTHORS").unwrap_or_default();
         let (major, minor, patch, build) = parse_version_components(&pkg_version);
@@ -25,14 +24,9 @@ fn main() {
         res.set_version_info(winres::VersionInfo::FILEVERSION, numeric_version);
 
         let company_name = first_author(&pkg_authors);
-        let description = if pkg_description.trim().is_empty() {
-            pkg_name.clone()
-        } else {
-            pkg_description.clone()
-        };
 
-        res.set("ProductName", &pkg_name);
-        res.set("FileDescription", &description);
+        res.set("ProductName", "0x4D44 Markdown Viewer");
+        res.set("FileDescription", "0x4D44 Markdown Viewer");
         res.set("CompanyName", &company_name);
         res.set("OriginalFilename", &format!("{}.exe", pkg_name));
         res.set("InternalName", &pkg_name);

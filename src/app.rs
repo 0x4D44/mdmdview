@@ -2131,9 +2131,7 @@ impl MarkdownViewerApp {
         if !self.current_content.is_empty() {
             match self.renderer.parse(&self.current_content) {
                 Ok(elements) => self.parsed_elements = elements,
-                Err(e) => {
-                    self.error_message = Some(format!("Failed to parse markdown: {e}"))
-                }
+                Err(e) => self.error_message = Some(format!("Failed to parse markdown: {e}")),
             }
         }
         let _ = save_app_settings(&self.settings);
@@ -2179,7 +2177,11 @@ impl MarkdownViewerApp {
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Theme toggle button (rightmost)
-                    let label = if self.settings.dark_mode { "Dark" } else { "Light" };
+                    let label = if self.settings.dark_mode {
+                        "Dark"
+                    } else {
+                        "Light"
+                    };
                     if ui.small_button(label).clicked() {
                         self.theme_toggle_requested = true;
                     }
