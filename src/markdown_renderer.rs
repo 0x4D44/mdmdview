@@ -28,9 +28,9 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 use unicode_casefold::UnicodeCaseFold;
-use unicode_width::UnicodeWidthStr;
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Copy, Default)]
 struct InlineStyle {
@@ -1144,9 +1144,7 @@ impl MarkdownRenderer {
             if in_table {
                 if let Some((level, rest)) = Self::table_line_info_in_list(line, table_list_indent)
                 {
-                    if table_blockquote_level == Some(level)
-                        && Self::is_table_row_candidate(rest)
-                    {
+                    if table_blockquote_level == Some(level) && Self::is_table_row_candidate(rest) {
                         out.push_str(&Self::escape_pipes_in_inline_code_line(line));
                         i += 1;
                         continue;
@@ -1199,8 +1197,7 @@ impl MarkdownRenderer {
                             {
                                 let prefix_len = line.len().saturating_sub(rest.len());
                                 out.push_str(&line[..prefix_len]);
-                                let newline =
-                                    if line.ends_with("\r\n") { "\r\n" } else { "\n" };
+                                let newline = if line.ends_with("\r\n") { "\r\n" } else { "\n" };
                                 out.push_str(newline);
                             }
                         }
@@ -1850,10 +1847,7 @@ impl MarkdownRenderer {
 
     /// Generate a de-duplicated header slug and return the id string.
     /// Tracks occurrence counts in `slug_counts` to append `-N` suffixes for duplicates.
-    fn make_header_id(
-        spans: &[InlineSpan],
-        slug_counts: &mut HashMap<String, usize>,
-    ) -> String {
+    fn make_header_id(spans: &[InlineSpan], slug_counts: &mut HashMap<String, usize>) -> String {
         let title_text = Self::spans_plain_text(spans);
         let base = Self::slugify(&title_text);
         let count = slug_counts.entry(base.clone()).or_insert(0);
@@ -4875,10 +4869,7 @@ impl MarkdownRenderer {
                     .unwrap_or(0);
 
                 // Content width from stats (already unicode-width-based)
-                let content_graphemes = column_stats
-                    .get(i)
-                    .map(|s| s.max_graphemes)
-                    .unwrap_or(0);
+                let content_graphemes = column_stats.get(i).map(|s| s.max_graphemes).unwrap_or(0);
 
                 let display_graphemes = header_width.max(content_graphemes);
                 let content_width = display_graphemes as f32 * char_width_factor + cell_padding;
@@ -5114,8 +5105,14 @@ impl MarkdownRenderer {
         let half_col_spacing = column_spacing * 0.5;
         let half_row_spacing = row_spacing * 0.5;
         let border_rect = egui::Rect::from_min_max(
-            egui::pos2(rect.left() - half_col_spacing, rect.top() - half_row_spacing),
-            egui::pos2(rect.right() + half_col_spacing, rect.bottom() + half_row_spacing),
+            egui::pos2(
+                rect.left() - half_col_spacing,
+                rect.top() - half_row_spacing,
+            ),
+            egui::pos2(
+                rect.right() + half_col_spacing,
+                rect.bottom() + half_row_spacing,
+            ),
         );
         // Expand clip_rect to include the full border rect so borders aren't clipped.
         // The cell clip_rect may not include the outer border area.
@@ -5141,7 +5138,11 @@ impl MarkdownRenderer {
         if header_height > 0.0 {
             let header_y = rect.top() + header_height;
             if header_y < rect.bottom() {
-                painter.hline(border_rect.x_range(), header_y.round() + 0.5, separator_stroke);
+                painter.hline(
+                    border_rect.x_range(),
+                    header_y.round() + 0.5,
+                    separator_stroke,
+                );
             }
         }
 
@@ -5780,9 +5781,7 @@ impl MarkdownRenderer {
         let mut highlighted_lines = Vec::new();
 
         for line in LinesWithEndings::from(code) {
-            let ranges = highlighter
-                .highlight_line(line, &self.syntax_set)
-                .ok()?;
+            let ranges = highlighter.highlight_line(line, &self.syntax_set).ok()?;
 
             let mut tokens = Vec::new();
             for (style, text) in ranges {
@@ -5792,11 +5791,8 @@ impl MarkdownRenderer {
                     continue;
                 }
 
-                let color = Color32::from_rgb(
-                    style.foreground.r,
-                    style.foreground.g,
-                    style.foreground.b,
-                );
+                let color =
+                    Color32::from_rgb(style.foreground.r, style.foreground.g, style.foreground.b);
                 let bold = style
                     .font_style
                     .contains(syntect::highlighting::FontStyle::BOLD);
@@ -6157,15 +6153,7 @@ mod tests {
 
     /// Creates a ColumnSpec with Fixed policy for test use.
     fn fixed_spec(col: usize, name: &str, width: f32) -> ColumnSpec {
-        ColumnSpec::new(
-            col,
-            name,
-            ColumnPolicy::Fixed {
-                width,
-                clip: false,
-            },
-            None,
-        )
+        ColumnSpec::new(col, name, ColumnPolicy::Fixed { width, clip: false }, None)
     }
 
     #[test]
@@ -11476,10 +11464,7 @@ contexts:
         let empty = renderer.estimate_table_column_widths(&[], 120.0, 6.0);
         assert_eq!(empty, vec![120.0]);
 
-        let specs = vec![
-            fixed_spec(0, "A", 100.0),
-            fixed_spec(1, "B", 100.0),
-        ];
+        let specs = vec![fixed_spec(0, "A", 100.0), fixed_spec(1, "B", 100.0)];
         let widths = renderer.estimate_table_column_widths(&specs, 100.0, 10.0);
         assert_eq!(widths.len(), 2);
         let sum: f32 = widths.iter().sum();
@@ -11489,10 +11474,7 @@ contexts:
     #[test]
     fn test_estimate_table_column_widths_no_scale_when_available() {
         let renderer = MarkdownRenderer::new();
-        let specs = vec![
-            fixed_spec(0, "A", 80.0),
-            fixed_spec(1, "B", 60.0),
-        ];
+        let specs = vec![fixed_spec(0, "A", 80.0), fixed_spec(1, "B", 60.0)];
         let widths = renderer.estimate_table_column_widths(&specs, 300.0, 10.0);
         assert_eq!(widths, vec![80.0, 60.0]);
     }
@@ -11602,11 +11584,7 @@ contexts:
 
         // Three columns: 100+200+150 = 450, spacing = 10*2 = 20, total = 470
         let three = MarkdownRenderer::natural_table_width(&[100.0, 200.0, 150.0], 10.0);
-        assert!(
-            (three - 470.0).abs() < 0.1,
-            "expected 470, got {}",
-            three
-        );
+        assert!((three - 470.0).abs() < 0.1, "expected 470, got {}", three);
     }
 
     #[test]
@@ -11671,7 +11649,7 @@ contexts:
             ..Default::default()
         }]; // only 1 stat
         let resolved = vec![98.0]; // only 1 width
-        // column_count = 3, exceeds all inputs
+                                   // column_count = 3, exceeds all inputs
         let widths = renderer.estimate_natural_column_widths(&stats, &headers, &resolved, 3);
         assert_eq!(widths.len(), 3);
         // First column should be content/policy-driven
@@ -11695,7 +11673,9 @@ contexts:
     fn test_natural_widths_cjk_header_gets_double_width() {
         let renderer = MarkdownRenderer::new();
         let headers_ascii = vec![vec![InlineSpan::Text("Name".into())]]; // 4 display width
-        let headers_cjk = vec![vec![InlineSpan::Text("\u{540D}\u{524D}\u{5217}\u{5E45}".into())]]; // 4 CJK chars = 8 display width
+        let headers_cjk = vec![vec![InlineSpan::Text(
+            "\u{540D}\u{524D}\u{5217}\u{5E45}".into(),
+        )]]; // 4 CJK chars = 8 display width
         let stats = vec![ColumnStat::default()]; // no content
         let resolved = vec![0.0]; // no policy
         let widths_ascii =
@@ -12285,7 +12265,17 @@ contexts:
                 renderer.estimate_table_row_height(ui, &style, &row, &[Align::LEFT], &[40.0], 12.0);
             assert!(height >= 12.0);
             let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 10.0));
-            renderer.paint_table_dividers(ui.painter(), ui.visuals(), rect, rect, &[], 0.0, 0.0, 0.0, true);
+            renderer.paint_table_dividers(
+                ui.painter(),
+                ui.visuals(),
+                rect,
+                rect,
+                &[],
+                0.0,
+                0.0,
+                0.0,
+                true,
+            );
         });
     }
 

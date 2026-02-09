@@ -6562,9 +6562,13 @@ mod tests {
     fn test_map_init_result_variants() {
         // Tests the inlined init-error mapping pattern used in MermaidWorker::new
         let ok: Result<(), String> = Ok(());
-        assert!(ok.map_err(|err| format!("Mermaid init error: {}", err)).is_ok());
+        assert!(ok
+            .map_err(|err| format!("Mermaid init error: {}", err))
+            .is_ok());
         let err: Result<(), String> = Err("oops".to_string());
-        let msg = err.map_err(|err| format!("Mermaid init error: {}", err)).unwrap_err();
+        let msg = err
+            .map_err(|err| format!("Mermaid init error: {}", err))
+            .unwrap_err();
         assert!(msg.contains("Mermaid init error: oops"));
     }
 
