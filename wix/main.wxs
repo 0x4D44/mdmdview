@@ -16,7 +16,7 @@
     <!-- WARNING: Never change the UpgradeCode GUID - it links all versions for upgrade detection -->
     <Product
         Id='*'
-        Name='mdmdview'
+        Name='Markdown Viewer'
         UpgradeCode='2D62FD4A-A4F8-43CD-9D12-5930D4152D20'
         Manufacturer='Martin Davidson'
         Language='1033'
@@ -78,7 +78,7 @@
                 <Directory Id='ApplicationProgramsFolder' Name='mdmdview'>
                     <Component Id='ApplicationShortcut' Guid='*'>
                         <Shortcut Id='ApplicationStartMenuShortcut'
-                            Name='mdmdview'
+                            Name='Markdown Viewer'
                             Description='Markdown Viewer'
                             Target='[#exe0]'
                             WorkingDirectory='APPLICATIONFOLDER'
@@ -97,7 +97,7 @@
 
         <Feature
             Id='Complete'
-            Title='mdmdview'
+            Title='Markdown Viewer'
             Description='Markdown viewer application'
             Level='1'
             ConfigurableDirectory='APPLICATIONFOLDER'
