@@ -1,6 +1,6 @@
+use crate::ThemeColors;
 #[cfg(feature = "mermaid-quickjs")]
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
-use crate::ThemeColors;
 use egui::{Color32, RichText, Stroke};
 #[cfg(feature = "mermaid-quickjs")]
 use std::cell::{Cell, RefCell};
@@ -821,7 +821,10 @@ impl MermaidRenderer {
             if mermaid_js_empty() {
                 egui::Frame::none()
                     .fill(ThemeColors::current(ui.visuals().dark_mode).box_bg)
-                    .stroke(Stroke::new(1.0, ThemeColors::current(ui.visuals().dark_mode).box_border))
+                    .stroke(Stroke::new(
+                        1.0,
+                        ThemeColors::current(ui.visuals().dark_mode).box_border,
+                    ))
                     .inner_margin(8.0)
                     .show(ui, |ui| {
                         ui.label(
@@ -896,7 +899,10 @@ impl MermaidRenderer {
             if let Some(err) = svg_error.or(texture_error) {
                 egui::Frame::none()
                     .fill(ThemeColors::current(ui.visuals().dark_mode).box_bg)
-                    .stroke(Stroke::new(1.0, ThemeColors::current(ui.visuals().dark_mode).box_border))
+                    .stroke(Stroke::new(
+                        1.0,
+                        ThemeColors::current(ui.visuals().dark_mode).box_border,
+                    ))
                     .inner_margin(8.0)
                     .show(ui, |ui| {
                         ui.label(
@@ -961,12 +967,17 @@ impl MermaidRenderer {
                             .insert(svg_key, "Mermaid worker pool unavailable".to_string());
                         egui::Frame::none()
                             .fill(ThemeColors::current(ui.visuals().dark_mode).box_bg)
-                            .stroke(Stroke::new(1.0, ThemeColors::current(ui.visuals().dark_mode).box_border))
+                            .stroke(Stroke::new(
+                                1.0,
+                                ThemeColors::current(ui.visuals().dark_mode).box_border,
+                            ))
                             .inner_margin(8.0)
                             .show(ui, |ui| {
                                 ui.label(
                                     RichText::new("Mermaid worker pool unavailable.")
-                                        .color(ThemeColors::current(ui.visuals().dark_mode).box_title)
+                                        .color(
+                                            ThemeColors::current(ui.visuals().dark_mode).box_title,
+                                        )
                                         .family(egui::FontFamily::Monospace)
                                         .size(code_font_size),
                                 );
@@ -975,7 +986,9 @@ impl MermaidRenderer {
                                     RichText::new(code)
                                         .family(egui::FontFamily::Monospace)
                                         .size(code_font_size)
-                                        .color(ThemeColors::current(ui.visuals().dark_mode).box_body),
+                                        .color(
+                                            ThemeColors::current(ui.visuals().dark_mode).box_body,
+                                        ),
                                 );
                             });
                         return true;
@@ -987,7 +1000,10 @@ impl MermaidRenderer {
             self.mermaid_frame_pending.set(true);
             egui::Frame::none()
                 .fill(ThemeColors::current(ui.visuals().dark_mode).box_bg)
-                .stroke(Stroke::new(1.0, ThemeColors::current(ui.visuals().dark_mode).box_border))
+                .stroke(Stroke::new(
+                    1.0,
+                    ThemeColors::current(ui.visuals().dark_mode).box_border,
+                ))
                 .inner_margin(8.0)
                 .show(ui, |ui| {
                     // Reserve minimum height for placeholder to reduce layout shift

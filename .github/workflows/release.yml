@@ -35,23 +35,39 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: |
+          # WiX Toolset v3.14.1 - update URL if upgrading
+          Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314.exe" -OutFile wix314.exe
+          Start-Process -Wait -FilePath .\wix314.exe -ArgumentList '/install','/quiet','/norestart'
+
+      - name: Install cargo-wix
+        run: cargo install cargo-wix --locked
+
       - name: Build release (deny warnings)
         run: cargo build --release
         env:
           RUSTFLAGS: -D warnings
 
-      - name: Package artifact
+      - name: Build MSI installer
+        run: cargo wix --no-build
+
+      - name: Package artifacts
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target/release/mdmdview.exe dist/mdmdview.exe
           Compress-Archive -Path dist/mdmdview.exe -DestinationPath "mdmdview-${{ github.ref_name }}-windows-x86_64.zip"
+          Copy-Item target/wix/*.msi "mdmdview-${{ github.ref_name }}-windows-x86_64.msi"
 
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: mdmdview-Windows
-          path: mdmdview-${{ github.ref_name }}-windows-x86_64.zip
+          path: |
+            mdmdview-${{ github.ref_name }}-windows-x86_64.zip
+            mdmdview-${{ github.ref_name }}-windows-x86_64.msi
 
   release:
     name: Publish Release
@@ -72,4 +88,6 @@ jobs:
           name: ${{ github.ref_name }}
           draft: false
           generate_release_notes: true
-          files: artifacts/*.zip
+          files: |
+            artifacts/*.zip
+            artifacts/*.msi
