@@ -80,15 +80,25 @@ Drop files and folders directly from your file explorer:
 
 ### Installation
 
-#### Option 1: Download Pre-built Binary (Recommended)
+#### Option 1: Windows MSI Installer (Recommended for Windows)
 
 1. Go to [Releases](https://github.com/0x4D44/mdmdview/releases)
-2. Download the latest release for your platform:
-   - `mdmdview-vX.Y.Z-windows-x86_64.zip` (Windows)
-   - `mdmdview-vX.Y.Z-linux-x86_64.tar.gz` (Linux)
-3. Extract and run the executable
+2. Download `mdmdview-vX.Y.Z-windows-x86_64.msi`
+3. Run the installer — it will:
+   - Install to `C:\Program Files\mdmdview\`
+   - Create a Start Menu shortcut
+   - Register `.md` and `.markdown` file associations
+   - Add an entry in Add/Remove Programs
+4. Upgrading: run a newer MSI and the old version is removed automatically
 
-#### Option 2: Build from Source
+#### Option 2: Download Portable Binary
+
+1. Go to [Releases](https://github.com/0x4D44/mdmdview/releases)
+2. Download the ZIP for your platform:
+   - `mdmdview-vX.Y.Z-windows-x86_64.zip` (Windows)
+3. Extract and run the executable — no installation required
+
+#### Option 3: Build from Source
 
 ```bash
 # Clone the repository
@@ -329,6 +339,9 @@ mdmdview/
 │   ├── icon.ico                  # Application icon
 │   └── vendor/
 │       └── mermaid.min.js        # For embedded Mermaid renderer
+├── wix/
+│   ├── main.wxs                  # WiX installer source (stable GUIDs)
+│   └── License.rtf               # License shown during install
 ├── Cargo.toml                    # Dependencies and build config
 └── README.md                     # This file
 ```
@@ -403,7 +416,18 @@ cargo run
 # Run with specific file
 cargo run -- document.md
 
+# Build MSI installer (requires WiX Toolset v3 + cargo-wix)
+cargo wix                    # full: build release + create MSI
+cargo wix --no-build         # MSI only (if release binary already built)
 ```
+
+#### MSI Installer Prerequisites
+
+Building the MSI installer requires:
+- [WiX Toolset v3.14.1](https://github.com/wixtoolset/wix3/releases) — install and ensure `candle.exe`/`light.exe` are in PATH
+- `cargo-wix` — install with `cargo install cargo-wix`
+
+The WiX source file (`wix/main.wxs`) is checked into the repository. **Do not regenerate it** — it contains a stable `UpgradeCode` GUID required for upgrade detection across versions.
 
 ### Testing
 
@@ -461,10 +485,10 @@ git push origin v1.0.0
 ```
 
 This triggers the `Release` workflow which:
-1. Builds on Windows and Linux runners
-2. Creates release archives:
-   - `mdmdview-vX.Y.Z-windows-x86_64.zip`
-   - `mdmdview-vX.Y.Z-linux-x86_64.tar.gz`
+1. Builds release binary and MSI installer on Windows
+2. Creates release artifacts:
+   - `mdmdview-vX.Y.Z-windows-x86_64.msi` (installer)
+   - `mdmdview-vX.Y.Z-windows-x86_64.zip` (portable)
 3. Attaches artifacts to GitHub release
 
 **Manual Release:**
@@ -601,7 +625,7 @@ Try breaking large documents into smaller files.
 
 ## 📜 License
 
-This project is provided as-is for demonstration purposes.
+This project is licensed under the [MIT License](LICENSE).
 
 ### Third-Party Assets
 
