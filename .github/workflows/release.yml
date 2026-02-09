@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*.*.*"
+      - "v*"
   workflow_dispatch:
     inputs:
       toolchain:
@@ -34,6 +34,17 @@ jobs:
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --all-targets
+        env:
+          RUSTFLAGS: -D warnings
 
       - name: Install WiX Toolset
         shell: pwsh
