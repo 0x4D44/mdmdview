@@ -6119,24 +6119,6 @@ mod tests {
         );
     }
 
-    /// Finds the first table in a slice of parsed elements and returns its (headers, rows, alignments).
-    fn find_table(
-        elements: &[MarkdownElement],
-    ) -> Option<(
-        &Vec<Vec<InlineSpan>>,
-        &Vec<Vec<Vec<InlineSpan>>>,
-        &Vec<Alignment>,
-    )> {
-        elements.iter().find_map(|el| match el {
-            MarkdownElement::Table {
-                headers,
-                rows,
-                alignments,
-            } => Some((headers, rows, alignments)),
-            _ => None,
-        })
-    }
-
     /// Creates a ColumnSpec with Resizable policy for test use.
     fn resizable_spec(col: usize, name: &str, min: f32, preferred: f32) -> ColumnSpec {
         ColumnSpec::new(
