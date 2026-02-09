@@ -24,15 +24,20 @@ cargo run
 # Run with a specific file
 cargo run -- document.md
 
-# Run tests
-cargo test
+# Run tests (~900+ tests, takes ~8 minutes on Windows)
+# Use mdtimeout 600 to avoid getting stuck
+mdtimeout 600 cargo test
 
-# Run specific test module
+# Run specific test module (much faster, seconds)
 cargo test markdown_renderer
 cargo test app
 
 # Run tests with output
 cargo test -- --nocapture
+
+# Run local CI pipeline (mirrors GitHub Actions)
+.\ci-local.ps1          # full: fmt, clippy, build, test, release
+.\ci-local.ps1 -Quick   # skip release build
 
 # Code formatting and linting
 cargo fmt
@@ -264,6 +269,7 @@ Key types for markdown representation:
 - Use `tempfile` crate for file system tests
 - Run specific test modules: `cargo test markdown_renderer`, `cargo test app`
 - Run tests after any changes to parsing/rendering logic
+- **Timeouts**: Full test suite (~900+ tests) takes ~8 minutes. Always use `mdtimeout 600` for full runs. Individual test modules complete in seconds.
 
 ### File Operations
 
