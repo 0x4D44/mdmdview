@@ -407,6 +407,9 @@ pub struct MarkdownViewerApp {
     readability_request_id: u64,
     /// Frame counter for delayed window visibility (to avoid white flash on startup)
     startup_frame: u8,
+    /// Whether GPU textures have been released (e.g., due to window minimize).
+    /// When true, textures will rebuild lazily on the next visible render.
+    gpu_textures_released: bool,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -634,6 +637,7 @@ impl MarkdownViewerApp {
             readability_stats: None,
             readability_request_id: 0,
             startup_frame: 0,
+            gpu_textures_released: false,
         };
         // Apply loaded settings to renderer
         app.renderer
@@ -2357,6 +2361,21 @@ impl MarkdownViewerApp {
             if self.startup_frame == 3 {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             }
+        }
+
+        // Detect minimize → release GPU textures to reduce idle GPU usage.
+        // On Windows, the Focused(false) event during minimize triggers a RedrawRequested
+        // that bypasses eframe's minimize filter, giving us this transition frame.
+        let is_minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+
+        if is_minimized && !self.gpu_textures_released && self.screenshot.is_none() {
+            self.renderer.release_gpu_textures();
+            self.gpu_textures_released = true;
+        }
+
+        if !is_minimized && self.gpu_textures_released {
+            self.gpu_textures_released = false;
+            ctx.request_repaint(); // Ensure full re-render to rebuild textures
         }
 
         // Debug: log repaint causes and input state when MDMDVIEW_DEBUG_REPAINT is set

@@ -527,6 +527,12 @@ impl ImageCache {
         self.order.retain(|entry| entry != key);
         self.order.push_back(key.to_string());
     }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.total_bytes = 0;
+    }
 }
 
 #[derive(Clone)]
@@ -5445,6 +5451,14 @@ impl MarkdownRenderer {
         self.image_failures.borrow_mut().clear();
     }
 
+    /// Release GPU textures to reduce idle GPU usage (e.g., when minimized).
+    /// Textures rebuild lazily on next render. SVG/error caches retained for fast rebuilds.
+    pub fn release_gpu_textures(&self) {
+        self.emoji_textures.borrow_mut().clear();
+        self.image_textures.borrow_mut().clear();
+        self.mermaid.release_gpu_textures();
+    }
+
     pub fn table_layout_cache_stats(&self) -> (u64, u64) {
         self.table_layout_cache.borrow().stats()
     }
@@ -6211,6 +6225,32 @@ mod tests {
         cache.remove("x");
         assert_eq!(cache.current_bytes(), 0);
         assert!(!cache.contains_key("x"));
+    }
+
+    #[test]
+    fn test_image_cache_clear() {
+        let mut cache = ImageCache::new(10);
+        let entry1 = make_test_cache_entry([4, 4]);
+        let entry2 = make_test_cache_entry([8, 8]);
+        let entry3 = make_test_cache_entry([16, 16]);
+
+        cache.insert("a".to_string(), entry1);
+        cache.insert("b".to_string(), entry2);
+        cache.insert("c".to_string(), entry3);
+
+        // Verify entries exist and bytes are tracked
+        assert!(cache.contains_key("a"));
+        assert!(cache.contains_key("b"));
+        assert!(cache.contains_key("c"));
+        assert_eq!(cache.current_bytes(), 64 + 256 + 1024); // 4*4*4 + 8*8*4 + 16*16*4
+
+        cache.clear();
+
+        // Verify all entries removed and bytes zeroed
+        assert!(!cache.contains_key("a"));
+        assert!(!cache.contains_key("b"));
+        assert!(!cache.contains_key("c"));
+        assert_eq!(cache.current_bytes(), 0);
     }
 
     // --- LruCache Tests ---
@@ -13008,5 +13048,49 @@ contexts:
         let dark_first_color = dark_tokens[0][0].color;
         let light_first_color = light_tokens[0][0].color;
         assert_ne!(dark_first_color, light_first_color);
+    }
+
+    #[test]
+    fn test_release_gpu_textures_clears_all_caches() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|ctx, _ui| {
+            // Populate emoji_textures cache
+            let emoji_tex = ctx.load_texture(
+                "test-emoji",
+                egui::ColorImage::new([2, 2], Color32::RED),
+                egui::TextureOptions::LINEAR,
+            );
+            renderer
+                .emoji_textures
+                .borrow_mut()
+                .insert("rocket".to_string(), emoji_tex);
+
+            // Populate image_textures cache
+            let img_tex = ctx.load_texture(
+                "test-image",
+                egui::ColorImage::new([2, 2], Color32::BLUE),
+                egui::TextureOptions::LINEAR,
+            );
+            renderer.image_textures.borrow_mut().insert(
+                "test.png".to_string(),
+                ImageCacheEntry {
+                    texture: img_tex,
+                    size: [64, 32],
+                    modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([64, 32]),
+                },
+            );
+
+            // Verify caches are populated
+            assert!(renderer.emoji_textures.borrow().len() > 0);
+            assert!(renderer.image_textures.borrow().entries.len() > 0);
+
+            // Call release_gpu_textures
+            renderer.release_gpu_textures();
+
+            // Assert all texture caches are empty
+            assert_eq!(renderer.emoji_textures.borrow().len(), 0);
+            assert_eq!(renderer.image_textures.borrow().entries.len(), 0);
+        });
     }
 }

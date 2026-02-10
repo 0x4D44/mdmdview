@@ -554,6 +554,13 @@ impl TextureCache {
     fn current_bytes(&self) -> usize {
         self.current_bytes
     }
+
+    /// Clears all cached textures and resets the cache to empty state.
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.current_bytes = 0;
+    }
 }
 
 #[cfg(feature = "mermaid-quickjs")]
@@ -709,6 +716,16 @@ impl MermaidRenderer {
             #[cfg(feature = "mermaid-quickjs")]
             worker_handles,
         }
+    }
+
+    /// Release GPU textures to reduce idle GPU usage.
+    /// SVG cache is retained so diagrams can be quickly re-rasterized on restore.
+    #[cfg(feature = "mermaid-quickjs")]
+    pub(crate) fn release_gpu_textures(&self) {
+        self.mermaid_textures.borrow_mut().clear();
+        // mermaid_svg_cache intentionally retained for fast rebuild
+        // mermaid_errors intentionally retained to prevent retry storms
+        // mermaid_texture_errors intentionally retained
     }
 
     fn default_mermaid_preference() -> MermaidRenderPreference {
@@ -6048,6 +6065,42 @@ mod tests {
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
+    fn test_texture_cache_clear() {
+        let ctx = egui::Context::default();
+        let tex = ctx.load_texture(
+            "clear_test",
+            egui::ColorImage::new([10, 10], Color32::WHITE),
+            egui::TextureOptions::LINEAR,
+        );
+        let mut cache = TextureCache::new(10, 1024 * 1024);
+
+        let entry = MermaidTextureEntry {
+            texture: tex.clone(),
+            size: [10, 10], // 400 bytes
+        };
+
+        // Insert multiple entries
+        cache.insert("a".to_string(), entry.clone());
+        cache.insert("b".to_string(), entry.clone());
+        cache.insert("c".to_string(), entry.clone());
+
+        // Verify cache has entries
+        assert_eq!(cache.len(), 3);
+        assert_eq!(cache.current_bytes(), 1200); // 3 * 400 bytes
+
+        // Clear the cache
+        cache.clear();
+
+        // Verify cache is now empty
+        assert_eq!(cache.len(), 0);
+        assert_eq!(cache.current_bytes(), 0);
+        assert!(cache.get(&"a".to_string()).is_none());
+        assert!(cache.get(&"b".to_string()).is_none());
+        assert!(cache.get(&"c".to_string()).is_none());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
     fn test_mermaid_renderer_cache_branches() {
         let renderer = MermaidRenderer::new();
         let ctx = egui::Context::default();
@@ -8791,5 +8844,55 @@ mod tests {
             MermaidWorker::unescape_html_entities("no entities"),
             "no entities"
         );
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_release_gpu_textures_preserves_svg_cache() {
+        let (_result_tx, result_rx) = bounded(1);
+        let renderer = test_renderer_with_channels(None, result_rx);
+
+        // Create a test texture and add to texture cache
+        let ctx = egui::Context::default();
+        let input = test_raw_input(800.0, 600.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let image = egui::ColorImage::new([2, 2], Color32::WHITE);
+                let texture = ui.ctx().load_texture(
+                    "test-mermaid",
+                    image,
+                    egui::TextureOptions::default()
+                );
+
+                // Insert into texture cache
+                renderer.mermaid_textures.borrow_mut().insert(
+                    "test-texture-key".to_string(),
+                    MermaidTextureEntry {
+                        texture,
+                        size: [100, 100],
+                    },
+                );
+            });
+        });
+
+        // Insert into SVG cache
+        let svg_key = MermaidRenderer::hash_str("graph TD; A-->B;");
+        renderer.mermaid_svg_cache.borrow_mut().insert(
+            svg_key,
+            "<svg>test</svg>".to_string()
+        );
+
+        // Verify both caches are populated
+        assert_eq!(renderer.mermaid_textures.borrow().len(), 1);
+        assert_eq!(renderer.mermaid_svg_cache.borrow().len(), 1);
+
+        // Call release_gpu_textures
+        renderer.release_gpu_textures();
+
+        // Assert texture cache is EMPTY
+        assert_eq!(renderer.mermaid_textures.borrow().len(), 0);
+
+        // Assert SVG cache is NOT EMPTY (still has entries)
+        assert_eq!(renderer.mermaid_svg_cache.borrow().len(), 1);
     }
 }
