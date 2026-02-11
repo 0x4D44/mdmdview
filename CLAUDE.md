@@ -35,9 +35,8 @@ cargo test app
 # Run tests with output
 cargo test -- --nocapture
 
-# Run local CI pipeline (mirrors GitHub Actions)
-.\ci-local.ps1          # full: fmt, clippy, build, test, release
-.\ci-local.ps1 -Quick   # skip release build
+# Pre-release validation (mirrors GitHub Actions release pipeline)
+.\scripts\prerelease.ps1
 
 # Code formatting and linting
 cargo fmt
