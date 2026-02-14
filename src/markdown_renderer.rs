@@ -5856,6 +5856,63 @@ impl MarkdownRenderer {
     }
 }
 
+/// Parse a `data:image/...;base64,...` URI and return the decoded bytes.
+///
+/// Returns `None` for non-base64 data URIs, non-image MIME types, empty
+/// payloads, or base64 decode failures. ASCII whitespace in the payload
+/// is stripped before decoding (some generators wrap long base64 lines).
+fn decode_data_uri(uri: &str) -> Option<Vec<u8>> {
+    // Must start with "data:"
+    let rest = uri.strip_prefix("data:")?;
+
+    // Find the comma separating metadata from payload
+    let comma_pos = rest.find(',')?;
+    let metadata = &rest[..comma_pos];
+    let payload = &rest[comma_pos + 1..];
+
+    // Must be base64-encoded (we don't support raw/percent-encoded data URIs)
+    if !metadata.contains(";base64") {
+        return None;
+    }
+
+    // Must be an image type (defense in depth — we only render images)
+    let mime = metadata.split(';').next().unwrap_or("");
+    if !mime.starts_with("image/") {
+        return None;
+    }
+
+    // Reject empty payload early
+    if payload.is_empty() {
+        return None;
+    }
+
+    // Strip ASCII whitespace before decoding — base64 0.22 STANDARD engine
+    // is strict and rejects embedded newlines/spaces. Some generators wrap
+    // long base64 payloads across lines.
+    let cleaned: String = payload
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect();
+
+    // Decode base64
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(&cleaned)
+        .ok()
+}
+
+/// Compute a fixed-size cache key for a data URI string.
+///
+/// Uses `DefaultHasher` (SipHash-1-3) to produce a 16-hex-digit hash,
+/// prefixed with `data-uri:`. The resulting key is always 25 characters
+/// regardless of payload size, preventing megabyte-sized URI strings from
+/// bloating the `ImageCache` key storage.
+fn data_uri_cache_key(uri: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    uri.hash(&mut hasher);
+    format!("data-uri:{:016x}", hasher.finish())
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -13092,5 +13149,235 @@ contexts:
             assert_eq!(renderer.emoji_textures.borrow().len(), 0);
             assert_eq!(renderer.image_textures.borrow().entries.len(), 0);
         });
+    }
+
+    // ---------------------------------------------------------------
+    // decode_data_uri() tests
+    // ---------------------------------------------------------------
+
+    /// Helper: create a minimal 1x1 PNG in memory and return the raw bytes.
+    fn make_1x1_png() -> Vec<u8> {
+        let mut buf = Vec::new();
+        let encoder = PngEncoder::new(&mut buf);
+        // 1x1 white pixel, RGBA
+        encoder
+            .write_image(&[255, 255, 255, 255], 1, 1, ColorType::Rgba8)
+            .expect("encode 1x1 PNG");
+        buf
+    }
+
+    /// Helper: create a minimal JPEG in memory using the `image` crate.
+    fn make_1x1_jpeg() -> Vec<u8> {
+        use image::codecs::jpeg::JpegEncoder;
+        let mut buf = Vec::new();
+        let encoder = JpegEncoder::new(&mut buf);
+        // 1x1 white pixel, RGB (JPEG doesn't support alpha)
+        encoder
+            .write_image(&[255, 255, 255], 1, 1, ColorType::Rgb8)
+            .expect("encode 1x1 JPEG");
+        buf
+    }
+
+    #[test]
+    fn test_decode_data_uri_valid_png() {
+        use base64::Engine;
+        let png_bytes = make_1x1_png();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+        let uri = format!("data:image/png;base64,{b64}");
+        let decoded = decode_data_uri(&uri);
+        assert!(decoded.is_some(), "valid PNG data URI should decode");
+        assert_eq!(decoded.unwrap(), png_bytes);
+    }
+
+    #[test]
+    fn test_decode_data_uri_valid_jpeg() {
+        use base64::Engine;
+        let jpeg_bytes = make_1x1_jpeg();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
+        let uri = format!("data:image/jpeg;base64,{b64}");
+        let decoded = decode_data_uri(&uri);
+        assert!(decoded.is_some(), "valid JPEG data URI should decode");
+        assert_eq!(decoded.unwrap(), jpeg_bytes);
+    }
+
+    #[test]
+    fn test_decode_data_uri_valid_svg() {
+        use base64::Engine;
+        let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"/>";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(svg);
+        let uri = format!("data:image/svg+xml;base64,{b64}");
+        let decoded = decode_data_uri(&uri);
+        assert!(decoded.is_some(), "valid SVG data URI should decode");
+        assert_eq!(decoded.unwrap(), svg.to_vec());
+    }
+
+    #[test]
+    fn test_decode_data_uri_empty_payload() {
+        assert!(
+            decode_data_uri("data:image/png;base64,").is_none(),
+            "empty payload should return None"
+        );
+    }
+
+    #[test]
+    fn test_decode_data_uri_missing_base64_marker() {
+        assert!(
+            decode_data_uri("data:image/png,raw").is_none(),
+            "missing ;base64 marker should return None"
+        );
+    }
+
+    #[test]
+    fn test_decode_data_uri_non_image_mime() {
+        assert!(
+            decode_data_uri("data:text/plain;base64,AAAA").is_none(),
+            "non-image MIME type should return None"
+        );
+    }
+
+    #[test]
+    fn test_decode_data_uri_invalid_base64() {
+        assert!(
+            decode_data_uri("data:image/png;base64,!!!").is_none(),
+            "invalid base64 characters should return None"
+        );
+    }
+
+    #[test]
+    fn test_decode_data_uri_not_a_data_uri() {
+        assert!(
+            decode_data_uri("https://example.com/img.png").is_none(),
+            "non-data URI should return None"
+        );
+    }
+
+    #[test]
+    fn test_decode_data_uri_missing_comma() {
+        assert!(
+            decode_data_uri("data:image/png;base64").is_none(),
+            "missing comma should return None"
+        );
+    }
+
+    #[test]
+    fn test_decode_data_uri_no_mime_type() {
+        assert!(
+            decode_data_uri("data:;base64,AAAA").is_none(),
+            "no MIME type should return None"
+        );
+    }
+
+    #[test]
+    fn test_decode_data_uri_charset_parameter_present() {
+        use base64::Engine;
+        let png_bytes = make_1x1_png();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+        let uri = format!("data:image/png;charset=utf-8;base64,{b64}");
+        let decoded = decode_data_uri(&uri);
+        assert!(
+            decoded.is_some(),
+            "charset parameter before ;base64 should still decode"
+        );
+        assert_eq!(decoded.unwrap(), png_bytes);
+    }
+
+    #[test]
+    fn test_decode_data_uri_whitespace_in_payload() {
+        use base64::Engine;
+        let png_bytes = make_1x1_png();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+        // Inject newlines into the base64 payload
+        let b64_with_newlines: String = b64
+            .chars()
+            .enumerate()
+            .flat_map(|(i, c)| {
+                if i > 0 && i % 10 == 0 {
+                    vec!['\n', c]
+                } else {
+                    vec![c]
+                }
+            })
+            .collect();
+        let uri = format!("data:image/png;base64,{b64_with_newlines}");
+        let decoded = decode_data_uri(&uri);
+        assert!(
+            decoded.is_some(),
+            "whitespace in payload should be stripped before decoding"
+        );
+        assert_eq!(decoded.unwrap(), png_bytes);
+    }
+
+    #[test]
+    fn test_decode_data_uri_tabs_in_payload() {
+        use base64::Engine;
+        let png_bytes = make_1x1_png();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+        // Inject tabs and spaces into the base64 payload
+        let b64_with_tabs: String = b64
+            .chars()
+            .enumerate()
+            .flat_map(|(i, c)| {
+                if i > 0 && i % 8 == 0 {
+                    vec!['\t', ' ', c]
+                } else {
+                    vec![c]
+                }
+            })
+            .collect();
+        let uri = format!("data:image/png;base64,{b64_with_tabs}");
+        let decoded = decode_data_uri(&uri);
+        assert!(
+            decoded.is_some(),
+            "tabs and spaces in payload should be stripped before decoding"
+        );
+        assert_eq!(decoded.unwrap(), png_bytes);
+    }
+
+    // ---------------------------------------------------------------
+    // data_uri_cache_key() tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_data_uri_cache_key_deterministic() {
+        let uri = "data:image/png;base64,iVBORw0KGgo=";
+        let key1 = data_uri_cache_key(uri);
+        let key2 = data_uri_cache_key(uri);
+        assert_eq!(key1, key2, "same URI must produce same cache key");
+    }
+
+    #[test]
+    fn test_data_uri_cache_key_different_uris_differ() {
+        let key1 = data_uri_cache_key("data:image/png;base64,AAAA");
+        let key2 = data_uri_cache_key("data:image/png;base64,BBBB");
+        assert_ne!(key1, key2, "different URIs must produce different cache keys");
+    }
+
+    #[test]
+    fn test_data_uri_cache_key_starts_with_prefix() {
+        let key = data_uri_cache_key("data:image/png;base64,test");
+        assert!(
+            key.starts_with("data-uri:"),
+            "cache key must start with 'data-uri:' prefix, got: {key}"
+        );
+    }
+
+    #[test]
+    fn test_data_uri_cache_key_fixed_length() {
+        let short_uri = "data:image/png;base64,AA==";
+        let long_uri = format!(
+            "data:image/png;base64,{}",
+            "A".repeat(1_000_000)
+        );
+        let short_key = data_uri_cache_key(short_uri);
+        let long_key = data_uri_cache_key(&long_uri);
+        assert_eq!(
+            short_key.len(),
+            long_key.len(),
+            "cache key length must be fixed regardless of input size (short={}, long={})",
+            short_key.len(),
+            long_key.len()
+        );
+        // "data-uri:" (9 chars) + 16 hex digits = 25 chars
+        assert_eq!(short_key.len(), 25, "expected 25-char cache key, got {}", short_key.len());
     }
 }
