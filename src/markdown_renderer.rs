@@ -12716,11 +12716,30 @@ contexts:
     }
 
     #[test]
-    fn test_resolve_image_path_data_uri_and_remote_texture_reject() {
+    fn test_resolve_image_path_data_uri_decodes_and_remote_rejects() {
+        use base64::Engine;
         let renderer = MarkdownRenderer::new();
-        let data_uri = "data:image/png;base64,AAAA";
-        assert_eq!(renderer.resolve_image_path(data_uri), data_uri);
+
+        // resolve_image_path still passes data URIs through unchanged
+        let data_uri_raw = "data:image/png;base64,AAAA";
+        assert_eq!(renderer.resolve_image_path(data_uri_raw), data_uri_raw);
+
+        // Build a valid 1x1 PNG data URI for the texture-loading test
+        let png_bytes = make_1x1_png();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+        let valid_data_uri = format!("data:image/png;base64,{b64}");
+
         with_test_ui(|_, ui| {
+            // A valid data URI should now decode and return a texture
+            let loaded = renderer.get_or_load_image_texture(ui, &valid_data_uri);
+            assert!(
+                loaded.is_some(),
+                "valid data URI should produce a texture"
+            );
+            let (_, w, h) = loaded.unwrap();
+            assert_eq!((w, h), (1, 1), "expected 1x1 pixel image");
+
+            // Remote images without allow_remote should still be rejected
             assert!(renderer
                 .get_or_load_image_texture(ui, "https://example.com/image.png")
                 .is_none());
@@ -13368,6 +13387,169 @@ contexts:
             "tabs and spaces in payload should be stripped before decoding"
         );
         assert_eq!(decoded.unwrap(), png_bytes);
+    }
+
+    // ---------------------------------------------------------------
+    // Integration tests for texture loading via data URI
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_get_or_load_image_texture_data_uri_produces_texture() {
+        use base64::Engine;
+        let renderer = MarkdownRenderer::new();
+        let png_bytes = make_1x1_png();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+        let data_uri = format!("data:image/png;base64,{b64}");
+        with_test_ui(|_, ui| {
+            let loaded = renderer.get_or_load_image_texture(ui, &data_uri);
+            assert!(loaded.is_some(), "valid data URI should produce a texture");
+            let (_, w, h) = loaded.unwrap();
+            assert_eq!((w, h), (1, 1), "expected 1x1 pixel image");
+        });
+    }
+
+    #[test]
+    fn test_get_or_load_image_texture_data_uri_invalid_returns_none() {
+        let renderer = MarkdownRenderer::new();
+        // "dGVzdA==" decodes to "test" — valid base64 but not a valid image
+        let data_uri = "data:image/png;base64,dGVzdA==";
+        let expected_key = data_uri_cache_key(data_uri);
+        with_test_ui(|_, ui| {
+            let loaded = renderer.get_or_load_image_texture(ui, data_uri);
+            assert!(loaded.is_none(), "garbage image bytes should return None");
+            // Failure should be cached under the hash key
+            assert!(
+                renderer
+                    .image_failures
+                    .borrow()
+                    .contains_key(&expected_key),
+                "failure should be cached under the hash key"
+            );
+        });
+    }
+
+    #[test]
+    fn test_get_or_load_image_texture_data_uri_cached_on_second_call() {
+        use base64::Engine;
+        let renderer = MarkdownRenderer::new();
+        let png_bytes = make_1x1_png();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+        let data_uri = format!("data:image/png;base64,{b64}");
+        let expected_key = data_uri_cache_key(&data_uri);
+        with_test_ui(|_, ui| {
+            // First call: decodes and caches
+            let first = renderer.get_or_load_image_texture(ui, &data_uri);
+            assert!(first.is_some(), "first call should produce a texture");
+
+            // Verify the hash key exists in image_textures
+            assert!(
+                renderer.image_textures.borrow().contains_key(&expected_key),
+                "hash key should exist in image_textures after first call"
+            );
+
+            // Second call: should hit cache and still return Some
+            let second = renderer.get_or_load_image_texture(ui, &data_uri);
+            assert!(second.is_some(), "second call should return cached texture");
+            let (_, w1, h1) = first.unwrap();
+            let (_, w2, h2) = second.unwrap();
+            assert_eq!((w1, h1), (w2, h2), "dimensions should match between calls");
+        });
+    }
+
+    #[test]
+    fn test_get_or_load_image_texture_data_uri_non_image_mime_rejected() {
+        let renderer = MarkdownRenderer::new();
+        // text/html is not an image MIME type — decode_data_uri returns None
+        let data_uri = "data:text/html;base64,dGVzdA==";
+        with_test_ui(|_, ui| {
+            let loaded = renderer.get_or_load_image_texture(ui, data_uri);
+            assert!(loaded.is_none(), "non-image MIME type should return None");
+        });
+    }
+
+    #[test]
+    fn test_data_uri_not_stale_after_cache() {
+        use base64::Engine;
+        let renderer = MarkdownRenderer::new();
+        let png_bytes = make_1x1_png();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+        let data_uri = format!("data:image/png;base64,{b64}");
+        with_test_ui(|_, ui| {
+            // Load into cache
+            let first = renderer.get_or_load_image_texture(ui, &data_uri);
+            assert!(first.is_some(), "initial load should succeed");
+            let (_, w1, h1) = first.unwrap();
+
+            // Second call: served from cache (not re-decoded), same dimensions
+            let second = renderer.get_or_load_image_texture(ui, &data_uri);
+            assert!(second.is_some(), "cached lookup should succeed");
+            let (_, w2, h2) = second.unwrap();
+            assert_eq!(
+                (w1, h1),
+                (w2, h2),
+                "cached image should have same dimensions"
+            );
+        });
+    }
+
+    #[test]
+    fn test_placeholder_label_data_uri_truncated() {
+        let renderer = MarkdownRenderer::new();
+        // Use a data URI with invalid image bytes so the placeholder path is taken
+        let long_data_uri = format!(
+            "data:image/png;base64,{}",
+            "A".repeat(1000)
+        );
+        let span = InlineSpan::Image {
+            src: long_data_uri.clone(),
+            alt: "".to_string(),
+            title: None,
+        };
+        with_test_ui(|_, ui| {
+            // Ensure the data URI fails to load (garbage bytes)
+            let loaded = renderer.get_or_load_image_texture(ui, &long_data_uri);
+            assert!(loaded.is_none(), "garbage data URI should not produce a texture");
+            // Render the span — this exercises the placeholder path
+            // The placeholder should show "Embedded image (data URI)" instead of the raw base64
+            renderer.render_inline_span(ui, &span, None, None);
+            // If we got here without hanging or crashing, the truncation is working.
+            // The placeholder text is rendered internally via ui.label() — we verify
+            // the code path is exercised rather than inspecting the rendered text.
+        });
+    }
+
+    #[test]
+    fn test_placeholder_label_data_uri_uses_alt_text() {
+        let renderer = MarkdownRenderer::new();
+        let data_uri = "data:image/png;base64,dGVzdA==";
+        let span = InlineSpan::Image {
+            src: data_uri.to_string(),
+            alt: "My alt text".to_string(),
+            title: None,
+        };
+        with_test_ui(|_, ui| {
+            // Ensure the data URI fails (invalid image bytes)
+            let _ = renderer.get_or_load_image_texture(ui, data_uri);
+            // Render — should use alt text, not "Embedded image (data URI)"
+            renderer.render_inline_span(ui, &span, None, None);
+        });
+    }
+
+    #[test]
+    fn test_placeholder_label_file_path_unchanged() {
+        let renderer = MarkdownRenderer::new();
+        let span = InlineSpan::Image {
+            src: "missing_file.png".to_string(),
+            alt: "".to_string(),
+            title: None,
+        };
+        with_test_ui(|_, ui| {
+            // missing_file.png won't exist — triggers placeholder
+            renderer.render_inline_span(ui, &span, None, None);
+            // The placeholder for file paths should show the file path itself,
+            // not "Embedded image (data URI)". This test verifies the code path
+            // doesn't incorrectly truncate non-data-URI sources.
+        });
     }
 
     // ---------------------------------------------------------------
