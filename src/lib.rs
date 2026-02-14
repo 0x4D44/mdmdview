@@ -16,6 +16,8 @@ pub mod window_state;
 
 pub(crate) mod image_decode;
 pub(crate) mod mermaid_renderer;
+#[cfg(feature = "pikchr")]
+pub(crate) mod pikchr_renderer;
 
 pub use app::{MarkdownViewerApp, APP_TITLE_PREFIX};
 pub use markdown_renderer::{MarkdownElement, MarkdownRenderer};
