@@ -13082,8 +13082,8 @@ contexts:
             );
 
             // Verify caches are populated
-            assert!(renderer.emoji_textures.borrow().len() > 0);
-            assert!(renderer.image_textures.borrow().entries.len() > 0);
+            assert!(!renderer.emoji_textures.borrow().entries.is_empty());
+            assert!(!renderer.image_textures.borrow().entries.is_empty());
 
             // Call release_gpu_textures
             renderer.release_gpu_textures();
