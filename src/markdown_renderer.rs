@@ -1,5 +1,7 @@
 use crate::image_decode;
 use crate::mermaid_renderer::MermaidRenderer;
+#[cfg(feature = "pikchr")]
+use crate::pikchr_renderer;
 use crate::table_support::{
     column_spec::spans_to_text, compute_column_stats, derive_column_specs, ColumnPolicy,
     ColumnSpec, ColumnStat, TableColumnContext, TableMetrics, WidthChange,
@@ -590,6 +592,8 @@ pub struct MarkdownRenderer {
     // Base directory used to resolve relative image paths
     base_dir: RefCell<Option<PathBuf>>,
     mermaid: MermaidRenderer,
+    #[cfg(feature = "pikchr")]
+    pikchr: pikchr_renderer::PikchrRenderer,
     table_layout_cache: RefCell<CellLayoutCache>,
     table_metrics: RefCell<TableMetrics>,
     column_stats_cache: RefCell<HashMap<u64, ColumnStatsCacheEntry>>,
@@ -963,6 +967,8 @@ impl MarkdownRenderer {
             highlight_phrase: RefCell::new(None),
             base_dir: RefCell::new(None),
             mermaid,
+            #[cfg(feature = "pikchr")]
+            pikchr: pikchr_renderer::PikchrRenderer::new(),
             table_layout_cache: RefCell::new(CellLayoutCache::new(TABLE_LAYOUT_CACHE_CAPACITY)),
             table_metrics: RefCell::new(TableMetrics::default()),
             column_stats_cache: RefCell::new(HashMap::new()),
@@ -2735,6 +2741,8 @@ impl MarkdownRenderer {
     pub fn render_to_ui(&self, ui: &mut egui::Ui, elements: &[MarkdownElement]) {
         self.poll_image_results(ui.ctx());
         self.mermaid.begin_frame();
+        #[cfg(feature = "pikchr")]
+        self.pikchr.begin_frame();
         // Clear header rects before rendering a new frame
         self.header_rects.borrow_mut().clear();
         // Reset per-frame link counter to ensure link IDs are stable across frames
@@ -3901,6 +3909,13 @@ impl MarkdownRenderer {
                 ui.add_space(8.0);
                 return;
             }
+
+            #[cfg(feature = "pikchr")]
+            if lang.eq_ignore_ascii_case("pikchr") {
+                let _ = self.render_pikchr_block(ui, code);
+                ui.add_space(8.0);
+                return;
+            }
         }
 
         let tc = ThemeColors::current(ui.visuals().dark_mode);
@@ -4000,6 +4015,12 @@ impl MarkdownRenderer {
     /// Try to render a Mermaid diagram. Returns true if handled (rendered or placeholder drawn).
     fn render_mermaid_block(&self, ui: &mut egui::Ui, code: &str) -> bool {
         self.mermaid
+            .render_block(ui, code, self.ui_scale(), self.font_sizes.code)
+    }
+
+    #[cfg(feature = "pikchr")]
+    fn render_pikchr_block(&self, ui: &mut egui::Ui, code: &str) -> bool {
+        self.pikchr
             .render_block(ui, code, self.ui_scale(), self.font_sizes.code)
     }
 
@@ -5464,6 +5485,8 @@ impl MarkdownRenderer {
         self.emoji_textures.borrow_mut().clear();
         self.image_textures.borrow_mut().clear();
         self.mermaid.release_gpu_textures();
+        #[cfg(feature = "pikchr")]
+        self.pikchr.release_gpu_textures();
     }
 
     pub fn table_layout_cache_stats(&self) -> (u64, u64) {
@@ -5822,6 +5845,11 @@ impl MarkdownRenderer {
 
         // Skip mermaid blocks - they're rendered as diagrams, not highlighted code
         if lang.eq_ignore_ascii_case("mermaid") {
+            return None;
+        }
+
+        #[cfg(feature = "pikchr")]
+        if lang.eq_ignore_ascii_case("pikchr") {
             return None;
         }
 
@@ -13607,5 +13635,32 @@ contexts:
         );
         // "data-uri:" (9 chars) + 16 hex digits = 25 chars
         assert_eq!(short_key.len(), 25, "expected 25-char cache key, got {}", short_key.len());
+    }
+
+    #[cfg(feature = "pikchr")]
+    #[test]
+    fn test_pikchr_code_block_parsed() {
+        let renderer = MarkdownRenderer::new();
+        let elements = renderer.parse("```pikchr\nbox \"Hello\"\n```").unwrap();
+        assert_eq!(elements.len(), 1);
+        match &elements[0] {
+            MarkdownElement::CodeBlock { language, .. } => {
+                assert_eq!(language.as_deref(), Some("pikchr"));
+            }
+            _ => panic!("Expected CodeBlock"),
+        }
+    }
+
+    #[cfg(feature = "pikchr")]
+    #[test]
+    fn test_pikchr_not_syntax_highlighted() {
+        let renderer = MarkdownRenderer::new();
+        let elements = renderer.parse("```pikchr\nbox \"Hello\"\n```").unwrap();
+        match &elements[0] {
+            MarkdownElement::CodeBlock { highlighted, .. } => {
+                assert!(highlighted.is_none(), "Pikchr blocks should skip syntax highlighting");
+            }
+            _ => panic!("Expected CodeBlock"),
+        }
     }
 }
