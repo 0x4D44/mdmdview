@@ -79,7 +79,7 @@
                             Key='Software\Microsoft\Windows\CurrentVersion\Run'
                             Name='mdmdview'
                             Type='string'
-                            Value='&quot;[#exe0]&quot;'
+                            Value='&quot;[APPLICATIONFOLDER]mdmdview.exe&quot;'
                             KeyPath='yes'/>
                     </Component>
 
@@ -149,7 +149,7 @@
                     <Shortcut Id='DesktopShortcutLink'
                         Name='Markdown Viewer'
                         Description='Markdown Viewer'
-                        Target='[#exe0]'
+                        Target='[APPLICATIONFOLDER]mdmdview.exe'
                         WorkingDirectory='APPLICATIONFOLDER'
                         Icon='ProductICO' />
                     <RemoveFolder Id='CleanUpDesktopShortcut'
