@@ -2980,7 +2980,12 @@ impl MarkdownRenderer {
                                 "Image not found or unsupported"
                             };
                             let label = if alt.is_empty() {
-                                src.as_str()
+                                if src.starts_with("data:") {
+                                    // Don't render megabytes of base64 as placeholder text
+                                    "Embedded image (data URI)"
+                                } else {
+                                    src.as_str()
+                                }
                             } else {
                                 alt.as_str()
                             };
@@ -5602,7 +5607,7 @@ impl MarkdownRenderer {
 
     fn resolve_image_path(&self, src: &str) -> String {
         if src.starts_with("http://") || src.starts_with("https://") || src.starts_with("data:") {
-            // Keep as-is; we don't fetch remote or parse data URIs yet
+            // Keep as-is; remote URLs and data URIs don't need path resolution
             return src.to_string();
         }
         let p = Path::new(src);
@@ -5618,7 +5623,7 @@ impl MarkdownRenderer {
 
     fn get_or_load_image_texture(
         &self,
-        _ui: &egui::Ui,
+        ui: &egui::Ui,
         resolved_src: &str,
     ) -> Option<(egui::TextureHandle, u32, u32)> {
         let is_remote = resolved_src.starts_with("http://") || resolved_src.starts_with("https://");
@@ -5628,39 +5633,71 @@ impl MarkdownRenderer {
             return None;
         }
 
+        let is_data_uri = resolved_src.starts_with("data:");
+
+        // For data URIs, use a short hash as the cache key to avoid storing
+        // megabyte-sized strings in the HashMap and VecDeque.
+        let cache_key = if is_data_uri {
+            data_uri_cache_key(resolved_src)
+        } else {
+            resolved_src.to_string()
+        };
+
         let path = Path::new(resolved_src);
         let embedded = Self::embedded_image_bytes(resolved_src);
 
         {
             let mut cache = self.image_textures.borrow_mut();
-            if let Some(entry) = cache.get(resolved_src) {
-                let stale = if embedded.is_some() || is_remote {
-                    false // Embedded and remote images don't go stale
+            if let Some(entry) = cache.get(&cache_key) {
+                let stale = if embedded.is_some() || is_remote || is_data_uri {
+                    false // Embedded, remote, and data URI images don't go stale
                 } else {
                     Self::image_source_stale(entry.modified, path)
                 };
                 if !stale {
                     return Some((entry.texture.clone(), entry.size[0], entry.size[1]));
                 }
-                cache.remove(resolved_src);
+                cache.remove(&cache_key);
             }
         }
 
-        if self.image_pending.borrow().contains(resolved_src) {
+        if self.image_pending.borrow().contains(cache_key.as_str()) {
             return None;
         }
 
-        if !self.should_retry_image(resolved_src) {
+        if !self.should_retry_image(&cache_key) {
             return None;
         }
 
         let source = if let Some(bytes) = embedded {
             ImageLoadSource::Embedded(bytes)
+        } else if is_data_uri {
+            // Data URIs are decoded synchronously — no I/O needed
+            if let Some(bytes) = decode_data_uri(resolved_src) {
+                match image_decode::bytes_to_color_image_guess(&bytes, None) {
+                    Some((image, w, h)) => {
+                        let texture = ui.ctx().load_texture(
+                            format!("img:{cache_key}"),
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.store_image_texture(&cache_key, texture.clone(), [w, h], None);
+                        return Some((texture, w, h));
+                    }
+                    None => {
+                        self.note_image_failure(&cache_key);
+                        return None;
+                    }
+                }
+            } else {
+                self.note_image_failure(&cache_key);
+                return None;
+            }
         } else if is_remote {
             ImageLoadSource::Remote(resolved_src.to_string())
         } else {
             if !path.exists() {
-                self.note_image_failure(resolved_src);
+                self.note_image_failure(&cache_key);
                 return None;
             }
             ImageLoadSource::File(path.to_path_buf())
