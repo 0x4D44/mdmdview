@@ -3,7 +3,7 @@ name = "mdmdview"
 version = "1.6.0"
 edition = "2021"
 description = "A markdown viewer for Windows"
-authors = ["Martin Davidson <martingdavidson@gmail.com>"]
+authors = ["0x4D44 <martingdavidson@gmail.com>"]
 license = "MIT"
 
 [[bin]]
