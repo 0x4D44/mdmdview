@@ -5449,7 +5449,11 @@ impl MarkdownRenderer {
     }
 
     pub fn has_pending_renders(&self) -> bool {
-        self.mermaid.has_pending() || !self.image_pending.borrow().is_empty()
+        #[cfg(feature = "pikchr")]
+        let pikchr_pending = self.pikchr.has_pending();
+        #[cfg(not(feature = "pikchr"))]
+        let pikchr_pending = false;
+        self.mermaid.has_pending() || !self.image_pending.borrow().is_empty() || pikchr_pending
     }
 
     /// Set or clear the highlight phrase (case-insensitive)

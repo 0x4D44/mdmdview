@@ -76,6 +76,7 @@ where
         self.entries.insert(key, value);
     }
 
+    #[cfg(test)]
     fn remove(&mut self, key: &K) {
         self.entries.remove(key);
         self.order.retain(|entry| entry != key);
