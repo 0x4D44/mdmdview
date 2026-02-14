@@ -1,6 +1,6 @@
 [package]
 name = "mdmdview"
-version = "1.5.2"
+version = "1.6.0"
 edition = "2021"
 description = "A markdown viewer for Windows"
 authors = ["Martin Davidson <martingdavidson@gmail.com>"]

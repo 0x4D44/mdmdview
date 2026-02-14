@@ -8858,11 +8858,9 @@ mod tests {
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let image = egui::ColorImage::new([2, 2], Color32::WHITE);
-                let texture = ui.ctx().load_texture(
-                    "test-mermaid",
-                    image,
-                    egui::TextureOptions::default()
-                );
+                let texture =
+                    ui.ctx()
+                        .load_texture("test-mermaid", image, egui::TextureOptions::default());
 
                 // Insert into texture cache
                 renderer.mermaid_textures.borrow_mut().insert(
@@ -8877,10 +8875,10 @@ mod tests {
 
         // Insert into SVG cache
         let svg_key = MermaidRenderer::hash_str("graph TD; A-->B;");
-        renderer.mermaid_svg_cache.borrow_mut().insert(
-            svg_key,
-            "<svg>test</svg>".to_string()
-        );
+        renderer
+            .mermaid_svg_cache
+            .borrow_mut()
+            .insert(svg_key, "<svg>test</svg>".to_string());
 
         // Verify both caches are populated
         assert_eq!(renderer.mermaid_textures.borrow().len(), 1);
