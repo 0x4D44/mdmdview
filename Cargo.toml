@@ -63,14 +63,20 @@ strip = false
 
 [features]
 # Default to the embedded Mermaid renderer (QuickJS).
-default = ["mermaid-embedded"]
+default = ["mermaid-embedded", "pikchr"]
 # Enable JavaScript-based Mermaid rendering via QuickJS (embedded)
 mermaid-quickjs = ["dep:rquickjs"]
 # Embedded Mermaid support (alias for mermaid-quickjs)
 mermaid-embedded = ["mermaid-quickjs"]
+# Pikchr diagram rendering (embedded C library, compiled from C source)
+pikchr = ["dep:pikchr"]
 
 [dependencies.rquickjs]
 version = "0.11"
+optional = true
+
+[dependencies.pikchr]
+version = "0.1"
 optional = true
 
 [package.metadata.wix]
