@@ -2971,6 +2971,8 @@ impl MarkdownRenderer {
                         .stroke(Stroke::new(1.0, tc.code_border))
                         .inner_margin(8.0)
                         .show(ui, |ui| {
+                            // Note: data URIs bypass image_pending (decoded synchronously),
+                            // so this check always returns false for them.
                             let pending = self.image_pending.borrow().contains(&resolved);
                             let msg = if pending {
                                 "Loading image..."
@@ -5926,15 +5928,22 @@ fn decode_data_uri(uri: &str) -> Option<Vec<u8>> {
     // Strip ASCII whitespace before decoding — base64 0.22 STANDARD engine
     // is strict and rejects embedded newlines/spaces. Some generators wrap
     // long base64 payloads across lines.
-    let cleaned: String = payload
-        .chars()
-        .filter(|c| !c.is_ascii_whitespace())
-        .collect();
+    let has_whitespace = payload.bytes().any(|b| b.is_ascii_whitespace());
+    let cleaned;
+    let decode_input = if has_whitespace {
+        cleaned = payload
+            .chars()
+            .filter(|c| !c.is_ascii_whitespace())
+            .collect::<String>();
+        cleaned.as_str()
+    } else {
+        payload
+    };
 
     // Decode base64
     use base64::Engine;
     base64::engine::general_purpose::STANDARD
-        .decode(&cleaned)
+        .decode(decode_input)
         .ok()
 }
 
