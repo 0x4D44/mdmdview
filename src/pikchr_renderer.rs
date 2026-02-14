@@ -604,4 +604,29 @@ mod tests {
         assert_eq!(cache.get(&"b".to_string()), Some(2));
         assert_eq!(cache.len(), 1);
     }
+
+    // -----------------------------------------------------------------------
+    // Sample diagram verification tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sample_simple_flow() {
+        let code = "arrow right 200% \"Request\" above\nbox \"Server\" fit rad 10px\narrow right 200% \"Response\" above";
+        let result = PikchrRenderer::render_pikchr_to_svg(code, false);
+        assert!(result.is_ok(), "Simple flow sample failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_sample_architecture_diagram() {
+        let code = "box \"Browser\" fit rad 10px\narrow right 250% \"HTTP\" above\nbox \"Web Server\" fit rad 10px\narrow right 250% \"SQL\" above\ncylinder \"Database\" fit";
+        let result = PikchrRenderer::render_pikchr_to_svg(code, false);
+        assert!(result.is_ok(), "Architecture sample failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_sample_decision_flow() {
+        let code = "box \"Start\" fit rad 50%\narrow down\ndiamond \"OK?\" fit\narrow right 200% \"Yes\" above\nbox \"Done\" fit rad 50%\nmove to last diamond.s\narrow down \"No\" ljust\nbox \"Retry\" fit rad 10px\narrow left then up then right to 1st box.w";
+        let result = PikchrRenderer::render_pikchr_to_svg(code, false);
+        assert!(result.is_ok(), "Decision flow sample failed: {:?}", result.err());
+    }
 }

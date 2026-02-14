@@ -44,11 +44,55 @@ pub const SAMPLE_FILES: &[SampleFile] = &[
         content: IMAGES_CONTENT,
     },
     SampleFile {
+        name: "pikchr.md",
+        title: "Pikchr Diagrams",
+        content: PIKCHR_CONTENT,
+    },
+    SampleFile {
         name: "stress_test.md",
         title: "Stress Test",
         content: STRESS_TEST_CONTENT,
     },
 ];
+
+/// Pikchr diagram sample content
+const PIKCHR_CONTENT: &str = r#"# Pikchr Diagrams
+
+mdmdview supports [Pikchr](https://pikchr.org) diagrams -- a PIC-like
+markup language for diagrams in technical documentation.
+
+## Simple Flow
+
+```pikchr
+arrow right 200% "Request" above
+box "Server" fit rad 10px
+arrow right 200% "Response" above
+```
+
+## Architecture Diagram
+
+```pikchr
+box "Browser" fit rad 10px
+arrow right 250% "HTTP" above
+box "Web Server" fit rad 10px
+arrow right 250% "SQL" above
+cylinder "Database" fit
+```
+
+## Decision Flow
+
+```pikchr
+box "Start" fit rad 50%
+arrow down
+diamond "OK?" fit
+arrow right 200% "Yes" above
+box "Done" fit rad 50%
+move to last diamond.s
+arrow down "No" ljust
+box "Retry" fit rad 10px
+arrow left then up then right to 1st box.w
+```
+"#;
 
 /// Stress test content loaded from external file
 const STRESS_TEST_CONTENT: &str = include_str!("../test_stress.md");
@@ -465,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_sample_files_exist() {
-        assert_eq!(SAMPLE_FILES.len(), 7);
+        assert_eq!(SAMPLE_FILES.len(), 8);
 
         let names: Vec<&str> = SAMPLE_FILES.iter().map(|f| f.name).collect();
         assert!(names.contains(&"welcome.md"));
@@ -474,6 +518,7 @@ mod tests {
         assert!(names.contains(&"usage.md"));
         assert!(names.contains(&"search.md"));
         assert!(names.contains(&"images.md"));
+        assert!(names.contains(&"pikchr.md"));
         assert!(names.contains(&"stress_test.md"));
     }
 
