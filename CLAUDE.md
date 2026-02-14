@@ -133,6 +133,13 @@ The application supports dragging files and folders directly from your file expl
    - Mermaid.js embedding for offline rendering (embedded renderer)
    - Version parsing from Cargo.toml into Windows file properties
 
+8. **Pikchr Renderer** (`src/pikchr_renderer.rs`)
+   - Pikchr diagram rendering via embedded C library
+   - Synchronous rendering (no worker threads)
+   - SVG rasterization via usvg/resvg (shared pipeline with Mermaid)
+   - Texture caching with LRU eviction
+   - Dark mode support via native `PIKCHR_DARK_MODE` flag
+
 ### Key Architecture Decisions
 
 - **Single Binary**: All dependencies, samples, and emoji assets embedded for easy distribution
@@ -301,6 +308,9 @@ Key types for markdown representation:
   - Adds `rquickjs` dependency
 - `mermaid-quickjs`: Alias for `mermaid-embedded` (compatibility)
   - Build with: `cargo build --features mermaid-quickjs`
+- `pikchr`: Enables embedded Pikchr diagram rendering (default)
+  - Disable with: `cargo build --no-default-features --features mermaid-embedded`
+  - Adds `pikchr` crate dependency (C library compiled at build time)
 
 ### Environment Variables
 - `MDMDVIEW_MERMAID_RENDERER`: Mermaid renderer (`embedded`, `off`)
