@@ -42,6 +42,7 @@
 
         <Directory Id='TARGETDIR' Name='SourceDir'>
             <Directory Id='$(var.PlatformProgramFilesFolder)' Name='PFiles'>
+                <Directory Id='CompanyFolder' Name='0x4D44 Software'>
                 <Directory Id='APPLICATIONFOLDER' Name='mdmdview'>
 
                     <Component Id='License' Guid='*'>
@@ -70,6 +71,16 @@
                                 <Verb Id='open_markdown' Command='Open' TargetFile='exe0' Argument='"%1"' />
                             </Extension>
                         </ProgId>
+                    </Component>
+
+                    <!-- Run at Windows startup (optional) -->
+                    <Component Id='StartupRegistration' Guid='*'>
+                        <RegistryValue Root='HKCU'
+                            Key='Software\Microsoft\Windows\CurrentVersion\Run'
+                            Name='mdmdview'
+                            Type='string'
+                            Value='&quot;[#exe0]&quot;'
+                            KeyPath='yes'/>
                     </Component>
 
                     <!-- Win10/11: register as a known application in Default Apps / Open With -->
@@ -107,8 +118,10 @@
                     </Component>
 
                 </Directory>
+                </Directory>
             </Directory>
             <Directory Id='ProgramMenuFolder' Name='Programs'>
+                <Directory Id='CompanyProgramsFolder' Name='0x4D44 Software'>
                 <Directory Id='ApplicationProgramsFolder' Name='mdmdview'>
                     <Component Id='ApplicationShortcut' Guid='*'>
                         <Shortcut Id='ApplicationStartMenuShortcut'
@@ -120,19 +133,39 @@
                         <RemoveFolder Id='CleanUpShortcutFolder'
                             Directory='ApplicationProgramsFolder'
                             On='uninstall'/>
+                        <RemoveFolder Id='CleanUpCompanyShortcutFolder'
+                            Directory='CompanyProgramsFolder'
+                            On='uninstall'/>
                         <RegistryValue Root='HKCU'
                             Key='Software\mdmdview\Installer'
                             Name='StartMenuShortcut'
                             Type='integer' Value='1' KeyPath='yes'/>
                     </Component>
                 </Directory>
+                </Directory>
+            </Directory>
+            <Directory Id='DesktopFolder' Name='Desktop'>
+                <Component Id='DesktopShortcut' Guid='*'>
+                    <Shortcut Id='DesktopShortcutLink'
+                        Name='Markdown Viewer'
+                        Description='Markdown Viewer'
+                        Target='[#exe0]'
+                        WorkingDirectory='APPLICATIONFOLDER'
+                        Icon='ProductICO' />
+                    <RemoveFolder Id='CleanUpDesktopShortcut'
+                        On='uninstall'/>
+                    <RegistryValue Root='HKCU'
+                        Key='Software\mdmdview\Installer'
+                        Name='DesktopShortcut'
+                        Type='integer' Value='1' KeyPath='yes'/>
+                </Component>
             </Directory>
         </Directory>
 
         <Feature
             Id='Complete'
             Title='Markdown Viewer'
-            Description='Markdown viewer application'
+            Description='Core application, file associations, and Start Menu shortcut'
             Level='1'
             ConfigurableDirectory='APPLICATIONFOLDER'
             AllowAdvertise='no'
@@ -141,6 +174,24 @@
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='AppRegistration'/>
             <ComponentRef Id='ApplicationShortcut'/>
+
+            <Feature
+                Id='DesktopShortcutFeature'
+                Title='Desktop Shortcut'
+                Description='Add a Markdown Viewer shortcut to the desktop'
+                Level='1'
+                AllowAdvertise='no'>
+                <ComponentRef Id='DesktopShortcut'/>
+            </Feature>
+
+            <Feature
+                Id='StartupFeature'
+                Title='Run at Startup'
+                Description='Launch Markdown Viewer automatically when Windows starts'
+                Level='2'
+                AllowAdvertise='no'>
+                <ComponentRef Id='StartupRegistration'/>
+            </Feature>
         </Feature>
 
         <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
@@ -150,7 +201,7 @@
         <Property Id='ARPHELPLINK' Value='https://github.com/0x4D44/mdmdview'/>
 
         <UI>
-            <UIRef Id='WixUI_Minimal'/>
+            <UIRef Id='WixUI_FeatureTree'/>
         </UI>
 
         <WixVariable Id='WixUILicenseRtf' Value='wix\License.rtf'/>
