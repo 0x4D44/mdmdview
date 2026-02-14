@@ -1926,6 +1926,7 @@ name = "mdmdview"
 version = "1.6.1"
 dependencies = [
  "anyhow",
+ "base64",
  "crossbeam-channel",
  "eframe",
  "egui",
