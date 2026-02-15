@@ -13697,4 +13697,31 @@ contexts:
             _ => panic!("Expected CodeBlock"),
         }
     }
+
+    #[cfg(feature = "d2")]
+    #[test]
+    fn test_d2_code_block_parsed() {
+        let renderer = MarkdownRenderer::new();
+        let elements = renderer.parse("```d2\na -> b\n```").unwrap();
+        assert_eq!(elements.len(), 1);
+        match &elements[0] {
+            MarkdownElement::CodeBlock { language, .. } => {
+                assert_eq!(language.as_deref(), Some("d2"));
+            }
+            _ => panic!("Expected CodeBlock"),
+        }
+    }
+
+    #[cfg(feature = "d2")]
+    #[test]
+    fn test_d2_not_syntax_highlighted() {
+        let renderer = MarkdownRenderer::new();
+        let elements = renderer.parse("```d2\na -> b\n```").unwrap();
+        match &elements[0] {
+            MarkdownElement::CodeBlock { highlighted, .. } => {
+                assert!(highlighted.is_none(), "D2 blocks should skip syntax highlighting");
+            }
+            _ => panic!("Expected CodeBlock"),
+        }
+    }
 }

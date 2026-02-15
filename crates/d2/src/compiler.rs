@@ -818,4 +818,25 @@ api -> db: queries
         assert!(graph.objects.len() >= 2);
         assert!(!graph.edges.is_empty());
     }
+
+    #[test]
+    fn test_self_edge() {
+        let graph = compile_ok("a -> a");
+        assert_eq!(graph.objects.len(), 1, "self-edge should create exactly 1 node");
+        assert_eq!(graph.graph[graph.objects[0]].id, "a");
+        assert_eq!(graph.edges.len(), 1, "self-edge should create exactly 1 edge");
+        let (src, dst) = graph.graph.edge_endpoints(graph.edges[0]).unwrap();
+        assert_eq!(src, dst, "self-edge source and destination must be the same node");
+    }
+
+    #[test]
+    fn test_style_nested_map() {
+        let graph = compile_ok("x: {\n  style.fill: red\n}");
+        assert_eq!(graph.objects.len(), 1);
+        assert_eq!(graph.graph[graph.objects[0]].id, "x");
+        assert!(
+            graph.graph[graph.objects[0]].style.fill.is_some(),
+            "expected fill to be set via dotted-key style inside container"
+        );
+    }
 }

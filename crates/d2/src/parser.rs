@@ -1059,4 +1059,124 @@ cache -> db: cache miss
             .count();
         assert!(key_count >= 6, "expected at least 6 key nodes, got {}", key_count);
     }
+
+    // -----------------------------------------------------------------------
+    // Error recovery tests
+    // -----------------------------------------------------------------------
+
+    /// Parse input and return the full ParseResult (AST + errors).
+    fn parse_with_errors(source: &str) -> ParseResult {
+        parse(source)
+    }
+
+    #[test]
+    fn test_stray_closing_brace() {
+        // A stray `}` at the file level is not valid syntax. The parser
+        // should emit an error for the unexpected `}` but still parse the
+        // surrounding declarations `a` and `b`.
+        let result = parse_with_errors("a\n}\nb");
+        assert!(
+            !result.errors.is_empty(),
+            "expected errors for stray `}}`, got none"
+        );
+        // Both `a` and `b` should still be parsed as key nodes.
+        let key_count = result
+            .ast
+            .nodes
+            .iter()
+            .filter(|n| matches!(n, MapNode::Key(_)))
+            .count();
+        assert!(
+            key_count >= 2,
+            "expected at least 2 key nodes after recovery, got {}",
+            key_count
+        );
+    }
+
+    #[test]
+    fn test_unterminated_map() {
+        // Opening a map with `{` but never closing it should produce an
+        // error about the missing `}`.
+        let result = parse_with_errors("a: { b");
+        assert!(
+            !result.errors.is_empty(),
+            "expected error for missing `}}`, got none"
+        );
+        let has_brace_error = result
+            .errors
+            .iter()
+            .any(|e| e.message.contains('}'));
+        assert!(
+            has_brace_error,
+            "expected an error mentioning `}}`, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_edge_missing_destination() {
+        // `a -> ` has an edge operator but no destination. The parser
+        // should handle this gracefully without panicking.
+        let result = parse_with_errors("a -> ");
+        // The parser consumed the edge operator but failed to find a
+        // destination key. This may result in the entire key being
+        // dropped (no nodes) or an error being emitted. Either outcome
+        // is acceptable as long as the parser doesn't panic.
+        let _ = result.ast.nodes.len();
+        let _ = result.errors.len();
+    }
+
+    #[test]
+    fn test_unterminated_string() {
+        // A double-quoted string that is never closed should produce a
+        // parse error rather than hanging or panicking.
+        let result = parse_with_errors("a: \"unterminated");
+        assert!(
+            !result.errors.is_empty(),
+            "expected error for unterminated string, got none"
+        );
+        let has_unterminated = result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("unterminated"));
+        assert!(
+            has_unterminated,
+            "expected 'unterminated' in error message, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_multiple_errors_collected() {
+        // Several syntax problems in one input. The parser should collect
+        // all of them rather than bailing out after the first.
+        //
+        // Line 1: `}`       — stray closing brace at file level
+        // Line 2: `a`       — valid key (should still parse)
+        // Line 3: `}`       — another stray closing brace
+        // Line 4: `b`       — valid key (should still parse)
+        //
+        // Each stray `}` is an independent error that the parser can
+        // recover from by skipping the unrecognized character.
+        let result = parse_with_errors("}\na\n}\nb");
+        assert!(
+            result.errors.len() >= 2,
+            "expected at least 2 errors for multiple syntax problems, got {}: {:?}",
+            result.errors.len(),
+            result.errors,
+        );
+        // Despite multiple errors, the parser should still produce some
+        // AST nodes — both `a` and `b` should survive recovery.
+        let key_count = result
+            .ast
+            .nodes
+            .iter()
+            .filter(|n| matches!(n, MapNode::Key(_)))
+            .count();
+        assert!(
+            key_count >= 2,
+            "expected at least 2 key nodes after recovery, got {}",
+            key_count,
+        );
+    }
 }
