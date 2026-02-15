@@ -15,12 +15,9 @@
 //! as `MermaidRenderer` (render_block, begin_frame, has_pending, release_gpu_textures).
 
 use std::cell::RefCell;
-use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
+use crate::lru_cache::{hash_str, LruCache};
 use crate::ThemeColors;
 
 // ---------------------------------------------------------------------------
@@ -30,88 +27,9 @@ use crate::ThemeColors;
 const PIKCHR_TEXTURE_CACHE_CAPACITY: usize = 64;
 const PIKCHR_SVG_CACHE_CAPACITY: usize = 64;
 const PIKCHR_ERROR_CACHE_CAPACITY: usize = 32;
-
-// ---------------------------------------------------------------------------
-// LruCache<K, V> — copied from mermaid_renderer.rs (true LRU with access-order
-// tracking via get(&mut self)).
-// ---------------------------------------------------------------------------
-
-struct LruCache<K, V> {
-    entries: HashMap<K, V>,
-    order: VecDeque<K>,
-    capacity: usize,
-}
-
-impl<K, V> LruCache<K, V>
-where
-    K: Eq + Hash + Clone,
-    V: Clone,
-{
-    fn new(capacity: usize) -> Self {
-        Self {
-            entries: HashMap::new(),
-            order: VecDeque::new(),
-            capacity: capacity.max(1),
-        }
-    }
-
-    fn get(&mut self, key: &K) -> Option<V> {
-        let value = self.entries.get(key).cloned();
-        self.touch_if_present(&value, key);
-        value
-    }
-
-    fn insert(&mut self, key: K, value: V) {
-        if self.entries.contains_key(&key) {
-            self.entries.insert(key.clone(), value);
-            self.touch(&key);
-            return;
-        }
-        while self.entries.len() >= self.capacity {
-            if !self.evict_oldest() {
-                break;
-            }
-        }
-        self.order.push_back(key.clone());
-        self.entries.insert(key, value);
-    }
-
-    #[cfg(test)]
-    fn remove(&mut self, key: &K) {
-        self.entries.remove(key);
-        self.order.retain(|entry| entry != key);
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.order.clear();
-    }
-
-    fn touch_if_present(&mut self, value: &Option<V>, key: &K) {
-        if value.is_some() {
-            self.touch(key);
-        }
-    }
-
-    fn evict_oldest(&mut self) -> bool {
-        if let Some(old) = self.order.pop_front() {
-            self.entries.remove(&old);
-            true
-        } else {
-            false
-        }
-    }
-
-    fn touch(&mut self, key: &K) {
-        self.order.retain(|entry| entry != key);
-        self.order.push_back(key.clone());
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-}
+/// Maximum rasterized dimension (width or height) in pixels.
+/// Matches the cap used by mermaid_renderer.
+const MAX_RASTER_SIDE: u32 = 4096;
 
 // ---------------------------------------------------------------------------
 // PikchrTextureEntry
@@ -129,14 +47,6 @@ struct PikchrTextureEntry {
 // ---------------------------------------------------------------------------
 // Helper functions
 // ---------------------------------------------------------------------------
-
-/// Hash a string to a u64 using the standard library's DefaultHasher.
-/// Used for cache key generation -- not cryptographic.
-fn hash_str(s: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    s.hash(&mut hasher);
-    hasher.finish()
-}
 
 /// Composite SVG cache key: embeds both the source code hash and dark_mode flag.
 /// Dark mode produces different SVG output for the same source code.
@@ -356,11 +266,10 @@ impl PikchrRenderer {
         let mut target_w = (w as f32 * scale).round().max(1.0) as u32;
         let mut target_h = (h as f32 * scale).round().max(1.0) as u32;
 
-        // Clamp to reasonable maximum (same as Mermaid: 4096)
-        let max_side: u32 = 4096;
-        if target_w > max_side || target_h > max_side {
-            let clamp_scale =
-                (max_side as f32 / target_w as f32).min(max_side as f32 / target_h as f32);
+        // Clamp to reasonable maximum
+        if target_w > MAX_RASTER_SIDE || target_h > MAX_RASTER_SIDE {
+            let clamp_scale = (MAX_RASTER_SIDE as f32 / target_w as f32)
+                .min(MAX_RASTER_SIDE as f32 / target_h as f32);
             target_w = (target_w as f32 * clamp_scale).round().max(1.0) as u32;
             target_h = (target_h as f32 * clamp_scale).round().max(1.0) as u32;
         }
@@ -540,70 +449,6 @@ mod tests {
         let renderer = PikchrRenderer::new();
         // No panics, caches start empty
         assert!(!renderer.has_pending());
-    }
-
-    // -----------------------------------------------------------------------
-    // LruCache unit tests
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_lru_cache_insert_and_get() {
-        let mut cache = LruCache::new(3);
-        cache.insert("a".to_string(), 1);
-        cache.insert("b".to_string(), 2);
-        cache.insert("c".to_string(), 3);
-        assert_eq!(cache.get(&"a".to_string()), Some(1));
-        assert_eq!(cache.get(&"b".to_string()), Some(2));
-        assert_eq!(cache.get(&"c".to_string()), Some(3));
-        assert_eq!(cache.get(&"d".to_string()), None);
-    }
-
-    #[test]
-    fn test_lru_cache_eviction() {
-        let mut cache = LruCache::new(2);
-        cache.insert("a".to_string(), 1);
-        cache.insert("b".to_string(), 2);
-        // This should evict "a" (oldest)
-        cache.insert("c".to_string(), 3);
-        assert_eq!(cache.get(&"a".to_string()), None);
-        assert_eq!(cache.get(&"b".to_string()), Some(2));
-        assert_eq!(cache.get(&"c".to_string()), Some(3));
-    }
-
-    #[test]
-    fn test_lru_cache_access_order() {
-        let mut cache = LruCache::new(2);
-        cache.insert("a".to_string(), 1);
-        cache.insert("b".to_string(), 2);
-        // Access "a" to make it most recently used
-        let _ = cache.get(&"a".to_string());
-        // Insert "c" -- should evict "b" (least recently used), not "a"
-        cache.insert("c".to_string(), 3);
-        assert_eq!(cache.get(&"a".to_string()), Some(1));
-        assert_eq!(cache.get(&"b".to_string()), None);
-        assert_eq!(cache.get(&"c".to_string()), Some(3));
-    }
-
-    #[test]
-    fn test_lru_cache_clear() {
-        let mut cache = LruCache::new(3);
-        cache.insert("a".to_string(), 1);
-        cache.insert("b".to_string(), 2);
-        assert_eq!(cache.len(), 2);
-        cache.clear();
-        assert_eq!(cache.len(), 0);
-        assert_eq!(cache.get(&"a".to_string()), None);
-    }
-
-    #[test]
-    fn test_lru_cache_remove() {
-        let mut cache = LruCache::new(3);
-        cache.insert("a".to_string(), 1);
-        cache.insert("b".to_string(), 2);
-        cache.remove(&"a".to_string());
-        assert_eq!(cache.get(&"a".to_string()), None);
-        assert_eq!(cache.get(&"b".to_string()), Some(2));
-        assert_eq!(cache.len(), 1);
     }
 
     // -----------------------------------------------------------------------

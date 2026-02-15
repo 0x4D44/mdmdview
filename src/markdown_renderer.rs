@@ -1,4 +1,5 @@
 use crate::image_decode;
+use crate::lru_cache::hash_str;
 use crate::mermaid_renderer::MermaidRenderer;
 #[cfg(feature = "pikchr")]
 use crate::pikchr_renderer;
@@ -4024,12 +4025,6 @@ impl MarkdownRenderer {
             .render_block(ui, code, self.ui_scale(), self.font_sizes.code)
     }
 
-    fn hash_str(s: &str) -> u64 {
-        let mut h = DefaultHasher::new();
-        s.hash(&mut h);
-        h.finish()
-    }
-
     fn hash_inline_spans(spans: &[InlineSpan]) -> u64 {
         let mut h = DefaultHasher::new();
         for span in spans {
@@ -5288,7 +5283,7 @@ impl MarkdownRenderer {
             .highlight_phrase
             .borrow()
             .as_ref()
-            .map_or(0, |s| Self::hash_str(s));
+            .map_or(0, |s| hash_str(s));
         let content_hash = Self::hash_inline_spans(spans);
         let text_color = style.visuals.text_color().to_array();
         let key = CellLayoutKey {
