@@ -1348,7 +1348,9 @@ box "Done" fit rad 50%
 move to last diamond.s
 arrow down "No" ljust
 box "Retry" fit rad 10px
-arrow left then up then right to 1st box.w
+arrow from last box.w left 0.5in \
+  then up until even with 1st box \
+  then right to 1st box.w
 ```
 
 ### Shape Gallery
