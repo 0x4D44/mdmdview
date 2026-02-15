@@ -19,6 +19,12 @@ use crate::shapes::{multiple_svg, shadow_svg, shape_svg, three_d_svg};
 use crate::theme::Theme;
 use crate::RenderOptions;
 
+/// Round a coordinate to 2 decimal places for clean SVG output.
+/// Prevents bloated attributes like `viewBox="-20.000000000000004 ..."`.
+fn c(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
 /// Render a positioned D2Graph to SVG string.
 pub fn render(graph: &D2Graph, options: &RenderOptions) -> String {
     let theme = Theme::for_mode(options.dark_mode);
@@ -30,14 +36,14 @@ pub fn render(graph: &D2Graph, options: &RenderOptions) -> String {
     // SVG header
     svg.push_str(&format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{} {} {} {}\">\n",
-        vx, vy, vw, vh
+        c(vx), c(vy), c(vw), c(vh)
     ));
 
     // Layer 1: Background
     let bg = theme.background.to_svg_string();
     svg.push_str(&format!(
         "  <rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\"/>\n",
-        vx, vy, vw, vh, bg
+        c(vx), c(vy), c(vw), c(vh), bg
     ));
 
     // Layer 2: Container fills (outermost first via depth-first)

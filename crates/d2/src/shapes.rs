@@ -298,8 +298,14 @@ pub fn shape_svg(
                 dash = dash_attr,
             )
         }
-        // Fallback for remaining shapes: rectangle
-        _ => {
+        // These shapes fall back to rectangle for now.
+        // TODO(v2): custom SVG generators for each.
+        ShapeType::Package
+        | ShapeType::Queue
+        | ShapeType::Page
+        | ShapeType::Step
+        | ShapeType::Callout
+        | ShapeType::StoredData => {
             let rx = border_radius.unwrap_or(0.0);
             format!(
                 "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\" \

@@ -25,6 +25,10 @@ const NODE_SPACING_V: f64 = 60.0;
 /// Gap between disconnected components (pixels).
 const COMPONENT_GAP: f64 = 60.0;
 
+/// Number of barycenter crossing-reduction sweeps.
+/// Empirically sufficient for diagrams under ~200 nodes.
+const CROSSING_REDUCTION_ITERATIONS: usize = 12;
+
 /// Lay out the direct children of a container using the Sugiyama algorithm.
 /// When the graph has multiple disconnected components, each is laid out
 /// independently and then arranged side-by-side.
@@ -139,14 +143,14 @@ fn find_components(
         parent_map.insert(c, c);
     }
 
-    fn find(parent_map: &mut HashMap<NodeIndex, NodeIndex>, x: NodeIndex) -> NodeIndex {
-        let p = parent_map[&x];
-        if p == x {
-            return x;
+    fn find(parent_map: &mut HashMap<NodeIndex, NodeIndex>, mut x: NodeIndex) -> NodeIndex {
+        // Iterative path compression — avoids stack overflow on deep chains.
+        while parent_map[&x] != x {
+            let grandparent = parent_map[&parent_map[&x]];
+            parent_map.insert(x, grandparent);
+            x = grandparent;
         }
-        let root = find(parent_map, p);
-        parent_map.insert(x, root);
-        root
+        x
     }
 
     fn union(parent_map: &mut HashMap<NodeIndex, NodeIndex>, a: NodeIndex, b: NodeIndex) {
@@ -322,12 +326,20 @@ fn assign_ranks(
         }
     }
 
-    // Handle case where all nodes have incoming edges (cycle — should be broken already)
+    // Handle case where all nodes have incoming edges (residual cycle).
+    // Seed all nodes with minimum in-degree so the BFS can reach everything.
     if queue.is_empty() {
-        // Fallback: assign rank 0 to first child
-        if let Some(&first) = children.first() {
-            queue.push_back(first);
-            rank.insert(first, 0);
+        let min_deg = children
+            .iter()
+            .filter_map(|c| in_degree.get(c))
+            .copied()
+            .min()
+            .unwrap_or(0);
+        for &child in children {
+            if *in_degree.get(&child).unwrap_or(&0) == min_deg {
+                queue.push_back(child);
+                rank.insert(child, 0);
+            }
         }
     }
 
@@ -342,10 +354,11 @@ fn assign_ranks(
                     *current = new_rank;
                 }
 
-                let deg = in_degree.get_mut(&next).unwrap();
-                *deg -= 1;
-                if *deg == 0 {
-                    queue.push_back(next);
+                if let Some(deg) = in_degree.get_mut(&next) {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        queue.push_back(next);
+                    }
                 }
             }
         }
@@ -383,11 +396,9 @@ fn reduce_crossings(
         }
     }
 
-    // Iterative sweeps (12 iterations)
-    for _iter in 0..12 {
+    for _iter in 0..CROSSING_REDUCTION_ITERATIONS {
         // Downward sweep
         for r in 1..=max_rank {
-            let _prev_rank = &ordered[r - 1];
             let curr_rank = &ordered[r];
 
             let mut barycenters: Vec<(NodeIndex, f64)> = curr_rank
@@ -420,7 +431,6 @@ fn reduce_crossings(
 
         // Upward sweep
         for r in (0..max_rank).rev() {
-            let _next_rank = &ordered[r + 1];
             let curr_rank = &ordered[r];
 
             let mut barycenters: Vec<(NodeIndex, f64)> = curr_rank

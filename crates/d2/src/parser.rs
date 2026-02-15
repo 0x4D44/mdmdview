@@ -613,7 +613,7 @@ impl<'a> Parser<'a> {
                 Some(ScalarValue::SingleQuoted(sv.value))
             }
             _ => {
-                // Unquoted value: read until newline, semicolon, #, {, }
+                // Unquoted value: read until newline, semicolon, #, {, }, ]
                 let mut value = String::new();
                 loop {
                     if self.at_end() {
@@ -621,7 +621,7 @@ impl<'a> Parser<'a> {
                     }
                     let ch = self.peek().unwrap();
                     match ch {
-                        '\n' | ';' | '#' | '{' | '}' => break,
+                        '\n' | ';' | '#' | '{' | '}' | ']' => break,
                         _ => {
                             value.push(ch);
                             self.advance();

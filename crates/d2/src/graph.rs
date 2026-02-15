@@ -464,9 +464,10 @@ impl Color {
         }
     }
 
-    /// Try to parse a color from either hex or named format.
+    /// Try to parse a color from either hex (`#rrggbb` / `#rrggbbaa`) or named format.
+    /// D2 requires the `#` prefix for hex colors; bare hex strings are not accepted.
     pub fn parse(s: &str) -> Option<Color> {
-        if s.starts_with('#') || (s.chars().all(|c| c.is_ascii_hexdigit()) && s.len() >= 6) {
+        if s.starts_with('#') {
             Color::from_hex(s)
         } else {
             Color::from_named(s)
