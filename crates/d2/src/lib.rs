@@ -294,7 +294,17 @@ network.server2 -> database: query\n\
         );
     }
 
-    // 11. All shapes ---------------------------------------------------------
+    // 11. Self-edge ----------------------------------------------------------
+
+    #[test]
+    fn test_e2e_self_edge() {
+        let svg = render_ok("a -> a");
+        assert!(svg.contains("<svg"), "expected valid SVG with <svg tag");
+        // Verify the self-loop didn't panic and produced at least one path
+        assert!(svg.contains("a"), "expected label 'a' in SVG");
+    }
+
+    // 12. All shapes ---------------------------------------------------------
 
     #[test]
     fn test_e2e_all_shapes() {
