@@ -178,15 +178,50 @@ pub fn shape_svg(
             )
         }
         ShapeType::Cloud => {
-            let cx = rect.x + rect.width / 2.0;
-            let cy = rect.y + rect.height / 2.0;
-            let rx = rect.width / 2.0;
-            let ry = rect.height / 2.0;
-            // Simplified cloud shape using overlapping ellipses path
+            let x = rect.x;
+            let y = rect.y;
+            let w = rect.width;
+            let h = rect.height;
+            // Cloud shape: a closed path of cubic Bézier arcs forming bumps.
+            // The path traces clockwise: bottom-left → bottom-right (flat base),
+            // then up the right side, across the top with 3 bumps, down the left.
+            let bx = x;
+            let by = y + h * 0.75; // base y
             format!(
-                "<ellipse cx=\"{}\" cy=\"{}\" rx=\"{}\" ry=\"{}\" \
-                 fill=\"{}\" stroke=\"{}\" stroke-width=\"{}\"{}{}/>",
-                cx, cy, rx, ry, fill, stroke, stroke_width, opacity_attr, dash_attr,
+                "<path d=\"M {bx} {by} \
+                 C {c1x} {c1y} {c2x} {c2y} {p1x} {p1y} \
+                 C {c3x} {c3y} {c4x} {c4y} {p2x} {p2y} \
+                 C {c5x} {c5y} {c6x} {c6y} {p3x} {p3y} \
+                 C {c7x} {c7y} {c8x} {c8y} {p4x} {p4y} \
+                 C {c9x} {c9y} {c10x} {c10y} {bx} {by} \
+                 Z\" \
+                 fill=\"{fill}\" stroke=\"{stroke}\" stroke-width=\"{sw}\"{opacity}{dash}/>",
+                bx = bx,
+                by = by,
+                // Bottom-right bump
+                c1x = x + w * 0.15, c1y = y + h * 1.05,
+                c2x = x + w * 0.85, c2y = y + h * 1.05,
+                p1x = x + w, p1y = y + h * 0.65,
+                // Right bump up
+                c3x = x + w * 1.05, c3y = y + h * 0.35,
+                c4x = x + w * 0.9,  c4y = y + h * 0.1,
+                p2x = x + w * 0.7,  p2y = y + h * 0.15,
+                // Top bump
+                c5x = x + w * 0.6,  c5y = y - h * 0.05,
+                c6x = x + w * 0.4,  c6y = y - h * 0.05,
+                p3x = x + w * 0.3,  p3y = y + h * 0.15,
+                // Left bump down
+                c7x = x + w * 0.1,  c7y = y + h * 0.1,
+                c8x = x - w * 0.05, c8y = y + h * 0.35,
+                p4x = x,            p4y = y + h * 0.65,
+                // Back to start
+                c9x  = x - w * 0.05, c9y  = y + h * 0.85,
+                c10x = x - w * 0.05, c10y = y + h * 0.95,
+                fill = fill,
+                stroke = stroke,
+                sw = stroke_width,
+                opacity = opacity_attr,
+                dash = dash_attr,
             )
         }
         ShapeType::Parallelogram => {

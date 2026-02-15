@@ -4,13 +4,34 @@
 //! Produces cubic Bézier control points for smooth SVG path rendering.
 //! Handles shape-aware clipping, self-loops, and parallel edges.
 
+use std::collections::HashMap;
+
 use crate::geo::Point;
 use crate::graph::D2Graph;
 use crate::shapes::clip_to_shape;
 
+/// Perpendicular offset between parallel edges (pixels).
+const PARALLEL_EDGE_SPACING: f64 = 12.0;
+
 /// Route all edges in the graph.
+/// Parallel edges between the same pair of nodes are offset
+/// perpendicular to the edge direction to prevent overlap.
 pub fn route_all_edges(graph: &mut D2Graph) {
     let edge_indices: Vec<petgraph::stable_graph::EdgeIndex> = graph.edges.clone();
+
+    // Count parallel edges between each ordered pair of nodes.
+    // Key is (min(src,dst), max(src,dst)) so both directions count together.
+    let mut pair_counts: HashMap<(petgraph::stable_graph::NodeIndex, petgraph::stable_graph::NodeIndex), usize> = HashMap::new();
+    let mut pair_current: HashMap<(petgraph::stable_graph::NodeIndex, petgraph::stable_graph::NodeIndex), usize> = HashMap::new();
+
+    for &eidx in &edge_indices {
+        if let Some((src, dst)) = graph.graph.edge_endpoints(eidx) {
+            if src != dst {
+                let key = if src < dst { (src, dst) } else { (dst, src) };
+                *pair_counts.entry(key).or_default() += 1;
+            }
+        }
+    }
 
     for &eidx in &edge_indices {
         let (src_idx, dst_idx) = match graph.graph.edge_endpoints(eidx) {
@@ -45,9 +66,52 @@ pub fn route_all_edges(graph: &mut D2Graph) {
             continue;
         }
 
-        // Clip endpoints to shape boundaries
-        let start = clip_to_shape(src_shape, &src_rect, src_center, dst_center);
-        let end = clip_to_shape(dst_shape, &dst_rect, dst_center, src_center);
+        // Compute perpendicular offset for parallel edges
+        let key = if src_idx < dst_idx {
+            (src_idx, dst_idx)
+        } else {
+            (dst_idx, src_idx)
+        };
+        let total = *pair_counts.get(&key).unwrap_or(&1);
+        let index = {
+            let cur = pair_current.entry(key).or_default();
+            let i = *cur;
+            *cur += 1;
+            i
+        };
+
+        let perp_offset = if total > 1 {
+            let spread = (total - 1) as f64 * PARALLEL_EDGE_SPACING;
+            -spread / 2.0 + index as f64 * PARALLEL_EDGE_SPACING
+        } else {
+            0.0
+        };
+
+        // Apply perpendicular offset to the center-to-center line
+        let (offset_src, offset_dst) = if perp_offset.abs() > 0.01 {
+            let dx = dst_center.x - src_center.x;
+            let dy = dst_center.y - src_center.y;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len > 1e-6 {
+                // Perpendicular unit vector
+                let px = -dy / len;
+                let py = dx / len;
+                let ox = px * perp_offset;
+                let oy = py * perp_offset;
+                (
+                    Point::new(src_center.x + ox, src_center.y + oy),
+                    Point::new(dst_center.x + ox, dst_center.y + oy),
+                )
+            } else {
+                (src_center, dst_center)
+            }
+        } else {
+            (src_center, dst_center)
+        };
+
+        // Clip endpoints to shape boundaries using the offset line
+        let start = clip_to_shape(src_shape, &src_rect, offset_src, offset_dst);
+        let end = clip_to_shape(dst_shape, &dst_rect, offset_dst, offset_src);
 
         // Generate cubic Bézier control points
         let route = generate_bezier(start, end);
@@ -86,23 +150,28 @@ fn generate_bezier(start: Point, end: Point) -> Vec<Point> {
     vec![start, ctrl1, ctrl2, end]
 }
 
-/// Generate a self-loop path.
+/// Generate a self-loop path as two cubic Bézier segments.
+/// Exits from the top of the shape, arcs outward to the upper-right,
+/// and re-enters from the right side.
+/// Returns 7 points: [start, c1, c2, mid, c3, c4, end] forming two
+/// cubic Bézier segments that the SVG renderer consumes as:
+///   M start C c1 c2 mid C c3 c4 end
 fn self_loop_route(rect: &crate::geo::Rect) -> Vec<Point> {
     let cx = rect.x + rect.width / 2.0;
-    let cy = rect.y;
-    let right = rect.x + rect.width;
     let top = rect.y;
-
+    let right = rect.x + rect.width;
     let loop_size = rect.width.max(rect.height) * 0.4;
 
-    // Exit from top-right, arc outward, re-enter from right-top
+    // Segment 1: exit from top, arc up and to the right
     let start = Point::new(cx + rect.width * 0.15, top);
     let ctrl1 = Point::new(cx + rect.width * 0.15, top - loop_size);
     let ctrl2 = Point::new(right + loop_size * 0.5, top - loop_size);
-    let mid = Point::new(right + loop_size * 0.5, cy);
-    let ctrl3 = Point::new(right + loop_size * 0.5, cy + loop_size * 0.3);
-    let ctrl4 = Point::new(right, cy + rect.height * 0.15);
-    let end = Point::new(right, cy + rect.height * 0.15);
+    let mid = Point::new(right + loop_size * 0.5, top + rect.height * 0.25);
+
+    // Segment 2: arc down and re-enter from the right side
+    let ctrl3 = Point::new(right + loop_size * 0.5, top + rect.height * 0.6);
+    let ctrl4 = Point::new(right + loop_size * 0.1, top + rect.height * 0.35);
+    let end = Point::new(right, top + rect.height * 0.35);
 
     vec![start, ctrl1, ctrl2, mid, ctrl3, ctrl4, end]
 }

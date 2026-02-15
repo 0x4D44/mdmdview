@@ -22,7 +22,12 @@ const NODE_SPACING_H: f64 = 40.0;
 /// Default spacing between ranks (vertical).
 const NODE_SPACING_V: f64 = 60.0;
 
+/// Gap between disconnected components (pixels).
+const COMPONENT_GAP: f64 = 60.0;
+
 /// Lay out the direct children of a container using the Sugiyama algorithm.
+/// When the graph has multiple disconnected components, each is laid out
+/// independently and then arranged side-by-side.
 pub fn layout_children(
     graph: &mut D2Graph,
     container: NodeIndex,
@@ -58,19 +63,132 @@ pub fn layout_children(
         return Ok(());
     }
 
-    // Phase 1: Cycle removal — find back edges via DFS
-    let (forward_edges, _back_edges) = remove_cycles(&children, &edges);
+    // Find connected components among children
+    let components = find_components(&children, &edges);
 
-    // Phase 2: Rank assignment — longest path
-    let ranks = assign_ranks(&children, &forward_edges);
+    if components.len() <= 1 {
+        // Single component: lay out directly
+        layout_component(graph, &children, &edges, direction);
+    } else {
+        // Multiple disconnected components: lay out each independently,
+        // then stack side-by-side perpendicular to the layout direction
+        let is_horizontal = direction.is_horizontal();
+        let mut cross_offset = 0.0;
 
-    // Phase 3: Crossing reduction — barycenter ordering
+        for component in &components {
+            // Collect edges for this component
+            let comp_set: HashSet<NodeIndex> = component.iter().copied().collect();
+            let comp_edges: Vec<(NodeIndex, NodeIndex, EdgeIndex)> = edges
+                .iter()
+                .filter(|(s, d, _)| comp_set.contains(s) && comp_set.contains(d))
+                .copied()
+                .collect();
+
+            if comp_edges.is_empty() {
+                arrange_in_line(graph, component, direction);
+            } else {
+                layout_component(graph, component, &comp_edges, direction);
+            }
+
+            // Compute bounding box of this component
+            let mut min_cross = f64::INFINITY;
+            let mut max_cross = f64::NEG_INFINITY;
+
+            for &node in component {
+                if let Some(rect) = graph.graph[node].box_ {
+                    let (lo, hi) = if is_horizontal {
+                        (rect.y, rect.y + rect.height)
+                    } else {
+                        (rect.x, rect.x + rect.width)
+                    };
+                    min_cross = min_cross.min(lo);
+                    max_cross = max_cross.max(hi);
+                }
+            }
+
+            if min_cross == f64::INFINITY {
+                continue;
+            }
+
+            // Shift this component so it starts at cross_offset
+            let shift = cross_offset - min_cross;
+            for &node in component {
+                if let Some(ref mut rect) = graph.graph[node].box_ {
+                    if is_horizontal {
+                        rect.y += shift;
+                    } else {
+                        rect.x += shift;
+                    }
+                }
+            }
+
+            cross_offset += (max_cross - min_cross) + COMPONENT_GAP;
+        }
+    }
+
+    Ok(())
+}
+
+/// Find connected components using union-find on the children.
+fn find_components(
+    children: &[NodeIndex],
+    edges: &[(NodeIndex, NodeIndex, EdgeIndex)],
+) -> Vec<Vec<NodeIndex>> {
+    let mut parent_map: HashMap<NodeIndex, NodeIndex> = HashMap::new();
+    for &c in children {
+        parent_map.insert(c, c);
+    }
+
+    fn find(parent_map: &mut HashMap<NodeIndex, NodeIndex>, x: NodeIndex) -> NodeIndex {
+        let p = parent_map[&x];
+        if p == x {
+            return x;
+        }
+        let root = find(parent_map, p);
+        parent_map.insert(x, root);
+        root
+    }
+
+    fn union(parent_map: &mut HashMap<NodeIndex, NodeIndex>, a: NodeIndex, b: NodeIndex) {
+        let ra = find(parent_map, a);
+        let rb = find(parent_map, b);
+        if ra != rb {
+            parent_map.insert(ra, rb);
+        }
+    }
+
+    for &(src, dst, _) in edges {
+        union(&mut parent_map, src, dst);
+    }
+
+    // Group by root
+    let mut groups: HashMap<NodeIndex, Vec<NodeIndex>> = HashMap::new();
+    for &c in children {
+        let root = find(&mut parent_map, c);
+        groups.entry(root).or_default().push(c);
+    }
+
+    groups.into_values().collect()
+}
+
+/// Lay out a single connected component using Sugiyama.
+fn layout_component(
+    graph: &mut D2Graph,
+    children: &[NodeIndex],
+    edges: &[(NodeIndex, NodeIndex, EdgeIndex)],
+    direction: Direction,
+) {
+    // Phase 1: Cycle removal
+    let (forward_edges, _back_edges) = remove_cycles(children, edges);
+
+    // Phase 2: Rank assignment
+    let ranks = assign_ranks(children, &forward_edges);
+
+    // Phase 3: Crossing reduction
     let ordered_ranks = reduce_crossings(&ranks, &forward_edges);
 
     // Phase 4: Coordinate assignment
     assign_coordinates(graph, &ordered_ranks, direction);
-
-    Ok(())
 }
 
 /// Find the child of `container` that is an ancestor of (or equal to) `node`.
@@ -334,6 +452,258 @@ fn reduce_crossings(
     }
 
     ordered
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geo::Rect;
+    use crate::graph::{D2Graph, D2Object, ShapeType, Style};
+
+    /// Helper: build a minimal graph with N nodes as children of root,
+    /// each with a pre-set box_ so the layout can place them.
+    /// Returns (graph, vec_of_child_indices).
+    fn make_graph(labels: &[&str]) -> (D2Graph, Vec<NodeIndex>) {
+        let mut graph = D2Graph::new();
+        let root = graph.root;
+        let mut children = Vec::new();
+
+        for &label in labels {
+            let idx = graph.graph.add_node(D2Object {
+                id: label.to_string(),
+                label: label.to_string(),
+                shape: ShapeType::Rectangle,
+                style: Style::default(),
+                parent: Some(root),
+                children: Vec::new(),
+                direction: None,
+                box_: Some(Rect::new(0.0, 0.0, 60.0, 36.0)),
+                label_dimensions: Some((50.0, 26.0)),
+                label_lines: vec![label.to_string()],
+                is_container: false,
+            });
+            graph.graph[root].children.push(idx);
+            graph.objects.push(idx);
+            children.push(idx);
+        }
+
+        (graph, children)
+    }
+
+    /// Helper: add an edge between two children and register it.
+    fn add_edge(
+        graph: &mut D2Graph,
+        src: NodeIndex,
+        dst: NodeIndex,
+    ) -> EdgeIndex {
+        use crate::graph::{ArrowheadType, D2EdgeData};
+
+        let eidx = graph.graph.add_edge(
+            src,
+            dst,
+            D2EdgeData {
+                label: None,
+                src_arrow: ArrowheadType::None,
+                dst_arrow: ArrowheadType::Arrow,
+                style: Style::default(),
+                route: Vec::new(),
+                label_position: None,
+            },
+        );
+        graph.edges.push(eidx);
+        eidx
+    }
+
+    // --- test_linear_chain_ranking -------------------------------------------
+
+    #[test]
+    fn test_linear_chain_ranking() {
+        // a -> b -> c should produce 3 distinct ranks: a=0, b=1, c=2.
+        let (mut graph, children) = make_graph(&["a", "b", "c"]);
+        let a = children[0];
+        let b = children[1];
+        let c = children[2];
+
+        let e1 = add_edge(&mut graph, a, b);
+        let e2 = add_edge(&mut graph, b, c);
+
+        let edges = vec![(a, b, e1), (b, c, e2)];
+        let (forward, _back) = remove_cycles(&children, &edges);
+        let ranks = assign_ranks(&children, &forward);
+
+        // There should be 3 distinct ranks: 0, 1, 2
+        assert_eq!(ranks.len(), 3, "expected 3 ranks, got {}", ranks.len());
+
+        // Build a node-to-rank lookup
+        let mut node_rank: HashMap<NodeIndex, usize> = HashMap::new();
+        for (&rank, nodes) in &ranks {
+            for &node in nodes {
+                node_rank.insert(node, rank);
+            }
+        }
+
+        let rank_a = node_rank[&a];
+        let rank_b = node_rank[&b];
+        let rank_c = node_rank[&c];
+
+        assert!(
+            rank_a < rank_b,
+            "a (rank {rank_a}) should be before b (rank {rank_b})"
+        );
+        assert!(
+            rank_b < rank_c,
+            "b (rank {rank_b}) should be before c (rank {rank_c})"
+        );
+    }
+
+    // --- test_cycle_removal --------------------------------------------------
+
+    #[test]
+    fn test_cycle_removal() {
+        // a -> b -> c -> a (cycle). Should not panic or infinite loop.
+        // Back-edges list should be non-empty (at least one edge reversed).
+        let (mut graph, children) = make_graph(&["a", "b", "c"]);
+        let a = children[0];
+        let b = children[1];
+        let c = children[2];
+
+        let e1 = add_edge(&mut graph, a, b);
+        let e2 = add_edge(&mut graph, b, c);
+        let e3 = add_edge(&mut graph, c, a);
+
+        let edges = vec![(a, b, e1), (b, c, e2), (c, a, e3)];
+        let (forward, back) = remove_cycles(&children, &edges);
+
+        // At least one edge should be classified as a back-edge
+        assert!(
+            !back.is_empty(),
+            "expected at least one back-edge in a cycle"
+        );
+
+        // All edges should appear in either forward or back (none lost)
+        assert_eq!(
+            forward.len() + back.len(),
+            edges.len(),
+            "forward + back should account for all edges"
+        );
+
+        // The forward edges should be usable for ranking without panic
+        let ranks = assign_ranks(&children, &forward);
+        assert!(
+            !ranks.is_empty(),
+            "ranking should succeed after cycle removal"
+        );
+    }
+
+    // --- test_crossing_reduction ---------------------------------------------
+
+    #[test]
+    fn test_crossing_reduction() {
+        // Minimal case: a -> c, b -> d. Two independent edges, no crossings.
+        // After crossing reduction, the order should not introduce crossings.
+        let (mut graph, children) = make_graph(&["a", "b", "c", "d"]);
+        let a = children[0];
+        let b = children[1];
+        let c = children[2];
+        let d = children[3];
+
+        let e1 = add_edge(&mut graph, a, c);
+        let e2 = add_edge(&mut graph, b, d);
+
+        let edges = vec![(a, c, e1), (b, d, e2)];
+        let (forward, _) = remove_cycles(&children, &edges);
+        let ranks = assign_ranks(&children, &forward);
+        let ordered = reduce_crossings(&ranks, &forward);
+
+        // Should produce 2 ranks
+        assert_eq!(ordered.len(), 2, "expected 2 ranks, got {}", ordered.len());
+
+        // Each rank should have 2 nodes
+        assert_eq!(ordered[0].len(), 2);
+        assert_eq!(ordered[1].len(), 2);
+
+        // Verify no crossing: if a is before b in rank 0, then c should be
+        // before d in rank 1 (or vice versa — the relative order should match).
+        let a_pos = ordered[0].iter().position(|&n| n == a).unwrap();
+        let b_pos = ordered[0].iter().position(|&n| n == b).unwrap();
+        let c_pos = ordered[1].iter().position(|&n| n == c).unwrap();
+        let d_pos = ordered[1].iter().position(|&n| n == d).unwrap();
+
+        // If a < b then c < d (no crossing), or if b < a then d < c
+        let same_order = (a_pos < b_pos && c_pos < d_pos)
+            || (b_pos < a_pos && d_pos < c_pos);
+        assert!(
+            same_order,
+            "crossing reduction should not introduce crossings: \
+             a@{a_pos}, b@{b_pos}, c@{c_pos}, d@{d_pos}"
+        );
+    }
+
+    // --- test_single_node ----------------------------------------------------
+
+    #[test]
+    fn test_single_node() {
+        // A single node with no edges should not panic.
+        let (mut graph, children) = make_graph(&["alone"]);
+        let root = graph.root;
+
+        // layout_children should succeed without edges
+        let result = layout_children(&mut graph, root, Direction::Down);
+        assert!(result.is_ok(), "single node layout should succeed");
+
+        // The node should have a valid position
+        let rect = graph.graph[children[0]]
+            .box_
+            .expect("single node should have a box after layout");
+        assert!(
+            rect.width > 0.0 && rect.height > 0.0,
+            "node should have non-zero dimensions"
+        );
+    }
+
+    // --- test_disconnected_nodes ---------------------------------------------
+
+    #[test]
+    fn test_disconnected_nodes() {
+        // Multiple nodes with no edges: they should be arranged, not all
+        // at the same position.
+        let (mut graph, children) = make_graph(&["x", "y", "z"]);
+        let root = graph.root;
+
+        let result = layout_children(&mut graph, root, Direction::Down);
+        assert!(result.is_ok(), "disconnected nodes layout should succeed");
+
+        // Collect positions
+        let positions: Vec<(f64, f64)> = children
+            .iter()
+            .map(|&idx| {
+                let rect = graph.graph[idx]
+                    .box_
+                    .expect("node should have a box after layout");
+                (rect.x, rect.y)
+            })
+            .collect();
+
+        // Not all at the same position
+        let all_same = positions
+            .windows(2)
+            .all(|w| (w[0].0 - w[1].0).abs() < 0.01 && (w[0].1 - w[1].1).abs() < 0.01);
+        assert!(
+            !all_same,
+            "disconnected nodes should not all be at the same position: {positions:?}"
+        );
+
+        // For direction=Down, nodes should be stacked vertically (different y)
+        let ys: Vec<f64> = positions.iter().map(|p| p.1).collect();
+        assert!(
+            ys[0] < ys[1] && ys[1] < ys[2],
+            "nodes should be in increasing y order for direction=Down: {ys:?}"
+        );
+    }
 }
 
 /// Assign x,y coordinates to nodes based on rank and order.
