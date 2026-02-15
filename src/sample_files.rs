@@ -49,11 +49,158 @@ pub const SAMPLE_FILES: &[SampleFile] = &[
         content: PIKCHR_CONTENT,
     },
     SampleFile {
+        name: "d2-diagrams.md",
+        title: "D2 Diagrams",
+        content: D2_CONTENT,
+    },
+    SampleFile {
         name: "stress_test.md",
         title: "Stress Test",
         content: STRESS_TEST_CONTENT,
     },
 ];
+
+/// D2 diagram sample content
+const D2_CONTENT: &str = r##"# D2 Diagrams
+
+[D2](https://d2lang.com) is a modern declarative diagramming language.
+Fenced code blocks with ` ```d2 ` are rendered as diagrams.
+
+## Simple Shapes
+
+Basic nodes are declared by name. Add a label with `: "text"`.
+
+```d2
+server: Web Server
+db: Database
+cache: Redis Cache
+```
+
+## Connections
+
+D2 supports several arrow types for different relationships.
+
+```d2
+a -> b: forward
+c <- d: reverse
+e <-> f: bidirectional
+g -- h: undirected
+```
+
+## Connection Chains
+
+Chain multiple nodes in a single statement.
+
+```d2
+request -> gateway -> service -> database
+```
+
+## Connection Labels
+
+Labels on arrows describe the relationship.
+
+```d2
+client -> api: "REST/JSON"
+api -> db: "SQL queries"
+api -> cache: "get/set"
+cache -> db: "cache miss"
+```
+
+## Containers
+
+Group related elements with `{ }` nesting.
+
+```d2
+backend: Backend {
+  api: API Server
+  worker: Background Worker
+  api -> worker: enqueue jobs
+}
+
+frontend: Frontend {
+  app: React App
+  cdn: CDN
+}
+
+frontend.app -> backend.api: fetch
+```
+
+## Shape Types
+
+D2 provides built-in shape keywords.
+
+```d2
+user: User {shape: person}
+server: Web Server {shape: rectangle}
+store: Data Store {shape: cylinder}
+decision: Approved? {shape: diamond}
+process: ETL Pipeline {shape: hexagon}
+msg: Task Queue {shape: queue}
+docs: Documentation {shape: page}
+cloud: AWS {shape: cloud}
+```
+
+## Styled Elements
+
+Apply colors and styles to nodes and edges.
+
+```d2
+ok: Success {
+  style.fill: "#d4edda"
+  style.stroke: "#155724"
+  style.bold: true
+}
+err: Failure {
+  style.fill: "#f8d7da"
+  style.stroke: "#721c24"
+  style.bold: true
+}
+ok -> err: retry {
+  style.stroke: "#856404"
+}
+```
+
+## Horizontal Layout
+
+Use `direction` to control flow orientation.
+
+```d2
+direction: right
+step1: Input -> step2: Validate -> step3: Process -> step4: Output
+```
+
+## Architecture Example
+
+A typical web service with an API gateway, backend services, and data stores.
+
+```d2
+direction: right
+
+lb: Load Balancer {shape: cloud}
+
+services: Services {
+  gw: API Gateway
+  auth: Auth Service
+  orders: Order Service
+  notify: Notification Service
+
+  gw -> auth: verify token
+  gw -> orders: route request
+  orders -> notify: order placed
+}
+
+data: Data Layer {
+  pg: PostgreSQL {shape: cylinder}
+  redis: Redis {shape: cylinder}
+  s3: Object Store {shape: cylinder}
+}
+
+lb -> services.gw: HTTPS
+services.auth -> data.redis: sessions
+services.orders -> data.pg: CRUD
+services.notify -> data.s3: templates
+```
+"##;
 
 /// Pikchr diagram sample content
 const PIKCHR_CONTENT: &str = r#"# Pikchr Diagrams
@@ -509,7 +656,7 @@ mod tests {
 
     #[test]
     fn test_sample_files_exist() {
-        assert_eq!(SAMPLE_FILES.len(), 8);
+        assert_eq!(SAMPLE_FILES.len(), 9);
 
         let names: Vec<&str> = SAMPLE_FILES.iter().map(|f| f.name).collect();
         assert!(names.contains(&"welcome.md"));
@@ -519,6 +666,7 @@ mod tests {
         assert!(names.contains(&"search.md"));
         assert!(names.contains(&"images.md"));
         assert!(names.contains(&"pikchr.md"));
+        assert!(names.contains(&"d2-diagrams.md"));
         assert!(names.contains(&"stress_test.md"));
     }
 
@@ -589,6 +737,18 @@ mod tests {
     }
 
     #[test]
+    fn test_d2_content_structure() {
+        assert!(D2_CONTENT.contains("# D2 Diagrams"));
+        assert!(D2_CONTENT.contains("```d2"));
+        assert!(D2_CONTENT.contains("->"));
+        assert!(D2_CONTENT.contains("<->"));
+        assert!(D2_CONTENT.contains("{shape:"));
+        assert!(D2_CONTENT.contains("style.fill"));
+        assert!(D2_CONTENT.contains("direction: right"));
+        assert!(D2_CONTENT.contains("## Architecture Example"));
+    }
+
+    #[test]
     fn test_stress_test_content_structure() {
         assert!(STRESS_TEST_CONTENT.contains("# Stress Test Document"));
         assert!(STRESS_TEST_CONTENT.contains("```rust"));
@@ -597,5 +757,7 @@ mod tests {
         assert!(STRESS_TEST_CONTENT.contains("## Nested Lists"));
         assert!(STRESS_TEST_CONTENT.contains("## Pikchr Diagrams"));
         assert!(STRESS_TEST_CONTENT.contains("```pikchr"));
+        assert!(STRESS_TEST_CONTENT.contains("## D2 Diagrams"));
+        assert!(STRESS_TEST_CONTENT.contains("```d2"));
     }
 }

@@ -1,0 +1,9 @@
+[package]
+name = "mdmdview-d2"
+version = "0.1.0"
+edition.workspace = true
+description = "D2 diagram renderer for mdmdview"
+
+[dependencies]
+petgraph = "0.8"
+thiserror = "2"

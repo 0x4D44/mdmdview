@@ -1,6 +1,8 @@
 use crate::image_decode;
 use crate::lru_cache::hash_str;
 use crate::mermaid_renderer::MermaidRenderer;
+#[cfg(feature = "d2")]
+use crate::d2_renderer;
 #[cfg(feature = "pikchr")]
 use crate::pikchr_renderer;
 use crate::table_support::{
@@ -595,6 +597,8 @@ pub struct MarkdownRenderer {
     mermaid: MermaidRenderer,
     #[cfg(feature = "pikchr")]
     pikchr: pikchr_renderer::PikchrRenderer,
+    #[cfg(feature = "d2")]
+    d2: d2_renderer::D2Renderer,
     table_layout_cache: RefCell<CellLayoutCache>,
     table_metrics: RefCell<TableMetrics>,
     column_stats_cache: RefCell<HashMap<u64, ColumnStatsCacheEntry>>,
@@ -970,6 +974,8 @@ impl MarkdownRenderer {
             mermaid,
             #[cfg(feature = "pikchr")]
             pikchr: pikchr_renderer::PikchrRenderer::new(),
+            #[cfg(feature = "d2")]
+            d2: d2_renderer::D2Renderer::new(),
             table_layout_cache: RefCell::new(CellLayoutCache::new(TABLE_LAYOUT_CACHE_CAPACITY)),
             table_metrics: RefCell::new(TableMetrics::default()),
             column_stats_cache: RefCell::new(HashMap::new()),
@@ -2744,6 +2750,8 @@ impl MarkdownRenderer {
         self.mermaid.begin_frame();
         #[cfg(feature = "pikchr")]
         self.pikchr.begin_frame();
+        #[cfg(feature = "d2")]
+        self.d2.begin_frame();
         // Clear header rects before rendering a new frame
         self.header_rects.borrow_mut().clear();
         // Reset per-frame link counter to ensure link IDs are stable across frames
@@ -3917,6 +3925,13 @@ impl MarkdownRenderer {
                 ui.add_space(8.0);
                 return;
             }
+
+            #[cfg(feature = "d2")]
+            if lang.eq_ignore_ascii_case("d2") {
+                let _ = self.render_d2_block(ui, code);
+                ui.add_space(8.0);
+                return;
+            }
         }
 
         let tc = ThemeColors::current(ui.visuals().dark_mode);
@@ -4022,6 +4037,12 @@ impl MarkdownRenderer {
     #[cfg(feature = "pikchr")]
     fn render_pikchr_block(&self, ui: &mut egui::Ui, code: &str) -> bool {
         self.pikchr
+            .render_block(ui, code, self.ui_scale(), self.font_sizes.code)
+    }
+
+    #[cfg(feature = "d2")]
+    fn render_d2_block(&self, ui: &mut egui::Ui, code: &str) -> bool {
+        self.d2
             .render_block(ui, code, self.ui_scale(), self.font_sizes.code)
     }
 
@@ -5448,7 +5469,14 @@ impl MarkdownRenderer {
         let pikchr_pending = self.pikchr.has_pending();
         #[cfg(not(feature = "pikchr"))]
         let pikchr_pending = false;
-        self.mermaid.has_pending() || !self.image_pending.borrow().is_empty() || pikchr_pending
+        #[cfg(feature = "d2")]
+        let d2_pending = self.d2.has_pending();
+        #[cfg(not(feature = "d2"))]
+        let d2_pending = false;
+        self.mermaid.has_pending()
+            || !self.image_pending.borrow().is_empty()
+            || pikchr_pending
+            || d2_pending
     }
 
     /// Set or clear the highlight phrase (case-insensitive)
@@ -5486,6 +5514,8 @@ impl MarkdownRenderer {
         self.mermaid.release_gpu_textures();
         #[cfg(feature = "pikchr")]
         self.pikchr.release_gpu_textures();
+        #[cfg(feature = "d2")]
+        self.d2.release_gpu_textures();
     }
 
     pub fn table_layout_cache_stats(&self) -> (u64, u64) {
@@ -5849,6 +5879,11 @@ impl MarkdownRenderer {
 
         #[cfg(feature = "pikchr")]
         if lang.eq_ignore_ascii_case("pikchr") {
+            return None;
+        }
+
+        #[cfg(feature = "d2")]
+        if lang.eq_ignore_ascii_case("d2") {
             return None;
         }
 
