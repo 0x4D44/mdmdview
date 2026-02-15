@@ -1,7 +1,13 @@
+[workspace]
+members = [".", "crates/d2"]
+
+[workspace.package]
+edition = "2021"
+
 [package]
 name = "mdmdview"
-version = "1.7.0"
-edition = "2021"
+version = "1.8.0"
+edition.workspace = true
 description = "A markdown viewer for Windows"
 authors = ["0x4D44 <martingdavidson@gmail.com>"]
 license = "MIT"
@@ -63,13 +69,15 @@ strip = false
 
 [features]
 # Default to the embedded Mermaid renderer (QuickJS).
-default = ["mermaid-embedded", "pikchr"]
+default = ["mermaid-embedded", "pikchr", "d2"]
 # Enable JavaScript-based Mermaid rendering via QuickJS (embedded)
 mermaid-quickjs = ["dep:rquickjs"]
 # Embedded Mermaid support (alias for mermaid-quickjs)
 mermaid-embedded = ["mermaid-quickjs"]
 # Pikchr diagram rendering (embedded C library, compiled from C source)
 pikchr = ["dep:pikchr"]
+# D2 diagram rendering (native Rust implementation)
+d2 = ["dep:mdmdview-d2"]
 
 [dependencies.rquickjs]
 version = "0.11"
@@ -77,6 +85,10 @@ optional = true
 
 [dependencies.pikchr]
 version = "0.1"
+optional = true
+
+[dependencies.mdmdview-d2]
+path = "crates/d2"
 optional = true
 
 [package.metadata.wix]

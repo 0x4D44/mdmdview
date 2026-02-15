@@ -1388,6 +1388,86 @@ arrow right 300% "SELECT *" above "rows" below
 cylinder "DB" fit
 ```
 
+## D2 Diagrams
+
+### Simple Flow
+
+```d2
+client -> server: request
+server -> client: response
+```
+
+### Shape Types
+
+```d2
+user: User {shape: person}
+api: API {shape: rectangle}
+db: Database {shape: cylinder}
+check: Valid? {shape: diamond}
+queue: Job Queue {shape: queue}
+docs: Docs {shape: page}
+infra: Cloud {shape: cloud}
+```
+
+### Container Nesting
+
+```d2
+platform: Platform {
+  frontend: Frontend {
+    app: React App
+    cdn: CDN
+  }
+  backend: Backend {
+    api: API Gateway
+    svc: Service
+    api -> svc: route
+  }
+  frontend.app -> backend.api: fetch
+}
+```
+
+### Styled Elements
+
+```d2
+success: OK {
+  style.fill: "#d4edda"
+  style.stroke: "#155724"
+  style.bold: true
+}
+failure: Error {
+  style.fill: "#f8d7da"
+  style.stroke: "#721c24"
+  style.bold: true
+}
+success -> failure: retry
+```
+
+### Horizontal Layout
+
+```d2
+direction: right
+input: Input -> validate: Validate -> process: Process -> output: Output
+```
+
+### Architecture
+
+```d2
+direction: right
+
+lb: Load Balancer {shape: cloud}
+gw: API Gateway
+auth: Auth {shape: hexagon}
+orders: Orders
+db: PostgreSQL {shape: cylinder}
+cache: Redis {shape: cylinder}
+
+lb -> gw: HTTPS
+gw -> auth: verify
+gw -> orders: route
+auth -> cache: sessions
+orders -> db: CRUD
+```
+
 ---
 
 ## Links
@@ -1522,6 +1602,7 @@ This document contains:
 - Emojis in headers, tables, links, and formatted text
 - Complex Mermaid diagrams (flowchart, sequence, class, state, gantt, ER, journey)
 - Pikchr diagrams (flow, architecture, decision, shape gallery, pipeline, labeled connections)
+- D2 diagrams (flow, shapes, containers, styled, horizontal, architecture)
 - Various link types (external, internal anchor, formatted, emoji links)
 - Edge cases (empty tables, long cells, adjacent code blocks, very long lines, poetry)
 
