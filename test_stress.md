@@ -1343,10 +1343,9 @@ cylinder "Database" fit
 box "Start" fit rad 50%
 arrow down
 diamond "OK?" fit
-arrow right 200% "Yes" above
+arrow from last diamond.e right 200% "Yes" above
 box "Done" fit rad 50%
-move to last diamond.s
-arrow down "No" ljust
+arrow from last diamond.s down "No" ljust
 box "Retry" fit rad 10px
 arrow from last box.w left 0.5in \
   then up until even with 1st box \

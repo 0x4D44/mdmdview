@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_sample_decision_flow() {
-        let code = "box \"Start\" fit rad 50%\narrow down\ndiamond \"OK?\" fit\narrow right 200% \"Yes\" above\nbox \"Done\" fit rad 50%\nmove to last diamond.s\narrow down \"No\" ljust\nbox \"Retry\" fit rad 10px\narrow from last box.w left 0.5in then up until even with 1st box then right to 1st box.w";
+        let code = "box \"Start\" fit rad 50%\narrow down\ndiamond \"OK?\" fit\narrow from last diamond.e right 200% \"Yes\" above\nbox \"Done\" fit rad 50%\narrow from last diamond.s down \"No\" ljust\nbox \"Retry\" fit rad 10px\narrow from last box.w left 0.5in then up until even with 1st box then right to 1st box.w";
         let result = PikchrRenderer::render_pikchr_to_svg(code, false);
         assert!(result.is_ok(), "Decision flow sample failed: {:?}", result.err());
     }
