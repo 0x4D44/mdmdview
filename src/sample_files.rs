@@ -595,5 +595,7 @@ mod tests {
         assert!(STRESS_TEST_CONTENT.contains("```typescript"));
         assert!(STRESS_TEST_CONTENT.contains("## Tables"));
         assert!(STRESS_TEST_CONTENT.contains("## Nested Lists"));
+        assert!(STRESS_TEST_CONTENT.contains("## Pikchr Diagrams"));
+        assert!(STRESS_TEST_CONTENT.contains("```pikchr"));
     }
 }
