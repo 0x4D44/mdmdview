@@ -30,18 +30,25 @@ const PIKCHR_ERROR_CACHE_CAPACITY: usize = 32;
 /// Maximum rasterized dimension (width or height) in pixels.
 /// Matches the cap used by mermaid_renderer.
 const MAX_RASTER_SIDE: u32 = 4096;
+/// Rasterization supersample factor. Pikchr SVGs have compact viewBox
+/// dimensions (a single box is ~67×35 units), so rasterizing at 1×
+/// produces textures with insufficient pixel density for crisp text.
+/// 2× gives 4× the pixels, making anti-aliased text and thin lines
+/// look sharp — the standard "retina rendering" approach.
+const PIKCHR_SUPERSAMPLE: f32 = 2.0;
 
 // ---------------------------------------------------------------------------
 // PikchrTextureEntry
 // ---------------------------------------------------------------------------
 
-/// A cached rasterized Pikchr diagram texture with its pixel dimensions.
+/// A cached rasterized Pikchr diagram texture with its display dimensions.
 #[derive(Clone)]
 struct PikchrTextureEntry {
     /// GPU texture handle (Clone wraps Arc internally).
     texture: egui::TextureHandle,
-    /// Pixel dimensions [width, height].
-    size: [u32; 2],
+    /// Display dimensions in logical pixels [width, height].
+    /// The actual texture is larger by `PIKCHR_SUPERSAMPLE` for crisp rendering.
+    display_size: [u32; 2],
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +241,10 @@ impl PikchrRenderer {
     ///
     /// Uses the shared fontdb (with system fonts) so that text labels render
     /// correctly. Without system fonts, usvg silently skips all text.
+    ///
+    /// Rasterizes at `PIKCHR_SUPERSAMPLE` × the logical display resolution
+    /// for crisp text and lines. The returned entry stores display dimensions
+    /// in logical pixels; the actual texture is larger by the supersample factor.
     fn rasterize_and_upload(
         ctx: &egui::Context,
         fontdb: &Arc<usvg::fontdb::Database>,
@@ -242,6 +253,11 @@ impl PikchrRenderer {
         width_bucket: u32,
         scale_bucket: u32,
     ) -> Result<PikchrTextureEntry, String> {
+        // Inject a font-family into the SVG so usvg picks a known good font.
+        // Pikchr outputs <svg style='font-size:initial;'> with no font-family
+        // on <text> elements, so usvg falls back to whatever thin default it finds.
+        let svg = Self::inject_svg_font_family(svg);
+
         // Parse SVG using the shared fontdb with system fonts loaded.
         let opt = usvg::Options {
             fontdb: Arc::clone(fontdb),
@@ -254,7 +270,7 @@ impl PikchrRenderer {
         let size = tree.size().to_int_size();
         let (w, h) = (size.width().max(1), size.height().max(1));
 
-        // Compute scale factor
+        // Compute logical scale factor (user zoom, constrained by available width)
         let base_scale = scale_bucket as f32 / 100.0;
         let width_scale = if width_bucket > 0 {
             width_bucket as f32 / w.max(1) as f32
@@ -263,22 +279,28 @@ impl PikchrRenderer {
         };
         let scale = base_scale.min(width_scale).clamp(0.1, 4.0);
 
-        let mut target_w = (w as f32 * scale).round().max(1.0) as u32;
-        let mut target_h = (h as f32 * scale).round().max(1.0) as u32;
+        // Display dimensions in logical pixels (what render_texture uses)
+        let display_w = (w as f32 * scale).round().max(1.0) as u32;
+        let display_h = (h as f32 * scale).round().max(1.0) as u32;
+
+        // Raster dimensions: supersample for crisp text and thin lines
+        let raster_scale = scale * PIKCHR_SUPERSAMPLE;
+        let mut raster_w = (w as f32 * raster_scale).round().max(1.0) as u32;
+        let mut raster_h = (h as f32 * raster_scale).round().max(1.0) as u32;
 
         // Clamp to reasonable maximum
-        if target_w > MAX_RASTER_SIDE || target_h > MAX_RASTER_SIDE {
-            let clamp_scale = (MAX_RASTER_SIDE as f32 / target_w as f32)
-                .min(MAX_RASTER_SIDE as f32 / target_h as f32);
-            target_w = (target_w as f32 * clamp_scale).round().max(1.0) as u32;
-            target_h = (target_h as f32 * clamp_scale).round().max(1.0) as u32;
+        if raster_w > MAX_RASTER_SIDE || raster_h > MAX_RASTER_SIDE {
+            let clamp_scale = (MAX_RASTER_SIDE as f32 / raster_w as f32)
+                .min(MAX_RASTER_SIDE as f32 / raster_h as f32);
+            raster_w = (raster_w as f32 * clamp_scale).round().max(1.0) as u32;
+            raster_h = (raster_h as f32 * clamp_scale).round().max(1.0) as u32;
         }
 
         // Rasterize: Pikchr SVGs have no background fill, so the pixmap starts
         // transparent and the diagram draws on top.
-        let mut pixmap = tiny_skia::Pixmap::new(target_w, target_h)
+        let mut pixmap = tiny_skia::Pixmap::new(raster_w, raster_h)
             .ok_or_else(|| "Pixmap allocation failed".to_string())?;
-        let transform = tiny_skia::Transform::from_scale(scale, scale);
+        let transform = tiny_skia::Transform::from_scale(raster_scale, raster_scale);
         // Bind PixmapMut to a local -- can't take &mut of a temporary rvalue.
         let mut pmut = pixmap.as_mut();
         resvg::render(&tree, transform, &mut pmut);
@@ -286,7 +308,7 @@ impl PikchrRenderer {
         // Upload to GPU
         let rgba = pixmap.data().to_vec();
         let image = egui::ColorImage::from_rgba_unmultiplied(
-            [target_w as usize, target_h as usize],
+            [raster_w as usize, raster_h as usize],
             &rgba,
         );
         let texture = ctx.load_texture(
@@ -297,13 +319,34 @@ impl PikchrRenderer {
 
         Ok(PikchrTextureEntry {
             texture,
-            size: [target_w, target_h],
+            display_size: [display_w, display_h],
         })
+    }
+
+    /// Inject a `font-family` declaration into a Pikchr SVG string.
+    ///
+    /// Pikchr outputs `<text>` elements with no `font-family` attribute,
+    /// causing usvg to fall back to a potentially thin default font.
+    /// We prepend a `font-family` to the existing `<svg style='...'>`
+    /// so all text inherits a known good sans-serif font.
+    fn inject_svg_font_family(svg: &str) -> String {
+        // Pikchr outputs: <svg ... style='font-size:initial;' ...>
+        // Inject font-family before the existing font-size declaration.
+        if let Some(pos) = svg.find("style='font-size:") {
+            let insert_at = pos + "style='".len();
+            let mut result = String::with_capacity(svg.len() + 60);
+            result.push_str(&svg[..insert_at]);
+            result.push_str("font-family:\"Segoe UI\",\"Helvetica Neue\",Arial,sans-serif;");
+            result.push_str(&svg[insert_at..]);
+            result
+        } else {
+            svg.to_string()
+        }
     }
 
     /// Display a cached texture in the UI, scaling down if it exceeds available width.
     fn render_texture(ui: &mut egui::Ui, entry: &PikchrTextureEntry, available_width: f32) {
-        let (tw, th) = (entry.size[0] as f32, entry.size[1] as f32);
+        let (tw, th) = (entry.display_size[0] as f32, entry.display_size[1] as f32);
         let scale = if tw > available_width {
             (available_width / tw).clamp(0.01, 4.0)
         } else {
@@ -902,6 +945,53 @@ arrow right 200% "Output" above"#;
         assert!(
             svg.contains("<line") || svg.contains("<path"),
             "Connectors should produce <line> or <path> elements"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Font injection and supersample tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_inject_svg_font_family_adds_declaration() {
+        let svg = "<svg style='font-size:initial;' viewBox='0 0 100 50'></svg>";
+        let result = PikchrRenderer::inject_svg_font_family(svg);
+        assert!(
+            result.contains("font-family:"),
+            "Should inject font-family declaration"
+        );
+        assert!(
+            result.contains("sans-serif"),
+            "Should include sans-serif fallback"
+        );
+        // Original content preserved
+        assert!(
+            result.contains("font-size:initial"),
+            "Original style should be preserved"
+        );
+        assert!(
+            result.contains("viewBox"),
+            "Other attributes should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_inject_svg_font_family_passthrough_without_style() {
+        // SVG without Pikchr's style pattern should pass through unchanged
+        let svg = "<svg viewBox='0 0 100 50'><text>Hello</text></svg>";
+        let result = PikchrRenderer::inject_svg_font_family(svg);
+        assert_eq!(result, svg, "SVG without matching style should be unchanged");
+    }
+
+    #[test]
+    fn test_supersample_constant_is_reasonable() {
+        assert!(
+            PIKCHR_SUPERSAMPLE >= 1.0,
+            "Supersample must be >= 1.0"
+        );
+        assert!(
+            PIKCHR_SUPERSAMPLE <= 4.0,
+            "Supersample > 4.0 would waste memory"
         );
     }
 }
