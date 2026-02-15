@@ -72,9 +72,15 @@ fn compute_viewbox(graph: &D2Graph) -> (f64, f64, f64, f64) {
                     8.0
                 } else {
                     0.0
+                }
+                + if graph.graph[idx].style.three_d {
+                    6.0
+                } else {
+                    0.0
                 };
+            let three_d_top = if graph.graph[idx].style.three_d { 6.0 } else { 0.0 };
             min_x = min_x.min(rect.x);
-            min_y = min_y.min(rect.y);
+            min_y = min_y.min(rect.y - three_d_top);
             max_x = max_x.max(rect.x + rect.width + extra);
             max_y = max_y.max(rect.y + rect.height + extra);
         }
