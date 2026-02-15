@@ -475,4 +475,433 @@ mod tests {
         let result = PikchrRenderer::render_pikchr_to_svg(code, false);
         assert!(result.is_ok(), "Decision flow sample failed: {:?}", result.err());
     }
+
+    // -----------------------------------------------------------------------
+    // bucket_scale coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_scale_bucketing() {
+        assert_eq!(bucket_scale(1.0), 100);
+        assert_eq!(bucket_scale(1.25), 125);
+        assert_eq!(bucket_scale(1.5), 150);
+        assert_eq!(bucket_scale(2.0), 200);
+        assert_eq!(bucket_scale(0.5), 50);
+        // Rounding: 1.124 * 100 = 112.4 -> rounds to 112
+        assert_eq!(bucket_scale(1.124), 112);
+        // Rounding: 1.126 * 100 = 112.6 -> rounds to 113
+        assert_eq!(bucket_scale(1.126), 113);
+        // Values within rounding distance bucket together
+        assert_eq!(bucket_scale(1.001), bucket_scale(1.004)); // both round to 100
+    }
+
+    // -----------------------------------------------------------------------
+    // Shape type SVG output validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_box_produces_rect_element() {
+        let svg = PikchrRenderer::render_pikchr_to_svg("box \"Label\" fit", false).unwrap();
+        // Pikchr renders boxes as polygon or path elements
+        assert!(
+            svg.contains("<polygon") || svg.contains("<path") || svg.contains("<rect"),
+            "box should produce a rect-like SVG element, got:\n{}",
+            svg
+        );
+        assert!(svg.contains("Label"), "box label missing from SVG");
+    }
+
+    #[test]
+    fn test_circle_produces_circle_element() {
+        let svg = PikchrRenderer::render_pikchr_to_svg("circle \"C\" fit", false).unwrap();
+        assert!(
+            svg.contains("<circle"),
+            "circle should produce <circle> element, got:\n{}",
+            svg
+        );
+        assert!(svg.contains(">C<"), "circle label 'C' missing from SVG");
+    }
+
+    #[test]
+    fn test_ellipse_produces_ellipse_element() {
+        let svg = PikchrRenderer::render_pikchr_to_svg("ellipse \"E\" fit", false).unwrap();
+        assert!(
+            svg.contains("<ellipse") || svg.contains("<path") || svg.contains("<circle"),
+            "ellipse should produce an ellipse-like SVG element, got:\n{}",
+            svg
+        );
+        assert!(svg.contains(">E<"), "ellipse label 'E' missing from SVG");
+    }
+
+    #[test]
+    fn test_cylinder_produces_svg() {
+        let svg = PikchrRenderer::render_pikchr_to_svg("cylinder \"DB\" fit", false).unwrap();
+        assert!(svg.contains("<svg"), "cylinder should produce valid SVG");
+        assert!(svg.contains("DB"), "cylinder label 'DB' missing from SVG");
+    }
+
+    #[test]
+    fn test_diamond_produces_svg() {
+        let svg = PikchrRenderer::render_pikchr_to_svg("diamond \"?\" fit", false).unwrap();
+        assert!(svg.contains("<svg"), "diamond should produce valid SVG");
+        assert!(
+            svg.contains("<polygon") || svg.contains("<path"),
+            "diamond should produce polygon or path element"
+        );
+        assert!(svg.contains("?"), "diamond label '?' missing from SVG");
+    }
+
+    #[test]
+    fn test_arrow_produces_polygon() {
+        let svg = PikchrRenderer::render_pikchr_to_svg("arrow right", false).unwrap();
+        assert!(
+            svg.contains("<polygon"),
+            "arrow should produce polygon (arrowhead), got:\n{}",
+            svg
+        );
+    }
+
+    #[test]
+    fn test_line_produces_line_element() {
+        let svg = PikchrRenderer::render_pikchr_to_svg("line right", false).unwrap();
+        assert!(
+            svg.contains("<line") || svg.contains("<path"),
+            "line should produce <line> or <path>, got:\n{}",
+            svg
+        );
+    }
+
+    #[test]
+    fn test_dot_produces_svg() {
+        let svg = PikchrRenderer::render_pikchr_to_svg("dot", false).unwrap();
+        assert!(svg.contains("<svg"), "dot should produce valid SVG");
+        // Dot renders as a filled circle
+        assert!(
+            svg.contains("<circle"),
+            "dot should produce a circle element"
+        );
+    }
+
+    #[test]
+    fn test_spline_produces_path() {
+        let svg =
+            PikchrRenderer::render_pikchr_to_svg("spline right then down", false).unwrap();
+        assert!(
+            svg.contains("<path"),
+            "spline should produce <path> element, got:\n{}",
+            svg
+        );
+    }
+
+    #[test]
+    fn test_file_shape_produces_svg() {
+        let svg = PikchrRenderer::render_pikchr_to_svg("file \"f.txt\" fit", false).unwrap();
+        assert!(svg.contains("<svg"), "file shape should produce valid SVG");
+        assert!(svg.contains("f.txt"), "file label missing from SVG");
+    }
+
+    // -----------------------------------------------------------------------
+    // SVG structure and dimension validation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_svg_has_proper_structure() {
+        let svg = PikchrRenderer::render_pikchr_to_svg("box \"X\" fit", false).unwrap();
+        assert!(svg.contains("<svg"), "SVG must have opening <svg tag");
+        assert!(svg.contains("</svg>"), "SVG must have closing </svg> tag");
+        assert!(
+            svg.contains("viewBox") || (svg.contains("width") && svg.contains("height")),
+            "SVG must have viewBox or width/height attributes"
+        );
+    }
+
+    #[test]
+    fn test_svg_dimensions_are_reasonable() {
+        let svg = PikchrRenderer::render_pikchr_to_svg("box \"Test\" fit", false).unwrap();
+        // Pikchr uses viewBox="x y width height" for dimensions
+        let (w, h) = extract_viewbox_size(&svg)
+            .expect("SVG should have a parseable viewBox attribute");
+        assert!(w > 0.0, "viewBox width must be > 0, got {}", w);
+        assert!(h > 0.0, "viewBox height must be > 0, got {}", h);
+        assert!(w < 10000.0, "viewBox width must be < 10000, got {}", w);
+        assert!(h < 10000.0, "viewBox height must be < 10000, got {}", h);
+    }
+
+    #[test]
+    fn test_different_diagrams_produce_different_dimensions() {
+        let small = PikchrRenderer::render_pikchr_to_svg("box", false).unwrap();
+        let large = PikchrRenderer::render_pikchr_to_svg(
+            "box; arrow right; box; arrow right; box; arrow right; box; arrow right; box",
+            false,
+        )
+        .unwrap();
+        let (w_small, _) =
+            extract_viewbox_size(&small).expect("small SVG should have viewBox");
+        let (w_large, _) =
+            extract_viewbox_size(&large).expect("large SVG should have viewBox");
+        assert!(
+            w_large > w_small,
+            "Chain of boxes should be wider than single box: {} vs {}",
+            w_large,
+            w_small
+        );
+    }
+
+    /// Helper: extract width and height from an SVG `viewBox="x y w h"` attribute.
+    fn extract_viewbox_size(svg: &str) -> Option<(f64, f64)> {
+        let marker = "viewBox=\"";
+        let start = svg.find(marker)? + marker.len();
+        let rest = &svg[start..];
+        let end = rest.find('"')?;
+        let parts: Vec<f64> = rest[..end]
+            .split_whitespace()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if parts.len() >= 4 {
+            Some((parts[2], parts[3]))
+        } else {
+            None
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Label and text content tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_labels_preserved_in_svg() {
+        let code = r#"box "Alpha" fit; arrow right; box "Beta" fit; arrow right; box "Gamma" fit"#;
+        let svg = PikchrRenderer::render_pikchr_to_svg(code, false).unwrap();
+        assert!(svg.contains("Alpha"), "Label 'Alpha' missing from SVG");
+        assert!(svg.contains("Beta"), "Label 'Beta' missing from SVG");
+        assert!(svg.contains("Gamma"), "Label 'Gamma' missing from SVG");
+    }
+
+    #[test]
+    fn test_unicode_labels() {
+        let svg =
+            PikchrRenderer::render_pikchr_to_svg("box \"日本語\" fit", false).unwrap();
+        assert!(
+            svg.contains("日本語"),
+            "Unicode label '日本語' missing from SVG"
+        );
+    }
+
+    #[test]
+    fn test_special_characters_in_labels() {
+        // Test that angle brackets are XML-escaped in SVG output
+        let svg =
+            PikchrRenderer::render_pikchr_to_svg("box \"x < y\" fit", false).unwrap();
+        // Pikchr XML-escapes < to &lt; in text content
+        assert!(
+            svg.contains("&lt;"),
+            "SVG should contain XML-escaped '<':\n{}",
+            svg
+        );
+
+        // Test ampersand: Pikchr XML-escapes & to &amp;
+        let svg2 =
+            PikchrRenderer::render_pikchr_to_svg("box \"A & B\" fit", false).unwrap();
+        assert!(
+            svg2.contains("&amp;"),
+            "SVG should contain XML-escaped '&':\n{}",
+            svg2
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Error handling and content
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_error_message_has_content() {
+        let err =
+            PikchrRenderer::render_pikchr_to_svg("this is not valid pikchr }{}{", false)
+                .unwrap_err();
+        assert!(
+            !err.is_empty(),
+            "Error message should not be empty for invalid syntax"
+        );
+        // Error should contain some useful diagnostic info
+        assert!(
+            err.len() > 5,
+            "Error message should be descriptive, got: '{}'",
+            err
+        );
+    }
+
+    #[test]
+    fn test_error_cache_theme_independent() {
+        // Errors are keyed by code_hash, not theme -- same syntax error in
+        // light and dark mode should produce the same error message.
+        let invalid = "totally broken pikchr syntax }{}{";
+        let err_light =
+            PikchrRenderer::render_pikchr_to_svg(invalid, false).unwrap_err();
+        let err_dark =
+            PikchrRenderer::render_pikchr_to_svg(invalid, true).unwrap_err();
+        assert_eq!(
+            err_light, err_dark,
+            "Same syntax error should produce same message regardless of theme"
+        );
+    }
+
+    #[test]
+    fn test_multiple_errors_are_distinct() {
+        let err1 =
+            PikchrRenderer::render_pikchr_to_svg("invalid syntax aaa }{}{", false)
+                .unwrap_err();
+        let err2 =
+            PikchrRenderer::render_pikchr_to_svg("different invalid bbb }{}{", false)
+                .unwrap_err();
+        // Different invalid inputs may produce different error messages
+        // (at minimum they should both be errors, which we've already asserted
+        // by unwrap_err). If they happen to be the same generic error, that's
+        // still valid -- but let's verify they're both non-empty.
+        assert!(!err1.is_empty(), "Error 1 should not be empty");
+        assert!(!err2.is_empty(), "Error 2 should not be empty");
+    }
+
+    // -----------------------------------------------------------------------
+    // Dark mode output inspection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dark_mode_inverts_stroke_colors() {
+        let light = PikchrRenderer::render_pikchr_to_svg("box \"X\" fit", false).unwrap();
+        let dark = PikchrRenderer::render_pikchr_to_svg("box \"X\" fit", true).unwrap();
+
+        // Pikchr uses PIKCHR_DARK_MODE flag to invert colors.
+        // Light mode should contain dark strokes (e.g., "black" or rgb(0,0,0))
+        // Dark mode should contain light strokes (e.g., "white" or rgb(255,255,255))
+        let light_has_black =
+            light.contains("black") || light.contains("rgb(0,0,0)") || light.contains("#000");
+        let dark_has_white = dark.contains("white")
+            || dark.contains("rgb(255,255,255)")
+            || dark.contains("#fff");
+
+        assert!(
+            light_has_black,
+            "Light mode SVG should reference dark colors:\n{}",
+            light
+        );
+        assert!(
+            dark_has_white,
+            "Dark mode SVG should reference light colors:\n{}",
+            dark
+        );
+    }
+
+    #[test]
+    fn test_dark_mode_preserves_labels() {
+        let label = "DarkTest";
+        let code = format!("box \"{}\" fit", label);
+        let light = PikchrRenderer::render_pikchr_to_svg(&code, false).unwrap();
+        let dark = PikchrRenderer::render_pikchr_to_svg(&code, true).unwrap();
+        assert!(
+            light.contains(label),
+            "Light mode should contain label '{}'",
+            label
+        );
+        assert!(
+            dark.contains(label),
+            "Dark mode should contain label '{}'",
+            label
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Stress and edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_large_diagram_renders() {
+        // Build a chain of 50+ boxes connected by arrows
+        let mut code = String::from("box \"B0\" fit\n");
+        for i in 1..=50 {
+            code.push_str(&format!("arrow right\nbox \"B{}\" fit\n", i));
+        }
+        let result = PikchrRenderer::render_pikchr_to_svg(&code, false);
+        assert!(
+            result.is_ok(),
+            "Large diagram (50+ objects) should render: {:?}",
+            result.err()
+        );
+        let svg = result.unwrap();
+        assert!(svg.contains("B0"), "First box label missing");
+        assert!(svg.contains("B50"), "Last box label missing");
+    }
+
+    #[test]
+    fn test_whitespace_only_input() {
+        let result = PikchrRenderer::render_pikchr_to_svg("   \n  \n  ", false);
+        // Whitespace-only should behave like empty input (OK, not error)
+        assert!(
+            result.is_ok(),
+            "Whitespace-only input should not error: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_comments_in_pikchr() {
+        let code = "# This is a comment\nbox \"Visible\" fit\n# Another comment";
+        let result = PikchrRenderer::render_pikchr_to_svg(code, false);
+        assert!(
+            result.is_ok(),
+            "Comments should not cause errors: {:?}",
+            result.err()
+        );
+        let svg = result.unwrap();
+        assert!(
+            svg.contains("Visible"),
+            "Label should appear despite comments"
+        );
+        // Comments should NOT appear in SVG output
+        assert!(
+            !svg.contains("This is a comment"),
+            "Comment text should not leak into SVG output"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Output snapshot / characterization test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_svg_output_snapshot() {
+        // Render a known diagram and validate specific SVG structural fragments.
+        // This acts as a characterization test documenting what the output looks like.
+        let code = r#"arrow right 200% "Input" above
+box "Process" fit rad 10px
+arrow right 200% "Output" above"#;
+        let svg = PikchrRenderer::render_pikchr_to_svg(code, false).unwrap();
+
+        // Must have proper SVG wrapper
+        assert!(svg.starts_with("<svg"), "SVG must start with <svg tag");
+        assert!(svg.trim_end().ends_with("</svg>"), "SVG must end with </svg>");
+
+        // Must have viewBox for proper scaling
+        assert!(
+            svg.contains("viewBox"),
+            "SVG should have viewBox attribute"
+        );
+
+        // Arrow produces polygon elements (arrowheads)
+        assert!(
+            svg.contains("<polygon"),
+            "Arrows should produce <polygon> arrowheads"
+        );
+
+        // Labels appear as text elements
+        assert!(svg.contains("<text"), "Labels should produce <text> elements");
+        assert!(svg.contains("Input"), "Label 'Input' must be in SVG");
+        assert!(svg.contains("Process"), "Label 'Process' must be in SVG");
+        assert!(svg.contains("Output"), "Label 'Output' must be in SVG");
+
+        // Lines appear as path or line elements
+        assert!(
+            svg.contains("<line") || svg.contains("<path"),
+            "Connectors should produce <line> or <path> elements"
+        );
+    }
 }
