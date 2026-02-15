@@ -11,6 +11,7 @@ This document is designed to stress-test the markdown renderer with heavy conten
 - [Long Paragraphs](#long-paragraphs)
 - [Emojis](#emojis)
 - [Mermaid Diagrams](#mermaid-diagrams)
+- [Pikchr Diagrams](#pikchr-diagrams)
 - [Links](#links)
 - [Edge Cases](#edge-cases)
 
@@ -1316,6 +1317,78 @@ flowchart LR
 
 ---
 
+## Pikchr Diagrams
+
+### Simple Flow
+
+```pikchr
+arrow right 200% "Request" above
+box "Server" fit rad 10px
+arrow right 200% "Response" above
+```
+
+### Architecture Diagram
+
+```pikchr
+box "Browser" fit rad 10px
+arrow right 250% "HTTP" above
+box "Web Server" fit rad 10px
+arrow right 250% "SQL" above
+cylinder "Database" fit
+```
+
+### Decision Flow
+
+```pikchr
+box "Start" fit rad 50%
+arrow down
+diamond "OK?" fit
+arrow right 200% "Yes" above
+box "Done" fit rad 50%
+move to last diamond.s
+arrow down "No" ljust
+box "Retry" fit rad 10px
+arrow left then up then right to 1st box.w
+```
+
+### Shape Gallery
+
+```pikchr
+box "Box" fit
+move right 0.5in
+circle "Circle" fit
+move right 0.5in
+ellipse "Ellipse" fit
+move right 0.5in
+cylinder "Cylinder" fit
+move right 0.5in
+file "File" fit
+```
+
+### Pipeline Diagram
+
+```pikchr
+file "Source" fit
+arrow right 150% "read" above
+box "Parse" fit rad 10px
+arrow right 150% "tokens" above
+box "Transform" fit rad 10px
+arrow right 150% "emit" above
+file "Output" fit
+```
+
+### Labeled Connections
+
+```pikchr
+box "Client" fit rad 10px
+arrow right 300% "GET /api/data" above "200 OK + JSON" below
+box "API" fit rad 10px
+arrow right 300% "SELECT *" above "rows" below
+cylinder "DB" fit
+```
+
+---
+
 ## Links
 
 ### Various Link Types
@@ -1447,6 +1520,7 @@ This document contains:
 - Unicode and shortcode emojis (flags, skin tones, ZWJ sequences)
 - Emojis in headers, tables, links, and formatted text
 - Complex Mermaid diagrams (flowchart, sequence, class, state, gantt, ER, journey)
+- Pikchr diagrams (flow, architecture, decision, shape gallery, pipeline, labeled connections)
 - Various link types (external, internal anchor, formatted, emoji links)
 - Edge cases (empty tables, long cells, adjacent code blocks, very long lines, poetry)
 
