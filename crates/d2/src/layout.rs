@@ -266,3 +266,162 @@ fn normalize_positions(graph: &mut D2Graph) {
         rect.y += offset_y;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use crate::{compile, layout, parse, RenderOptions};
+
+    fn opts() -> RenderOptions {
+        RenderOptions::default()
+    }
+
+    /// Helper: parse+compile+layout a D2 source string, return the graph.
+    fn layout_ok(source: &str) -> crate::graph::D2Graph {
+        let ast = parse(source).ast;
+        let mut graph = compile(&ast).expect("compile should succeed");
+        layout(&mut graph, &opts()).expect("layout should succeed");
+        graph
+    }
+
+    /// Find a non-root object by label.
+    fn find_by_label<'a>(
+        graph: &'a crate::graph::D2Graph,
+        label: &str,
+    ) -> &'a crate::graph::D2Object {
+        for &idx in &graph.objects {
+            let obj = &graph.graph[idx];
+            if obj.label == label {
+                return obj;
+            }
+        }
+        panic!("no object with label '{label}' found");
+    }
+
+    // --- test_layout_simple_graph --------------------------------------------
+
+    #[test]
+    fn test_layout_simple_graph() {
+        // a -> b: both should have non-zero positions, b below a (direction=down).
+        let graph = layout_ok("a -> b");
+
+        let a = find_by_label(&graph, "a");
+        let b = find_by_label(&graph, "b");
+
+        let a_rect = a.box_.expect("a should have a box after layout");
+        let b_rect = b.box_.expect("b should have a box after layout");
+
+        // Both should have non-zero dimensions
+        assert!(a_rect.width > 0.0, "a should have non-zero width");
+        assert!(b_rect.width > 0.0, "b should have non-zero width");
+
+        // Default direction is Down, so b should be below a
+        assert!(
+            b_rect.y > a_rect.y,
+            "b (y={}) should be below a (y={}) in direction=down",
+            b_rect.y,
+            a_rect.y
+        );
+    }
+
+    // --- test_layout_container -----------------------------------------------
+
+    #[test]
+    fn test_layout_container() {
+        // Container with children: container bounds should enclose children.
+        let graph = layout_ok("group: {\n  child1\n  child2\n}");
+
+        let group = find_by_label(&graph, "group");
+        let child1 = find_by_label(&graph, "child1");
+        let child2 = find_by_label(&graph, "child2");
+
+        let g_rect = group.box_.expect("group should have a box");
+        let c1_rect = child1.box_.expect("child1 should have a box");
+        let c2_rect = child2.box_.expect("child2 should have a box");
+
+        // Container should enclose both children
+        assert!(
+            g_rect.x <= c1_rect.x,
+            "container left ({}) should be <= child1 left ({})",
+            g_rect.x,
+            c1_rect.x
+        );
+        assert!(
+            g_rect.y <= c1_rect.y,
+            "container top ({}) should be <= child1 top ({})",
+            g_rect.y,
+            c1_rect.y
+        );
+        assert!(
+            g_rect.x + g_rect.width >= c2_rect.x + c2_rect.width,
+            "container right ({}) should be >= child2 right ({})",
+            g_rect.x + g_rect.width,
+            c2_rect.x + c2_rect.width
+        );
+        assert!(
+            g_rect.y + g_rect.height >= c2_rect.y + c2_rect.height,
+            "container bottom ({}) should be >= child2 bottom ({})",
+            g_rect.y + g_rect.height,
+            c2_rect.y + c2_rect.height
+        );
+    }
+
+    // --- test_layout_direction_right -----------------------------------------
+
+    #[test]
+    fn test_layout_direction_right() {
+        // With direction=right, nodes should be left-to-right (increasing x).
+        let graph = layout_ok("direction: right\na -> b -> c");
+
+        let a = find_by_label(&graph, "a");
+        let b = find_by_label(&graph, "b");
+        let c = find_by_label(&graph, "c");
+
+        let a_rect = a.box_.expect("a should have a box");
+        let b_rect = b.box_.expect("b should have a box");
+        let c_rect = c.box_.expect("c should have a box");
+
+        assert!(
+            b_rect.x > a_rect.x,
+            "b (x={}) should be right of a (x={}) in direction=right",
+            b_rect.x,
+            a_rect.x
+        );
+        assert!(
+            c_rect.x > b_rect.x,
+            "c (x={}) should be right of b (x={}) in direction=right",
+            c_rect.x,
+            b_rect.x
+        );
+    }
+
+    // --- test_normalize_positions --------------------------------------------
+
+    #[test]
+    fn test_normalize_positions() {
+        // After layout, the top-left of all nodes should be near origin (>= 0).
+        let graph = layout_ok("a -> b -> c");
+
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+
+        for &idx in &graph.objects {
+            if let Some(rect) = graph.graph[idx].box_ {
+                min_x = min_x.min(rect.x);
+                min_y = min_y.min(rect.y);
+            }
+        }
+
+        assert!(
+            min_x.abs() < 1.0,
+            "min_x ({min_x}) should be near 0 after normalization"
+        );
+        assert!(
+            min_y.abs() < 1.0,
+            "min_y ({min_y}) should be near 0 after normalization"
+        );
+    }
+}
