@@ -1341,7 +1341,7 @@ cylinder "Database" fit
 
 ```pikchr
 box "Start" fit rad 50%
-arrow down
+arrow from last box.s down
 diamond "OK?" fit
 arrow from last diamond.e right 200% "Yes" above
 box "Done" fit rad 50%
