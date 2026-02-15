@@ -6,7 +6,7 @@
 //!
 //! Key components:
 //! - `PikchrRenderer` struct: holds font database and caches (SVG, texture, error)
-//! - `LruCache<K, V>`: generic LRU cache (copied from mermaid_renderer.rs)
+//! - `LruCache<K, V>`: generic LRU cache (shared module in lru_cache.rs)
 //! - `render_pikchr_to_svg()`: static method wrapping the pikchr C library
 //! - `rasterize_and_upload()`: SVG-to-texture pipeline via usvg/resvg/tiny-skia
 //!
