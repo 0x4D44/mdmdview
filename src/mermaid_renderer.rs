@@ -1,4 +1,6 @@
 use crate::ThemeColors;
+#[cfg(any(test, feature = "mermaid-quickjs"))]
+use crate::lru_cache::{hash_str, LruCache};
 #[cfg(feature = "mermaid-quickjs")]
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use egui::{Color32, RichText, Stroke};
@@ -6,10 +8,8 @@ use egui::{Color32, RichText, Stroke};
 use std::cell::{Cell, RefCell};
 #[cfg(feature = "mermaid-quickjs")]
 use std::collections::HashSet;
-#[cfg(any(test, feature = "mermaid-quickjs"))]
-use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
-#[cfg(any(test, feature = "mermaid-quickjs"))]
-use std::hash::{Hash, Hasher};
+#[cfg(feature = "mermaid-quickjs")]
+use std::collections::{HashMap, VecDeque};
 
 #[cfg(feature = "mermaid-quickjs")]
 use std::path::PathBuf;
@@ -303,84 +303,6 @@ type MermaidResultReceiver = Receiver<MermaidResult>;
 struct MermaidTextureEntry {
     texture: egui::TextureHandle,
     size: [u32; 2],
-}
-
-#[cfg(any(test, feature = "mermaid-quickjs"))]
-struct LruCache<K, V> {
-    entries: HashMap<K, V>,
-    order: VecDeque<K>,
-    capacity: usize,
-}
-
-#[cfg(any(test, feature = "mermaid-quickjs"))]
-impl<K, V> LruCache<K, V>
-where
-    K: Eq + std::hash::Hash + Clone,
-    V: Clone,
-{
-    fn new(capacity: usize) -> Self {
-        Self {
-            entries: HashMap::new(),
-            order: VecDeque::new(),
-            capacity: capacity.max(1),
-        }
-    }
-
-    #[cfg_attr(test, inline(never))]
-    fn get(&mut self, key: &K) -> Option<V> {
-        let value = self.entries.get(key).cloned();
-        self.touch_if_present(&value, key);
-        value
-    }
-
-    #[cfg_attr(test, inline(never))]
-    fn insert(&mut self, key: K, value: V) {
-        if self.entries.contains_key(&key) {
-            self.entries.insert(key.clone(), value);
-            self.touch(&key);
-            return;
-        }
-        while self.entries.len() >= self.capacity {
-            if !self.evict_oldest() {
-                break;
-            }
-        }
-        self.order.push_back(key.clone());
-        self.entries.insert(key, value);
-    }
-
-    #[cfg(feature = "mermaid-quickjs")]
-    fn remove(&mut self, key: &K) {
-        self.entries.remove(key);
-        self.order.retain(|entry| entry != key);
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    #[cfg_attr(test, inline(never))]
-    fn touch_if_present(&mut self, value: &Option<V>, key: &K) {
-        if value.is_some() {
-            self.touch(key);
-        }
-    }
-
-    #[cfg_attr(test, inline(never))]
-    fn evict_oldest(&mut self) -> bool {
-        if let Some(old) = self.order.pop_front() {
-            self.entries.remove(&old);
-            true
-        } else {
-            false
-        }
-    }
-
-    fn touch(&mut self, key: &K) {
-        self.order.retain(|entry| entry != key);
-        self.order.push_back(key.clone());
-    }
 }
 
 /// LRU cache for Mermaid SVG strings with both entry count and size limits.
@@ -862,7 +784,7 @@ impl MermaidRenderer {
                     });
                 return true;
             }
-            let svg_key = Self::hash_str(code);
+            let svg_key = hash_str(code);
             let mut available_width = ui.available_width();
             let orig_available_width = available_width;
             if available_width <= Self::MERMAID_WIDTH_BUCKET_STEP as f32 {
@@ -1502,12 +1424,6 @@ impl MermaidRenderer {
         Some([r, g, b, a])
     }
 
-    #[cfg(any(test, feature = "mermaid-quickjs"))]
-    fn hash_str(s: &str) -> u64 {
-        let mut h = DefaultHasher::new();
-        s.hash(&mut h);
-        h.finish()
-    }
 }
 
 #[cfg(feature = "mermaid-quickjs")]
@@ -6399,7 +6315,7 @@ mod tests {
 
         let flow_svg = worker
             .render_svg(
-                MermaidRenderer::hash_str(flow),
+                hash_str(flow),
                 flow,
                 viewport_width,
                 viewport_height,
@@ -6407,7 +6323,7 @@ mod tests {
             .expect("flowchart render");
         let seq_svg = worker
             .render_svg(
-                MermaidRenderer::hash_str(seq),
+                hash_str(seq),
                 seq,
                 viewport_width,
                 viewport_height,
@@ -6415,7 +6331,7 @@ mod tests {
             .expect("sequence render");
         let class_svg = worker
             .render_svg(
-                MermaidRenderer::hash_str(class),
+                hash_str(class),
                 class,
                 viewport_width,
                 viewport_height,
@@ -6423,7 +6339,7 @@ mod tests {
             .expect("class render");
         let er_svg = worker
             .render_svg(
-                MermaidRenderer::hash_str(er),
+                hash_str(er),
                 er,
                 viewport_width,
                 viewport_height,
@@ -6431,7 +6347,7 @@ mod tests {
             .expect("er render");
         let gantt_svg = worker
             .render_svg(
-                MermaidRenderer::hash_str(gantt),
+                hash_str(gantt),
                 gantt,
                 viewport_width,
                 viewport_height,
@@ -6470,7 +6386,7 @@ mod tests {
 
         let svg = worker
             .render_svg(
-                MermaidRenderer::hash_str(diagram),
+                hash_str(diagram),
                 diagram,
                 viewport_width,
                 viewport_height,
@@ -6506,7 +6422,7 @@ mod tests {
 
         let svg = worker
             .render_svg(
-                MermaidRenderer::hash_str(diagram),
+                hash_str(diagram),
                 diagram,
                 viewport_width,
                 viewport_height,
@@ -6535,7 +6451,7 @@ mod tests {
 
         let svg = worker
             .render_svg(
-                MermaidRenderer::hash_str(diagram),
+                hash_str(diagram),
                 diagram,
                 viewport_width,
                 viewport_height,
@@ -7399,9 +7315,9 @@ mod tests {
 
     #[test]
     fn test_mermaid_hash_str_stable_and_distinct() {
-        let a = MermaidRenderer::hash_str("alpha");
-        let b = MermaidRenderer::hash_str("alpha");
-        let c = MermaidRenderer::hash_str("beta");
+        let a = hash_str("alpha");
+        let b = hash_str("alpha");
+        let c = hash_str("beta");
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
@@ -7556,7 +7472,7 @@ mod tests {
                 let texture =
                     ui.ctx()
                         .load_texture("mermaid-test", image, egui::TextureOptions::default());
-                let svg_key = MermaidRenderer::hash_str(code);
+                let svg_key = hash_str(code);
                 let make_key = |ui: &egui::Ui| {
                     let width_bucket = MermaidRenderer::width_bucket(ui.available_width());
                     let scale_bucket = MermaidRenderer::scale_bucket(1.0);
@@ -7598,7 +7514,7 @@ mod tests {
         let (_result_tx, result_rx) = bounded(1);
         let renderer = test_renderer_with_channels(None, result_rx);
         let code = "graph TD; A-->B;";
-        let svg_key = MermaidRenderer::hash_str(code);
+        let svg_key = hash_str(code);
         renderer
             .mermaid_errors
             .borrow_mut()
@@ -7665,7 +7581,7 @@ mod tests {
             });
         });
         assert!(rendered);
-        let svg_key = MermaidRenderer::hash_str(code);
+        let svg_key = hash_str(code);
         assert!(renderer.mermaid_errors.borrow_mut().get(&svg_key).is_some());
     }
 
@@ -8341,7 +8257,7 @@ mod tests {
         let (_result_tx, result_rx) = bounded(1);
         let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
         let code = "graph TD; A-->B;";
-        let svg_key = MermaidRenderer::hash_str(code);
+        let svg_key = hash_str(code);
         renderer
             .mermaid_svg_cache
             .borrow_mut()
@@ -8874,7 +8790,7 @@ mod tests {
         });
 
         // Insert into SVG cache
-        let svg_key = MermaidRenderer::hash_str("graph TD; A-->B;");
+        let svg_key = hash_str("graph TD; A-->B;");
         renderer
             .mermaid_svg_cache
             .borrow_mut()
