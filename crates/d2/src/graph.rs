@@ -188,6 +188,21 @@ pub struct D2Object {
 // D2EdgeData
 // ---------------------------------------------------------------------------
 
+/// Edge route type: Bézier curves or orthogonal (rectilinear) segments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteType {
+    /// Cubic Bézier spline segments (default).
+    Bezier,
+    /// Orthogonal (axis-aligned) polyline segments.
+    Orthogonal,
+}
+
+impl Default for RouteType {
+    fn default() -> Self {
+        RouteType::Bezier
+    }
+}
+
 /// An edge/connection.
 pub struct D2EdgeData {
     pub label: Option<String>,
@@ -195,6 +210,8 @@ pub struct D2EdgeData {
     pub dst_arrow: ArrowheadType,
     pub style: Style,
 
+    /// How the edge path is interpreted by the renderer.
+    pub route_type: RouteType,
     /// Cubic Bézier control points for the edge path.
     /// Format: [start, ctrl1, ctrl2, end, ctrl1, ctrl2, end, ...]
     pub route: Vec<Point>,

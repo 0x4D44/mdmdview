@@ -297,6 +297,7 @@ impl CompileContext {
                 src_arrow,
                 dst_arrow,
                 style: Style::default(),
+                route_type: RouteType::Bezier,
                 route: Vec::new(),
                 label_position: None,
             };

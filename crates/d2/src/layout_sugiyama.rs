@@ -520,6 +520,7 @@ mod tests {
                 src_arrow: ArrowheadType::None,
                 dst_arrow: ArrowheadType::Arrow,
                 style: Style::default(),
+                route_type: crate::graph::RouteType::Bezier,
                 route: Vec::new(),
                 label_position: None,
             },
