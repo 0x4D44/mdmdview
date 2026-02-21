@@ -145,6 +145,11 @@ fn liang_barsky(p0: Pt, p1: Pt, aabb: &AABB) -> bool {
     true
 }
 
+/// True if point `p` lies inside `aabb` (inclusive of boundaries).
+fn point_in_aabb(p: Pt, aabb: &AABB) -> bool {
+    p.x >= aabb.x && p.x <= aabb.x + aabb.w && p.y >= aabb.y && p.y <= aabb.y + aabb.h
+}
+
 /// Minimum distance from point `p` to line segment `seg`.
 fn point_to_segment_dist(p: Pt, seg: &Seg) -> f64 {
     let dx = seg.b.x - seg.a.x;
@@ -201,6 +206,10 @@ struct SvgPath {
     segments: Vec<Seg>,
     /// All sample points along the path (including Q/C approximations).
     sample_points: Vec<Pt>,
+    /// First point of the path (from the initial M command).
+    start_pt: Pt,
+    /// Last point of the path (endpoint of the final command).
+    end_pt: Pt,
 }
 
 /// Parse all `<rect .../>` elements from SVG source, skipping the first
@@ -384,9 +393,19 @@ fn parse_paths(svg: &str) -> Vec<SvgPath> {
 
         if let Some(d) = extract_attr_str(tag, "d") {
             let (segments, sample_points) = parse_path_d(&d);
+            let start_pt = sample_points
+                .first()
+                .copied()
+                .unwrap_or(Pt { x: 0.0, y: 0.0 });
+            let end_pt = sample_points
+                .last()
+                .copied()
+                .unwrap_or(Pt { x: 0.0, y: 0.0 });
             paths.push(SvgPath {
                 segments,
                 sample_points,
+                start_pt,
+                end_pt,
             });
         }
 
@@ -725,10 +744,36 @@ fn check_invariants(
 
     // --- Invariant 2: edge_not_through_node ---
     // Edge path segments should not pass through non-endpoint node rects.
+    // Endpoint nodes (source/destination) are exempt — edges naturally enter/exit them.
+    // Container rects are also skipped — edges naturally pass through containers.
     let endpoint_tolerance = 15.0; // pixels to shrink segments at endpoints
+    let endpoint_expand = 20.0; // pixels to expand node rects when matching endpoints
     for (pi, path) in paths.iter().enumerate() {
+        // Determine which node rects are endpoints for this path.
+        // A node is an endpoint if the path's start_pt or end_pt falls within
+        // (or very close to) the node's bounding box.
+        let endpoint_node_indices: Vec<usize> = node_rects
+            .iter()
+            .enumerate()
+            .filter(|(_ni, nr)| {
+                let expanded = AABB {
+                    x: nr.x - endpoint_expand,
+                    y: nr.y - endpoint_expand,
+                    w: nr.w + 2.0 * endpoint_expand,
+                    h: nr.h + 2.0 * endpoint_expand,
+                };
+                point_in_aabb(path.start_pt, &expanded)
+                    || point_in_aabb(path.end_pt, &expanded)
+            })
+            .map(|(ni, _)| ni)
+            .collect();
+
         for (si, seg) in path.segments.iter().enumerate() {
             for (ni, nr) in node_rects.iter().enumerate() {
+                // Skip endpoint nodes — the edge naturally enters/exits them
+                if endpoint_node_indices.contains(&ni) {
+                    continue;
+                }
                 if segment_intersects_aabb(seg, nr, endpoint_tolerance) {
                     violations.push(Violation {
                         invariant: "edge_not_through_node",
