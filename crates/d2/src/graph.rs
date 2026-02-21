@@ -528,6 +528,34 @@ impl Color {
             Color::from_named(s)
         }
     }
+
+    /// Relative luminance per WCAG 2.0 (range 0.0–1.0).
+    /// Used to determine whether text should be dark or light on a given background.
+    pub fn luminance(&self) -> f64 {
+        let (r, g, b) = match *self {
+            Color::Hex(r, g, b) | Color::HexAlpha(r, g, b, _) => (r, g, b),
+        };
+        // sRGB linearization
+        fn lin(c: u8) -> f64 {
+            let s = c as f64 / 255.0;
+            if s <= 0.03928 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+
+    /// Return dark or light text color to contrast against this color as a background.
+    /// Uses WCAG luminance threshold of 0.179.
+    pub fn contrasting_text_color(&self) -> Color {
+        if self.luminance() > 0.179 {
+            Color::Hex(0x17, 0x17, 0x17) // dark text on light bg
+        } else {
+            Color::Hex(0xE0, 0xE0, 0xE0) // light text on dark bg
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -633,5 +661,33 @@ mod tests {
         assert_eq!(Direction::from_str("right"), Some(Direction::Right));
         assert!(Direction::Right.is_horizontal());
         assert!(!Direction::Down.is_horizontal());
+    }
+
+    #[test]
+    fn test_luminance_black_white() {
+        let black = Color::Hex(0, 0, 0);
+        let white = Color::Hex(255, 255, 255);
+        assert!(black.luminance() < 0.01);
+        assert!(white.luminance() > 0.99);
+    }
+
+    #[test]
+    fn test_luminance_light_pastels() {
+        // The problematic fills from the stress test
+        let light_green = Color::Hex(0xd4, 0xed, 0xda); // #d4edda
+        let light_pink = Color::Hex(0xf8, 0xd7, 0xda); // #f8d7da
+        // Both should be "light" (luminance > 0.179)
+        assert!(light_green.luminance() > 0.179, "light green lum={}", light_green.luminance());
+        assert!(light_pink.luminance() > 0.179, "light pink lum={}", light_pink.luminance());
+    }
+
+    #[test]
+    fn test_contrasting_text_color() {
+        let light_green = Color::Hex(0xd4, 0xed, 0xda);
+        let dark_navy = Color::Hex(0x00, 0x00, 0x80);
+        // Light fill → dark text
+        assert_eq!(light_green.contrasting_text_color(), Color::Hex(0x17, 0x17, 0x17));
+        // Dark fill → light text
+        assert_eq!(dark_navy.contrasting_text_color(), Color::Hex(0xE0, 0xE0, 0xE0));
     }
 }

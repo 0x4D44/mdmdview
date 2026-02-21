@@ -12,6 +12,7 @@ This document is designed to stress-test the markdown renderer with heavy conten
 - [Emojis](#emojis)
 - [Mermaid Diagrams](#mermaid-diagrams)
 - [Pikchr Diagrams](#pikchr-diagrams)
+- [D2 Diagrams](#d2-diagrams)
 - [Links](#links)
 - [Edge Cases](#edge-cases)
 
