@@ -1,0 +1,19 @@
+# 030-architecture-labels.d2
+# Reproduces: labels overlapping boxes in multi-container architecture
+
+direction: right
+
+lb: Load Balancer
+
+gw: API Gateway
+
+auth: Auth
+redis: Redis
+orders: Orders
+pg: PostgreSQL
+
+lb -> gw: HTTPS
+gw -> auth: verify
+auth -> redis: sessions
+gw -> orders: route
+orders -> pg: CRUD

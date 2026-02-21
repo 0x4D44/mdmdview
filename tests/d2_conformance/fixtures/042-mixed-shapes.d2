@@ -1,0 +1,17 @@
+# 042-mixed-shapes.d2
+# Tests: multiple different shapes in one diagram
+
+server: Server
+
+db: Database
+db.shape: cylinder
+
+cache: Cache
+cache.shape: circle
+
+decision: Route
+decision.shape: diamond
+
+server -> decision
+decision -> db
+decision -> cache
