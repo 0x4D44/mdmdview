@@ -709,43 +709,37 @@ fn build_container_route(ec: &EdgeClassification) -> Vec<Point> {
 }
 
 /// Compute label position for an orthogonal route.
-/// Places label at the midpoint of the middle segment (or overall midpoint
-/// for 2-point routes), with a perpendicular offset of `LABEL_OFFSET` pixels.
+/// Places label at the midpoint of the enter segment (last segment before
+/// the destination) for 3+ point routes, or at the overall midpoint for
+/// 2-point routes, with an axis-aware offset of `LABEL_OFFSET` pixels.
+/// Horizontal segments offset upward (-Y), vertical segments offset leftward (-X).
 fn compute_label_position(route: &[Point]) -> Option<Point> {
     if route.len() < 2 {
         return None;
     }
 
-    if route.len() == 2 {
-        // Straight line: midpoint with offset
-        let mid = Point::new(
-            (route[0].x + route[1].x) / 2.0,
-            (route[0].y + route[1].y) / 2.0,
-        );
-        // Offset perpendicular to the line
-        let dx = route[1].x - route[0].x;
-        let dy = route[1].y - route[0].y;
-        let len = (dx * dx + dy * dy).sqrt();
-        if len > 1e-6 {
-            return Some(Point::new(mid.x - dy / len * LABEL_OFFSET, mid.y + dx / len * LABEL_OFFSET));
-        }
+    // Select the segment to place the label on
+    let (a, b) = if route.len() == 2 {
+        (route[0], route[1])
+    } else {
+        // Enter segment: last segment before destination
+        let n = route.len();
+        (route[n - 2], route[n - 1])
+    };
+
+    let mid = Point::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+
+    if dx.abs() < 1e-6 && dy.abs() < 1e-6 {
         return Some(mid);
     }
 
-    // For 3+ point routes: use midpoint of the middle segment
-    let mid_seg = route.len() / 2;
-    let a = route[mid_seg - 1];
-    let b = route[mid_seg];
-    let mid = Point::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
-
-    // Offset perpendicular to the segment
-    let dx = b.x - a.x;
-    let dy = b.y - a.y;
-    let len = (dx * dx + dy * dy).sqrt();
-    if len > 1e-6 {
-        Some(Point::new(mid.x - dy / len * LABEL_OFFSET, mid.y + dx / len * LABEL_OFFSET))
+    // Axis-aware offset: horizontal → upward, vertical → leftward
+    if dx.abs() > dy.abs() {
+        Some(Point::new(mid.x, mid.y - LABEL_OFFSET))
     } else {
-        Some(mid)
+        Some(Point::new(mid.x - LABEL_OFFSET, mid.y))
     }
 }
 
@@ -1387,5 +1381,79 @@ network.server2 -> database: query
             !edge.route.is_empty(),
             "cross-container edge should have route points"
         );
+    }
+
+    // --- Stage 4: label placement tests --------------------------------------
+
+    #[test]
+    fn test_ortho_label_horizontal() {
+        // Horizontal layout with labeled edge: label should be between nodes
+        // and offset above the line (negative Y offset)
+        let graph = layout_ok("direction: right\na -> b: hello");
+        let edge = find_edge_between(&graph, "a", "b");
+        let label_pos = edge.label_position.expect("labeled edge should have position");
+
+        let a_rect = graph.graph[find_node_by_label(&graph, "a")].box_.unwrap();
+        let b_rect = graph.graph[find_node_by_label(&graph, "b")].box_.unwrap();
+
+        // Label x should be between the two nodes
+        assert!(label_pos.x > a_rect.right() && label_pos.x < b_rect.x,
+            "label x ({}) should be between a.right ({}) and b.left ({})",
+            label_pos.x, a_rect.right(), b_rect.x);
+
+        // For a 2-point straight horizontal route, the label should be offset
+        // above the line (y < line y)
+        assert_eq!(edge.route.len(), 2, "straight edge should have 2 points");
+        let line_y = (edge.route[0].y + edge.route[1].y) / 2.0;
+        assert!(label_pos.y < line_y,
+            "label y ({}) should be above the line y ({})", label_pos.y, line_y);
+    }
+
+    #[test]
+    fn test_ortho_label_vertical() {
+        // Vertical layout (default down) with labeled edge: label should be
+        // offset left of the line
+        let graph = layout_ok("a -> b: hello");
+        let edge = find_edge_between(&graph, "a", "b");
+        let label_pos = edge.label_position.expect("labeled edge should have position");
+
+        let a_rect = graph.graph[find_node_by_label(&graph, "a")].box_.unwrap();
+        let b_rect = graph.graph[find_node_by_label(&graph, "b")].box_.unwrap();
+
+        // Label y should be between the two nodes
+        assert!(label_pos.y > a_rect.bottom() && label_pos.y < b_rect.y,
+            "label y ({}) should be between a.bottom ({}) and b.top ({})",
+            label_pos.y, a_rect.bottom(), b_rect.y);
+
+        // For a 2-point straight vertical route, the label should be offset
+        // left of the line (x < line x)
+        assert_eq!(edge.route.len(), 2, "straight edge should have 2 points");
+        let line_x = (edge.route[0].x + edge.route[1].x) / 2.0;
+        assert!(label_pos.x < line_x,
+            "label x ({}) should be left of the line x ({})", label_pos.x, line_x);
+    }
+
+    #[test]
+    fn test_ortho_label_unlabeled() {
+        // Unlabeled edge should have no label position
+        let graph = layout_ok("direction: right\na -> b");
+        let edge = find_edge_between(&graph, "a", "b");
+        assert!(edge.label_position.is_none(), "unlabeled edge should have no label position");
+    }
+
+    #[test]
+    fn test_ortho_labels_spread() {
+        // Multiple labeled edges in the same gap should have different label positions
+        let graph = layout_ok("direction: right\na -> c: first\nb -> c: second");
+        let edge_ac = find_edge_between(&graph, "a", "c");
+        let edge_bc = find_edge_between(&graph, "b", "c");
+
+        let pos_ac = edge_ac.label_position.expect("a->c should have label");
+        let pos_bc = edge_bc.label_position.expect("b->c should have label");
+
+        // Labels should not be at the exact same position
+        let dist = ((pos_ac.x - pos_bc.x).powi(2) + (pos_ac.y - pos_bc.y).powi(2)).sqrt();
+        assert!(dist > 1.0,
+            "labels should be spread apart, got distance {}", dist);
     }
 }
