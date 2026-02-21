@@ -43,8 +43,8 @@ pub fn layout(graph: &mut D2Graph, options: &RenderOptions) -> Result<(), Layout
     // Phase 4a: Sugiyama node positioning (recursive, bottom-up through containers)
     layout_recursive(graph, graph.root, graph.direction)?;
 
-    // Phase 4c: Container fitting
-    fit_containers(graph, graph.root);
+    // Phase 4c: Root bounding box (non-root containers already fitted in layout_recursive)
+    compute_root_bbox(graph);
 
     // Phase 4d: Post-layout adjustments
     normalize_positions(graph);
@@ -187,43 +187,28 @@ fn offset_subtree(graph: &mut D2Graph, nodes: &[NodeIndex], dx: f64, dy: f64) {
     }
 }
 
-/// Fit all containers after layout is complete.
-fn fit_containers(graph: &mut D2Graph, container: NodeIndex) {
-    let children: Vec<NodeIndex> = graph.graph[container].children.clone();
-    for &child in &children {
-        if graph.graph[child].is_container {
-            fit_containers(graph, child);
-            fit_container(graph, child);
+/// Compute the root node's bounding box from all objects.
+/// Non-root containers are already fitted by `layout_recursive`.
+fn compute_root_bbox(graph: &mut D2Graph) {
+    let all_objects: Vec<NodeIndex> = graph.objects.clone();
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+
+    for &idx in &all_objects {
+        if let Some(rect) = graph.graph[idx].box_ {
+            min_x = min_x.min(rect.x);
+            min_y = min_y.min(rect.y);
+            max_x = max_x.max(rect.x + rect.width);
+            max_y = max_y.max(rect.y + rect.height);
         }
     }
 
-    if container != graph.root {
-        fit_container(graph, container);
-    } else {
-        // Root: just compute bounding box
-        let all_objects: Vec<NodeIndex> = graph.objects.clone();
-        let mut min_x = f64::INFINITY;
-        let mut min_y = f64::INFINITY;
-        let mut max_x = f64::NEG_INFINITY;
-        let mut max_y = f64::NEG_INFINITY;
-
-        for &idx in &all_objects {
-            if let Some(rect) = graph.graph[idx].box_ {
-                min_x = min_x.min(rect.x);
-                min_y = min_y.min(rect.y);
-                max_x = max_x.max(rect.x + rect.width);
-                max_y = max_y.max(rect.y + rect.height);
-            }
-        }
-
-        if min_x != f64::INFINITY {
-            graph.graph[container].box_ = Some(Rect::new(
-                min_x,
-                min_y,
-                max_x - min_x,
-                max_y - min_y,
-            ));
-        }
+    if min_x != f64::INFINITY {
+        graph.graph[graph.root].box_ = Some(Rect::new(
+            min_x, min_y, max_x - min_x, max_y - min_y,
+        ));
     }
 }
 
@@ -423,5 +408,186 @@ mod tests {
             min_y.abs() < 1.0,
             "min_y ({min_y}) should be near 0 after normalization"
         );
+    }
+
+    // --- helpers for container tests -----------------------------------------
+
+    /// Assert that a leaf rect is fully enclosed by a parent rect.
+    fn assert_inside(
+        leaf_label: &str,
+        leaf: crate::geo::Rect,
+        parent_label: &str,
+        parent: crate::geo::Rect,
+    ) {
+        assert!(
+            parent.x <= leaf.x,
+            "{leaf_label} left ({}) escapes {parent_label} left ({})",
+            leaf.x,
+            parent.x,
+        );
+        assert!(
+            parent.y <= leaf.y,
+            "{leaf_label} top ({}) escapes {parent_label} top ({})",
+            leaf.y,
+            parent.y,
+        );
+        assert!(
+            parent.x + parent.width >= leaf.x + leaf.width,
+            "{leaf_label} right ({}) escapes {parent_label} right ({})",
+            leaf.x + leaf.width,
+            parent.x + parent.width,
+        );
+        assert!(
+            parent.y + parent.height >= leaf.y + leaf.height,
+            "{leaf_label} bottom ({}) escapes {parent_label} bottom ({})",
+            leaf.y + leaf.height,
+            parent.y + parent.height,
+        );
+    }
+
+    /// Assert that no two leaf (non-container, non-root) nodes overlap.
+    fn assert_no_leaf_overlap(graph: &crate::graph::D2Graph) {
+        // Collect all non-root, non-container nodes that have boxes
+        let leaves: Vec<_> = graph
+            .objects
+            .iter()
+            .filter(|&&idx| idx != graph.root)
+            .filter(|&&idx| !graph.graph[idx].is_container)
+            .filter(|&&idx| graph.graph[idx].box_.is_some())
+            .map(|&idx| (graph.graph[idx].id.clone(), graph.graph[idx].box_.unwrap()))
+            .collect();
+
+        for i in 0..leaves.len() {
+            for j in (i + 1)..leaves.len() {
+                let (ref id_a, a) = leaves[i];
+                let (ref id_b, b) = leaves[j];
+
+                // Two rects overlap iff they overlap on BOTH axes
+                let overlap_x = a.x < b.x + b.width && b.x < a.x + a.width;
+                let overlap_y = a.y < b.y + b.height && b.y < a.y + a.height;
+
+                assert!(
+                    !(overlap_x && overlap_y),
+                    "leaf '{id_a}' ({a:?}) overlaps with leaf '{id_b}' ({b:?})"
+                );
+            }
+        }
+    }
+
+    // --- test_container_children_inside_parent --------------------------------
+
+    #[test]
+    fn test_container_children_inside_parent() {
+        let graph = layout_ok("a: { x; y }\nb: { p; q }\na.x -> b.p");
+
+        let a = find_by_label(&graph, "a").box_.expect("a should have a box");
+        let b = find_by_label(&graph, "b").box_.expect("b should have a box");
+
+        for (leaf_label, parent_label, parent_rect) in
+            [("x", "a", a), ("y", "a", a), ("p", "b", b), ("q", "b", b)]
+        {
+            let leaf = find_by_label(&graph, leaf_label)
+                .box_
+                .unwrap_or_else(|| panic!("{leaf_label} should have a box"));
+            assert_inside(leaf_label, leaf, parent_label, parent_rect);
+        }
+    }
+
+    // --- test_container_children_inside_parent_direction_up -------------------
+
+    #[test]
+    fn test_container_children_inside_parent_direction_up() {
+        let graph = layout_ok("direction: up\na: { x; y }\nb: { p; q }\na.x -> b.p");
+
+        let a = find_by_label(&graph, "a").box_.expect("a should have a box");
+        let b = find_by_label(&graph, "b").box_.expect("b should have a box");
+
+        for (leaf_label, parent_label, parent_rect) in
+            [("x", "a", a), ("y", "a", a), ("p", "b", b), ("q", "b", b)]
+        {
+            let leaf = find_by_label(&graph, leaf_label)
+                .box_
+                .unwrap_or_else(|| panic!("{leaf_label} should have a box"));
+            assert_inside(leaf_label, leaf, parent_label, parent_rect);
+        }
+    }
+
+    // --- test_container_children_inside_parent_direction_left -----------------
+
+    #[test]
+    fn test_container_children_inside_parent_direction_left() {
+        let graph = layout_ok("direction: left\na: { x; y }\nb: { p; q }\na.x -> b.p");
+
+        let a = find_by_label(&graph, "a").box_.expect("a should have a box");
+        let b = find_by_label(&graph, "b").box_.expect("b should have a box");
+
+        for (leaf_label, parent_label, parent_rect) in
+            [("x", "a", a), ("y", "a", a), ("p", "b", b), ("q", "b", b)]
+        {
+            let leaf = find_by_label(&graph, leaf_label)
+                .box_
+                .unwrap_or_else(|| panic!("{leaf_label} should have a box"));
+            assert_inside(leaf_label, leaf, parent_label, parent_rect);
+        }
+    }
+
+    // --- test_nested_container_no_overlap -------------------------------------
+
+    #[test]
+    fn test_nested_container_no_overlap() {
+        let source = "\
+platform: {
+  frontend: {
+    app: React App
+    cdn: CDN
+  }
+  backend: {
+    api: API Server
+    svc: Service
+    api -> svc
+  }
+  frontend.app -> backend.api
+}";
+        let graph = layout_ok(source);
+        assert_no_leaf_overlap(&graph);
+    }
+
+    // --- test_container_delta_propagation -------------------------------------
+
+    #[test]
+    fn test_container_delta_propagation() {
+        let graph = layout_ok("outer: { mid: { inner } }");
+
+        let outer = find_by_label(&graph, "outer")
+            .box_
+            .expect("outer should have a box");
+        let mid = find_by_label(&graph, "mid")
+            .box_
+            .expect("mid should have a box");
+        let inner = find_by_label(&graph, "inner")
+            .box_
+            .expect("inner should have a box");
+
+        assert_inside("mid", mid, "outer", outer);
+        assert_inside("inner", inner, "mid", mid);
+    }
+
+    // --- test_arrange_in_line_containers -------------------------------------
+
+    #[test]
+    fn test_arrange_in_line_containers() {
+        let graph = layout_ok("g1: { a\n b }\ng2: { c\n d }");
+
+        let g1 = find_by_label(&graph, "g1")
+            .box_
+            .expect("g1 should have a box");
+        let g2 = find_by_label(&graph, "g2")
+            .box_
+            .expect("g2 should have a box");
+
+        assert_inside("a", find_by_label(&graph, "a").box_.unwrap(), "g1", g1);
+        assert_inside("b", find_by_label(&graph, "b").box_.unwrap(), "g1", g1);
+        assert_inside("c", find_by_label(&graph, "c").box_.unwrap(), "g2", g2);
+        assert_inside("d", find_by_label(&graph, "d").box_.unwrap(), "g2", g2);
     }
 }
