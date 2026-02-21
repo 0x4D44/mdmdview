@@ -27,7 +27,8 @@ pub mod theme;
 
 pub use geo::{Point, Rect};
 pub use graph::{
-    ArrowheadType, Color, D2EdgeData, D2Graph, D2Object, D2Warning, Direction, ShapeType, Style,
+    ArrowheadType, Color, D2EdgeData, D2Graph, D2Object, D2Warning, Direction, RouteType,
+    ShapeType, Style,
 };
 pub use theme::Theme;
 
