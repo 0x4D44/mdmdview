@@ -116,9 +116,17 @@ pub fn route_all_edges(graph: &mut D2Graph) {
         // Generate cubic Bézier control points
         let route = generate_bezier(start, end);
 
-        // Label position: midpoint of the path
-        let mid = bezier_midpoint(&route);
-        let label_pos = Some(Point::new(mid.x, mid.y - 10.0)); // Slight offset above
+        // Label position: geometric center of the gap between shape boundaries.
+        // `start` is clipped to source shape edge, `end` to destination shape edge.
+        // Only compute for labeled edges; unlabeled edges get None.
+        let label_pos = if graph.graph[eidx].label.is_some() {
+            Some(Point::new(
+                (start.x + end.x) / 2.0,
+                (start.y + end.y) / 2.0,
+            ))
+        } else {
+            None
+        };
 
         graph.graph[eidx].route = route;
         graph.graph[eidx].label_position = label_pos;
@@ -174,37 +182,6 @@ fn self_loop_route(rect: &crate::geo::Rect) -> Vec<Point> {
     let end = Point::new(right, top + rect.height * 0.35);
 
     vec![start, ctrl1, ctrl2, mid, ctrl3, ctrl4, end]
-}
-
-/// Compute the midpoint of a cubic Bézier route.
-fn bezier_midpoint(route: &[Point]) -> Point {
-    if route.len() >= 4 {
-        // Evaluate cubic Bézier at t=0.5
-        let p0 = route[0];
-        let p1 = route[1];
-        let p2 = route[2];
-        let p3 = route[3];
-
-        let t = 0.5;
-        let mt = 1.0 - t;
-        let mt2 = mt * mt;
-        let mt3 = mt2 * mt;
-        let t2 = t * t;
-        let t3 = t2 * t;
-
-        Point::new(
-            mt3 * p0.x + 3.0 * mt2 * t * p1.x + 3.0 * mt * t2 * p2.x + t3 * p3.x,
-            mt3 * p0.y + 3.0 * mt2 * t * p1.y + 3.0 * mt * t2 * p2.y + t3 * p3.y,
-        )
-    } else if route.len() >= 2 {
-        // Simple midpoint
-        let mid_idx = route.len() / 2;
-        route[mid_idx]
-    } else if !route.is_empty() {
-        route[0]
-    } else {
-        Point::new(0.0, 0.0)
-    }
 }
 
 /// Compute arrowhead triangle at the endpoint of an edge.
@@ -263,6 +240,123 @@ pub fn diamond_arrowhead(tip: Point, from: Point, size: f64) -> [Point; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::RenderOptions;
+
+    /// Helper: parse+compile+layout a D2 source string, return the graph.
+    fn layout_ok(source: &str) -> crate::graph::D2Graph {
+        let ast = crate::parse(source).ast;
+        let mut graph = crate::compile(&ast).expect("compile should succeed");
+        crate::layout(&mut graph, &RenderOptions::default()).expect("layout should succeed");
+        graph
+    }
+
+    /// Find a non-root object by label, return its NodeIndex.
+    fn find_node_by_label(
+        graph: &crate::graph::D2Graph,
+        label: &str,
+    ) -> petgraph::stable_graph::NodeIndex {
+        for &idx in &graph.objects {
+            if graph.graph[idx].label == label {
+                return idx;
+            }
+        }
+        panic!("no object with label '{label}' found");
+    }
+
+    /// Find the edge between two nodes identified by label.
+    fn find_edge_between<'a>(
+        graph: &'a crate::graph::D2Graph,
+        src_label: &str,
+        dst_label: &str,
+    ) -> &'a crate::graph::D2EdgeData {
+        let src = find_node_by_label(graph, src_label);
+        let dst = find_node_by_label(graph, dst_label);
+        for &eidx in &graph.edges {
+            if let Some((s, d)) = graph.graph.edge_endpoints(eidx) {
+                if s == src && d == dst {
+                    return &graph.graph[eidx];
+                }
+            }
+        }
+        panic!("no edge from '{src_label}' to '{dst_label}' found");
+    }
+
+    // --- edge label positioning tests ----------------------------------------
+
+    #[test]
+    fn test_label_between_nodes() {
+        // Vertical layout (default direction=down): label should sit between
+        // a's bottom edge and b's top edge.
+        let graph = layout_ok("a -> b: hello");
+
+        let a_rect = graph.graph[find_node_by_label(&graph, "a")]
+            .box_
+            .expect("a should have a box");
+        let b_rect = graph.graph[find_node_by_label(&graph, "b")]
+            .box_
+            .expect("b should have a box");
+
+        let edge = find_edge_between(&graph, "a", "b");
+        let label_pos = edge
+            .label_position
+            .expect("labeled edge should have a label_position");
+
+        let a_bottom = a_rect.bottom();
+        let b_top = b_rect.y;
+
+        assert!(
+            label_pos.y > a_bottom && label_pos.y < b_top,
+            "label y ({}) should be between a.bottom ({}) and b.top ({})",
+            label_pos.y,
+            a_bottom,
+            b_top,
+        );
+    }
+
+    #[test]
+    fn test_label_between_nodes_horizontal() {
+        // Horizontal layout (direction=right): label should sit between
+        // a's right edge and b's left edge.
+        let graph = layout_ok("direction: right\na -> b: hello");
+
+        let a_rect = graph.graph[find_node_by_label(&graph, "a")]
+            .box_
+            .expect("a should have a box");
+        let b_rect = graph.graph[find_node_by_label(&graph, "b")]
+            .box_
+            .expect("b should have a box");
+
+        let edge = find_edge_between(&graph, "a", "b");
+        let label_pos = edge
+            .label_position
+            .expect("labeled edge should have a label_position");
+
+        let a_right = a_rect.right();
+        let b_left = b_rect.x;
+
+        assert!(
+            label_pos.x > a_right && label_pos.x < b_left,
+            "label x ({}) should be between a.right ({}) and b.left ({})",
+            label_pos.x,
+            a_right,
+            b_left,
+        );
+    }
+
+    #[test]
+    fn test_unlabeled_edge_no_label_position() {
+        // Unlabeled edge should have label_position = None.
+        let graph = layout_ok("a -> b");
+
+        let edge = find_edge_between(&graph, "a", "b");
+        assert!(
+            edge.label_position.is_none(),
+            "unlabeled edge should have label_position = None, got {:?}",
+            edge.label_position,
+        );
+    }
+
+    // --- existing tests ------------------------------------------------------
 
     #[test]
     fn test_arrowhead_polygon() {
@@ -285,16 +379,4 @@ mod tests {
         assert_eq!(t.y, tip.y);
     }
 
-    #[test]
-    fn test_bezier_midpoint() {
-        let route = vec![
-            Point::new(0.0, 0.0),
-            Point::new(30.0, 0.0),
-            Point::new(70.0, 100.0),
-            Point::new(100.0, 100.0),
-        ];
-        let mid = bezier_midpoint(&route);
-        assert!(mid.x > 0.0 && mid.x < 100.0);
-        assert!(mid.y > 0.0 && mid.y < 100.0);
-    }
 }
