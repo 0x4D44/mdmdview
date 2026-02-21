@@ -25,6 +25,11 @@ const NODE_SPACING_V: f64 = 60.0;
 /// Gap between disconnected components (pixels).
 const COMPONENT_GAP: f64 = 60.0;
 
+/// Minimum spacing between container nodes in the same rank.
+const CONTAINER_CROSS_SPACING: f64 = 60.0;
+/// Minimum spacing between ranks when either rank has a container.
+const CONTAINER_RANK_SPACING: f64 = 80.0;
+
 /// Number of barycenter crossing-reduction sweeps.
 /// Empirically sufficient for diagrams under ~200 nodes.
 const CROSSING_REDUCTION_ITERATIONS: usize = 12;
@@ -737,27 +742,50 @@ fn assign_coordinates(
             .map(|rect| if is_horizontal { rect.width } else { rect.height })
             .fold(0.0f64, f64::max);
 
-        rank_offset += max_size + NODE_SPACING_V;
+        let has_container = rank_nodes.iter().any(|&n| graph.graph[n].is_container);
+        let rank_spacing = if has_container { CONTAINER_RANK_SPACING } else { NODE_SPACING_V };
+        rank_offset += max_size + rank_spacing;
     }
 
     // Place nodes
     for (rank_idx, rank_nodes) in ordered_ranks.iter().enumerate() {
-        // Compute total cross-rank size for centering
-        let total_cross: f64 = rank_nodes
-            .iter()
-            .filter_map(|&node| graph.graph[node].box_)
-            .map(|rect| if is_horizontal { rect.height } else { rect.width })
-            .sum::<f64>()
-            + (rank_nodes.len().saturating_sub(1) as f64) * NODE_SPACING_H;
+        // Compute total cross-rank size for centering (container-aware spacing).
+        // The gap after each node is determined by that node's is_container flag,
+        // matching the placement loop below.
+        let total_cross: f64 = {
+            let nodes_with_boxes: Vec<_> = rank_nodes
+                .iter()
+                .filter(|&&n| graph.graph[n].box_.is_some())
+                .copied()
+                .collect();
+            let mut total = 0.0;
+            for (i, &n) in nodes_with_boxes.iter().enumerate() {
+                let rect = graph.graph[n].box_.unwrap();
+                total += if is_horizontal { rect.height } else { rect.width };
+                if i + 1 < nodes_with_boxes.len() {
+                    total += if graph.graph[n].is_container {
+                        CONTAINER_CROSS_SPACING
+                    } else {
+                        NODE_SPACING_H
+                    };
+                }
+            }
+            total
+        };
 
         let mut cross_offset = -total_cross / 2.0;
 
         for &node in rank_nodes {
             let Some(rect) = graph.graph[node].box_ else { continue; };
+            let cross_spacing = if graph.graph[node].is_container {
+                CONTAINER_CROSS_SPACING
+            } else {
+                NODE_SPACING_H
+            };
             match direction {
                 Direction::Down => {
                     graph.reposition_node(node, cross_offset, rank_offsets[rank_idx]);
-                    cross_offset += rect.width + NODE_SPACING_H;
+                    cross_offset += rect.width + cross_spacing;
                 }
                 Direction::Up => {
                     graph.reposition_node(
@@ -765,11 +793,11 @@ fn assign_coordinates(
                         cross_offset,
                         -(rank_offsets[rank_idx] + rect.height),
                     );
-                    cross_offset += rect.width + NODE_SPACING_H;
+                    cross_offset += rect.width + cross_spacing;
                 }
                 Direction::Right => {
                     graph.reposition_node(node, rank_offsets[rank_idx], cross_offset);
-                    cross_offset += rect.height + NODE_SPACING_H;
+                    cross_offset += rect.height + cross_spacing;
                 }
                 Direction::Left => {
                     graph.reposition_node(
@@ -777,7 +805,7 @@ fn assign_coordinates(
                         -(rank_offsets[rank_idx] + rect.width),
                         cross_offset,
                     );
-                    cross_offset += rect.height + NODE_SPACING_H;
+                    cross_offset += rect.height + cross_spacing;
                 }
             }
         }
