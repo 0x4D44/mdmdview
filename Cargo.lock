@@ -1978,7 +1978,7 @@ dependencies = [
 
 [[package]]
 name = "mdmdview-d2"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "petgraph",
  "thiserror 2.0.17",

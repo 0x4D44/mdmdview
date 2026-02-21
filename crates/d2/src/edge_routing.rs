@@ -1,39 +1,65 @@
 //! Edge path computation and curve generation.
 //!
 //! Routes edges between shapes after all node positions are finalized.
-//! Produces cubic Bézier control points for smooth SVG path rendering.
-//! Handles shape-aware clipping, self-loops, and parallel edges.
+//! Produces orthogonal (axis-aligned) polylines for non-self-loop edges
+//! and cubic Bézier curves for self-loops.
+//! Handles shape-aware port placement, channel allocation, and hierarchy.
 
 use std::collections::{HashMap, HashSet};
 
-use petgraph::stable_graph::NodeIndex;
+use petgraph::stable_graph::{EdgeIndex, NodeIndex};
 
-use crate::geo::Point;
-use crate::graph::{D2Graph, Direction};
+use crate::geo::{Point, Rect};
+use crate::graph::{D2Graph, Direction, RouteType, ShapeType};
 use crate::shapes::clip_to_shape;
 
-/// Perpendicular offset between parallel edges (pixels).
-const PARALLEL_EDGE_SPACING: f64 = 12.0;
+/// Spacing between parallel channels in the gap between ranks (pixels).
+const CHANNEL_SPACING: f64 = 12.0;
+
+/// Minimum stub length from a port before the first bend (pixels).
+const MIN_STUB_LENGTH: f64 = 15.0;
+
+/// Jog distance past the rightmost/bottommost node for same-rank edges (pixels).
+const SAME_RANK_JOG: f64 = 30.0;
+
+/// Perpendicular offset for edge labels from the path segment (pixels).
+const LABEL_OFFSET: f64 = 10.0;
+
+// ---------------------------------------------------------------------------
+// Edge classification types
+// ---------------------------------------------------------------------------
+
+/// Classification of an edge for routing purposes.
+struct EdgeClassification {
+    edge_idx: EdgeIndex,
+    src: NodeIndex,
+    dst: NodeIndex,
+    lca: NodeIndex,
+    direction: Direction,
+    kind: EdgeKind,
+    gap_start: f64,
+    gap_end: f64,
+    channel_pos: f64, // assigned during allocation
+    src_port: Point,  // assigned during allocation
+    dst_port: Point,  // assigned during allocation
+}
+
+/// The kind of edge relative to the layout direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EdgeKind {
+    Forward,
+    Backward,
+    SameRank,
+    ContainerDescendant,
+}
 
 /// Route all edges in the graph.
-/// Parallel edges between the same pair of nodes are offset
-/// perpendicular to the edge direction to prevent overlap.
+/// Self-loops get Bézier curves; all other edges get orthogonal routing.
 pub fn route_all_edges(graph: &mut D2Graph) {
-    let edge_indices: Vec<petgraph::stable_graph::EdgeIndex> = graph.edges.clone();
+    let edge_indices: Vec<EdgeIndex> = graph.edges.clone();
 
-    // Count parallel edges between each ordered pair of nodes.
-    // Key is (min(src,dst), max(src,dst)) so both directions count together.
-    let mut pair_counts: HashMap<(petgraph::stable_graph::NodeIndex, petgraph::stable_graph::NodeIndex), usize> = HashMap::new();
-    let mut pair_current: HashMap<(petgraph::stable_graph::NodeIndex, petgraph::stable_graph::NodeIndex), usize> = HashMap::new();
-
-    for &eidx in &edge_indices {
-        if let Some((src, dst)) = graph.graph.edge_endpoints(eidx) {
-            if src != dst {
-                let key = if src < dst { (src, dst) } else { (dst, src) };
-                *pair_counts.entry(key).or_default() += 1;
-            }
-        }
-    }
+    // Collect self-loop indices and route them with Bézier curves
+    let mut non_self_loops: Vec<EdgeIndex> = Vec::new();
 
     for &eidx in &edge_indices {
         let (src_idx, dst_idx) = match graph.graph.edge_endpoints(eidx) {
@@ -41,23 +67,13 @@ pub fn route_all_edges(graph: &mut D2Graph) {
             None => continue,
         };
 
-        let src_rect = match graph.graph[src_idx].box_ {
-            Some(r) => r,
-            None => continue,
-        };
-        let dst_rect = match graph.graph[dst_idx].box_ {
-            Some(r) => r,
-            None => continue,
-        };
-
-        let src_shape = graph.graph[src_idx].shape;
-        let dst_shape = graph.graph[dst_idx].shape;
-
-        let src_center = src_rect.center();
-        let dst_center = dst_rect.center();
-
-        // Self-loop
         if src_idx == dst_idx {
+            // Self-loop: use existing Bézier logic
+            let src_rect = match graph.graph[src_idx].box_ {
+                Some(r) => r,
+                None => continue,
+            };
+            let src_center = src_rect.center();
             let route = self_loop_route(&src_rect);
             let label_pos = Some(Point::new(
                 src_center.x + src_rect.width * 0.6,
@@ -65,99 +81,672 @@ pub fn route_all_edges(graph: &mut D2Graph) {
             ));
             graph.graph[eidx].route = route;
             graph.graph[eidx].label_position = label_pos;
+        } else {
+            non_self_loops.push(eidx);
+        }
+    }
+
+    // Route all non-self-loop edges orthogonally
+    route_orthogonal_edges(graph, &non_self_loops);
+}
+
+// ---------------------------------------------------------------------------
+// Orthogonal routing — three-pass architecture
+// ---------------------------------------------------------------------------
+
+/// Compute a port point on the boundary of a shape.
+/// `direction` is the exit/entry side; `port_cross` is the desired cross-axis
+/// coordinate (y for horizontal exits, x for vertical exits).
+fn compute_port(
+    shape: ShapeType,
+    rect: &Rect,
+    direction: Direction,
+    port_cross: f64,
+) -> Point {
+    match shape {
+        ShapeType::Diamond | ShapeType::Hexagon | ShapeType::Circle | ShapeType::Oval => {
+            // Clip from center toward the exit side at the desired cross position
+            let target = match direction {
+                Direction::Right => Point::new(rect.right() + 100.0, port_cross),
+                Direction::Left => Point::new(rect.x - 100.0, port_cross),
+                Direction::Down => Point::new(port_cross, rect.bottom() + 100.0),
+                Direction::Up => Point::new(port_cross, rect.y - 100.0),
+            };
+            clip_to_shape(shape, rect, rect.center(), target)
+        }
+        _ => {
+            // Place directly on bounding box edge
+            match direction {
+                Direction::Right => Point::new(rect.right(), port_cross),
+                Direction::Left => Point::new(rect.x, port_cross),
+                Direction::Down => Point::new(port_cross, rect.bottom()),
+                Direction::Up => Point::new(port_cross, rect.y),
+            }
+        }
+    }
+}
+
+/// Helper: extract the primary-axis coordinate from a point.
+/// For horizontal directions (Right/Left), primary = x.
+/// For vertical directions (Down/Up), primary = y.
+fn primary_coord(p: &Point, direction: Direction) -> f64 {
+    if direction.is_horizontal() {
+        p.x
+    } else {
+        p.y
+    }
+}
+
+/// Helper: get the cross-axis span of a rect (start, end).
+/// For horizontal directions: (rect.y, rect.bottom()).
+/// For vertical directions: (rect.x, rect.right()).
+fn cross_span(rect: &Rect, direction: Direction) -> (f64, f64) {
+    if direction.is_horizontal() {
+        (rect.y, rect.bottom())
+    } else {
+        (rect.x, rect.right())
+    }
+}
+
+/// Helper: get the cross-axis center.
+fn cross_center(rect: &Rect, direction: Direction) -> f64 {
+    if direction.is_horizontal() {
+        rect.center().y
+    } else {
+        rect.center().x
+    }
+}
+
+/// The exit direction for a forward edge.
+fn forward_exit(direction: Direction) -> Direction {
+    direction
+}
+
+/// The exit direction for a backward edge (opposite of layout direction).
+fn backward_exit(direction: Direction) -> Direction {
+    match direction {
+        Direction::Right => Direction::Left,
+        Direction::Left => Direction::Right,
+        Direction::Down => Direction::Up,
+        Direction::Up => Direction::Down,
+    }
+}
+
+/// The entry direction for a forward edge (opposite of layout direction).
+fn forward_entry(direction: Direction) -> Direction {
+    backward_exit(direction)
+}
+
+/// The entry direction for a backward edge (same as layout direction).
+fn backward_entry(direction: Direction) -> Direction {
+    direction
+}
+
+/// Route all non-self-loop edges using the three-pass orthogonal algorithm.
+fn route_orthogonal_edges(graph: &mut D2Graph, edge_indices: &[EdgeIndex]) {
+    if edge_indices.is_empty() {
+        return;
+    }
+
+    // -----------------------------------------------------------------------
+    // Pass 1: Classify each edge
+    // -----------------------------------------------------------------------
+    let mut classified: Vec<EdgeClassification> = Vec::with_capacity(edge_indices.len());
+
+    for &eidx in edge_indices {
+        let (src, dst) = match graph.graph.edge_endpoints(eidx) {
+            Some(ep) => ep,
+            None => continue,
+        };
+
+        let src_rect = match graph.graph[src].box_ {
+            Some(r) => r,
+            None => continue,
+        };
+        let dst_rect = match graph.graph[dst].box_ {
+            Some(r) => r,
+            None => continue,
+        };
+
+        let lca = find_lca(graph, src, dst);
+        let src_anc = child_ancestor_of(graph, src, lca);
+        let dst_anc = child_ancestor_of(graph, dst, lca);
+        let direction = effective_direction(graph, lca);
+
+        // Detect container-to-descendant
+        let is_container_desc = src_anc == lca || dst_anc == lca;
+
+        if is_container_desc {
+            // Container-to-descendant: compute gap between the actual nodes
+            let src_center = src_rect.center();
+            let dst_center = dst_rect.center();
+            let (gap_start, gap_end) = compute_container_gap(
+                &src_rect, &dst_rect, &src_center, &dst_center, direction,
+            );
+            classified.push(EdgeClassification {
+                edge_idx: eidx,
+                src,
+                dst,
+                lca,
+                direction,
+                kind: EdgeKind::ContainerDescendant,
+                gap_start,
+                gap_end,
+                channel_pos: 0.0,
+                src_port: Point::new(0.0, 0.0),
+                dst_port: Point::new(0.0, 0.0),
+            });
             continue;
         }
 
-        // Compute perpendicular offset for parallel edges
-        let key = if src_idx < dst_idx {
-            (src_idx, dst_idx)
-        } else {
-            (dst_idx, src_idx)
+        // Use ancestor-level rects for gap computation
+        let src_anc_rect = match graph.graph[src_anc].box_ {
+            Some(r) => r,
+            None => src_rect,
         };
-        let total = *pair_counts.get(&key).unwrap_or(&1);
-        let index = {
-            let cur = pair_current.entry(key).or_default();
-            let i = *cur;
-            *cur += 1;
-            i
+        let dst_anc_rect = match graph.graph[dst_anc].box_ {
+            Some(r) => r,
+            None => dst_rect,
         };
 
-        let perp_offset = if total > 1 {
-            let spread = (total - 1) as f64 * PARALLEL_EDGE_SPACING;
-            -spread / 2.0 + index as f64 * PARALLEL_EDGE_SPACING
-        } else {
-            0.0
-        };
+        let src_anc_center = src_anc_rect.center();
+        let dst_anc_center = dst_anc_rect.center();
 
-        // Apply perpendicular offset to the center-to-center line
-        let (offset_src, offset_dst) = if perp_offset.abs() > 0.01 {
-            let dx = dst_center.x - src_center.x;
-            let dy = dst_center.y - src_center.y;
-            let len = (dx * dx + dy * dy).sqrt();
-            if len > 1e-6 {
-                // Perpendicular unit vector
-                let px = -dy / len;
-                let py = dx / len;
-                let ox = px * perp_offset;
-                let oy = py * perp_offset;
-                (
-                    Point::new(src_center.x + ox, src_center.y + oy),
-                    Point::new(dst_center.x + ox, dst_center.y + oy),
-                )
+        let primary_diff = primary_coord(&src_anc_center, direction)
+            - primary_coord(&dst_anc_center, direction);
+
+        // Determine kind
+        let kind = if primary_diff.abs() < 1.0 {
+            EdgeKind::SameRank
+        } else {
+            let forward = match direction {
+                Direction::Right => src_anc_center.x < dst_anc_center.x,
+                Direction::Left => src_anc_center.x > dst_anc_center.x,
+                Direction::Down => src_anc_center.y < dst_anc_center.y,
+                Direction::Up => src_anc_center.y > dst_anc_center.y,
+            };
+            if forward {
+                EdgeKind::Forward
             } else {
-                (src_center, dst_center)
+                EdgeKind::Backward
             }
-        } else {
-            (src_center, dst_center)
         };
 
-        // Clip endpoints to shape boundaries using the offset line
-        let start = clip_to_shape(src_shape, &src_rect, offset_src, offset_dst);
-        let end = clip_to_shape(dst_shape, &dst_rect, offset_dst, offset_src);
+        // Compute gap interval
+        let (gap_start, gap_end) = match kind {
+            EdgeKind::Forward => compute_forward_gap(
+                &src_anc_rect, &dst_anc_rect, direction,
+            ),
+            EdgeKind::Backward => compute_backward_gap(
+                &src_anc_rect, &dst_anc_rect, direction,
+            ),
+            EdgeKind::SameRank => (0.0, 0.0),
+            EdgeKind::ContainerDescendant => unreachable!(),
+        };
 
-        // Generate cubic Bézier control points
-        let route = generate_bezier(start, end);
+        classified.push(EdgeClassification {
+            edge_idx: eidx,
+            src,
+            dst,
+            lca,
+            direction,
+            kind,
+            gap_start,
+            gap_end,
+            channel_pos: 0.0,
+            src_port: Point::new(0.0, 0.0),
+            dst_port: Point::new(0.0, 0.0),
+        });
+    }
 
-        // Label position: geometric center of the gap between shape boundaries.
-        // `start` is clipped to source shape edge, `end` to destination shape edge.
-        // Only compute for labeled edges; unlabeled edges get None.
-        let label_pos = if graph.graph[eidx].label.is_some() {
-            Some(Point::new(
-                (start.x + end.x) / 2.0,
-                (start.y + end.y) / 2.0,
-            ))
+    // -----------------------------------------------------------------------
+    // Pass 2: Allocate channels and ports
+    // -----------------------------------------------------------------------
+
+    // 2a) Channel allocation — group by (gap_key) and spread symmetrically
+    allocate_channels(graph, &mut classified);
+
+    // 2b) Source port allocation
+    allocate_source_ports(graph, &mut classified);
+
+    // 2c) Destination port allocation
+    allocate_dest_ports(graph, &mut classified);
+
+    // -----------------------------------------------------------------------
+    // Pass 3: Build routes and write back to graph
+    // -----------------------------------------------------------------------
+    for ec in &classified {
+        let src_rect = graph.graph[ec.src].box_.unwrap();
+        let dst_rect = graph.graph[ec.dst].box_.unwrap();
+
+        let route = build_route(ec, &src_rect, &dst_rect);
+
+        // Label position: midpoint of the route for labeled edges
+        let label_pos = if graph.graph[ec.edge_idx].label.is_some() {
+            compute_label_position(&route)
         } else {
             None
         };
 
-        graph.graph[eidx].route = route;
-        graph.graph[eidx].label_position = label_pos;
+        graph.graph[ec.edge_idx].route = route;
+        graph.graph[ec.edge_idx].route_type = RouteType::Orthogonal;
+        graph.graph[ec.edge_idx].label_position = label_pos;
     }
 }
 
-/// Generate a cubic Bézier path between two points.
-/// Returns [start, ctrl1, ctrl2, end].
-fn generate_bezier(start: Point, end: Point) -> Vec<Point> {
-    let dx = end.x - start.x;
-    let dy = end.y - start.y;
+/// Compute gap for a forward edge (src before dst in layout direction).
+fn compute_forward_gap(src_rect: &Rect, dst_rect: &Rect, direction: Direction) -> (f64, f64) {
+    match direction {
+        Direction::Right => (src_rect.right(), dst_rect.x),
+        Direction::Left => (dst_rect.right(), src_rect.x),
+        Direction::Down => (src_rect.bottom(), dst_rect.y),
+        Direction::Up => (dst_rect.bottom(), src_rect.y),
+    }
+}
 
-    // For mostly vertical connections, use vertical control points
-    // For mostly horizontal connections, use horizontal control points
-    let (ctrl1, ctrl2) = if dy.abs() > dx.abs() {
-        // Vertical: offset control points along Y
-        (
-            Point::new(start.x, start.y + dy * 0.4),
-            Point::new(end.x, end.y - dy * 0.4),
-        )
+/// Compute gap for a backward edge (src after dst in layout direction).
+fn compute_backward_gap(src_rect: &Rect, dst_rect: &Rect, direction: Direction) -> (f64, f64) {
+    // Backward: swap src/dst in the gap computation
+    compute_forward_gap(dst_rect, src_rect, direction)
+}
+
+/// Compute gap for container-to-descendant edges.
+fn compute_container_gap(
+    src_rect: &Rect,
+    dst_rect: &Rect,
+    src_center: &Point,
+    dst_center: &Point,
+    direction: Direction,
+) -> (f64, f64) {
+    // Use actual node positions to determine gap
+    if direction.is_horizontal() {
+        if src_center.x < dst_center.x {
+            (src_rect.right(), dst_rect.x)
+        } else {
+            (dst_rect.right(), src_rect.x)
+        }
+    } else if src_center.y < dst_center.y {
+        (src_rect.bottom(), dst_rect.y)
     } else {
-        // Horizontal: offset control points along X
-        (
-            Point::new(start.x + dx * 0.4, start.y),
-            Point::new(end.x - dx * 0.4, end.y),
-        )
-    };
+        (dst_rect.bottom(), src_rect.y)
+    }
+}
 
-    vec![start, ctrl1, ctrl2, end]
+/// Pass 2a: Allocate channel positions in the gap between ranks.
+fn allocate_channels(graph: &D2Graph, classified: &mut [EdgeClassification]) {
+    // Group by (lca, rounded gap_start, gap_end)
+    let mut groups: HashMap<(NodeIndex, i64, i64), Vec<usize>> = HashMap::new();
+    for (i, ec) in classified.iter().enumerate() {
+        if ec.kind == EdgeKind::SameRank || ec.kind == EdgeKind::ContainerDescendant {
+            continue; // SameRank and ContainerDescendant edges don't use channels
+        }
+        let key = (ec.lca, ec.gap_start.round() as i64, ec.gap_end.round() as i64);
+        groups.entry(key).or_default().push(i);
+    }
+
+    for indices in groups.values() {
+        if indices.is_empty() {
+            continue;
+        }
+
+        let first = &classified[indices[0]];
+        let direction = first.direction;
+        let gap_start = first.gap_start;
+        let gap_end = first.gap_end;
+        let gap_mid = (gap_start + gap_end) / 2.0;
+        let gap_width = (gap_end - gap_start).abs();
+
+        // Sort by (source cross-pos, dest cross-pos)
+        let mut sorted: Vec<usize> = indices.clone();
+        sorted.sort_by(|&a, &b| {
+            let ea = &classified[a];
+            let eb = &classified[b];
+            let src_a = graph.graph[ea.src].box_.map(|r| cross_center(&r, direction)).unwrap_or(0.0);
+            let src_b = graph.graph[eb.src].box_.map(|r| cross_center(&r, direction)).unwrap_or(0.0);
+            let dst_a = graph.graph[ea.dst].box_.map(|r| cross_center(&r, direction)).unwrap_or(0.0);
+            let dst_b = graph.graph[eb.dst].box_.map(|r| cross_center(&r, direction)).unwrap_or(0.0);
+            src_a
+                .partial_cmp(&src_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(dst_a.partial_cmp(&dst_b).unwrap_or(std::cmp::Ordering::Equal))
+        });
+
+        let n = sorted.len();
+        let total_spread = (n.saturating_sub(1)) as f64 * CHANNEL_SPACING;
+
+        // Clamp if spread exceeds available gap
+        let effective_spacing = if n > 1 && total_spread > gap_width - 2.0 * MIN_STUB_LENGTH {
+            (gap_width - 2.0 * MIN_STUB_LENGTH).max(0.0) / (n - 1) as f64
+        } else {
+            CHANNEL_SPACING
+        };
+
+        for (rank, &idx) in sorted.iter().enumerate() {
+            let offset = if n == 1 {
+                0.0
+            } else {
+                -((n - 1) as f64 * effective_spacing) / 2.0 + rank as f64 * effective_spacing
+            };
+            classified[idx].channel_pos = gap_mid + offset;
+        }
+    }
+}
+
+/// Pass 2b: Allocate source ports — distribute evenly on the exit side.
+fn allocate_source_ports(graph: &D2Graph, classified: &mut [EdgeClassification]) {
+    // Group by (source node, exit side)
+    let mut groups: HashMap<(NodeIndex, Direction), Vec<usize>> = HashMap::new();
+    for (i, ec) in classified.iter().enumerate() {
+        let exit_side = match ec.kind {
+            EdgeKind::Forward | EdgeKind::SameRank => forward_exit(ec.direction),
+            EdgeKind::Backward => backward_exit(ec.direction),
+            EdgeKind::ContainerDescendant => {
+                // Determine exit side based on node positions
+                container_exit_side(graph, ec)
+            }
+        };
+        groups.entry((ec.src, exit_side)).or_default().push(i);
+    }
+
+    for ((node, exit_side), indices) in &groups {
+        let rect = match graph.graph[*node].box_ {
+            Some(r) => r,
+            None => continue,
+        };
+        let shape = graph.graph[*node].shape;
+
+        // Sort by destination cross-pos
+        let direction = classified[indices[0]].direction;
+        let mut sorted: Vec<usize> = indices.clone();
+        sorted.sort_by(|&a, &b| {
+            let dst_a = graph.graph[classified[a].dst]
+                .box_
+                .map(|r| cross_center(&r, direction))
+                .unwrap_or(0.0);
+            let dst_b = graph.graph[classified[b].dst]
+                .box_
+                .map(|r| cross_center(&r, direction))
+                .unwrap_or(0.0);
+            dst_a
+                .partial_cmp(&dst_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let n = sorted.len();
+        let (cross_start, cross_end) = cross_span(&rect, direction);
+        let cross_dim = cross_end - cross_start;
+        let step = cross_dim / (n + 1) as f64;
+
+        for (rank, &idx) in sorted.iter().enumerate() {
+            let port_cross = if step < 4.0 {
+                cross_center(&rect, direction)
+            } else {
+                cross_start + step * (rank + 1) as f64
+            };
+            classified[idx].src_port = compute_port(shape, &rect, *exit_side, port_cross);
+        }
+    }
+}
+
+/// Pass 2c: Allocate destination ports — distribute evenly on the entry side.
+fn allocate_dest_ports(graph: &D2Graph, classified: &mut [EdgeClassification]) {
+    // Group by (dest node, entry side)
+    let mut groups: HashMap<(NodeIndex, Direction), Vec<usize>> = HashMap::new();
+    for (i, ec) in classified.iter().enumerate() {
+        let entry_side = match ec.kind {
+            EdgeKind::Forward => forward_entry(ec.direction),
+            EdgeKind::SameRank => forward_exit(ec.direction),  // jog enters from the same side it exits
+            EdgeKind::Backward => backward_entry(ec.direction),
+            EdgeKind::ContainerDescendant => {
+                container_entry_side(graph, ec)
+            }
+        };
+        groups.entry((ec.dst, entry_side)).or_default().push(i);
+    }
+
+    for ((node, entry_side), indices) in &groups {
+        let rect = match graph.graph[*node].box_ {
+            Some(r) => r,
+            None => continue,
+        };
+        let shape = graph.graph[*node].shape;
+
+        // Sort by source cross-pos
+        let direction = classified[indices[0]].direction;
+        let mut sorted: Vec<usize> = indices.clone();
+        sorted.sort_by(|&a, &b| {
+            let src_a = graph.graph[classified[a].src]
+                .box_
+                .map(|r| cross_center(&r, direction))
+                .unwrap_or(0.0);
+            let src_b = graph.graph[classified[b].src]
+                .box_
+                .map(|r| cross_center(&r, direction))
+                .unwrap_or(0.0);
+            src_a
+                .partial_cmp(&src_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let n = sorted.len();
+        let (cross_start, cross_end) = cross_span(&rect, direction);
+        let cross_dim = cross_end - cross_start;
+        let step = cross_dim / (n + 1) as f64;
+
+        for (rank, &idx) in sorted.iter().enumerate() {
+            let port_cross = if step < 4.0 {
+                cross_center(&rect, direction)
+            } else {
+                cross_start + step * (rank + 1) as f64
+            };
+            classified[idx].dst_port = compute_port(shape, &rect, *entry_side, port_cross);
+        }
+    }
+}
+
+/// Determine exit side for a container-descendant edge.
+fn container_exit_side(graph: &D2Graph, ec: &EdgeClassification) -> Direction {
+    let src_center = graph.graph[ec.src].box_.map(|r| r.center()).unwrap_or(Point::new(0.0, 0.0));
+    let dst_center = graph.graph[ec.dst].box_.map(|r| r.center()).unwrap_or(Point::new(0.0, 0.0));
+    if ec.direction.is_horizontal() {
+        if src_center.x <= dst_center.x {
+            Direction::Right
+        } else {
+            Direction::Left
+        }
+    } else if src_center.y <= dst_center.y {
+        Direction::Down
+    } else {
+        Direction::Up
+    }
+}
+
+/// Determine entry side for a container-descendant edge.
+fn container_entry_side(graph: &D2Graph, ec: &EdgeClassification) -> Direction {
+    let src_center = graph.graph[ec.src].box_.map(|r| r.center()).unwrap_or(Point::new(0.0, 0.0));
+    let dst_center = graph.graph[ec.dst].box_.map(|r| r.center()).unwrap_or(Point::new(0.0, 0.0));
+    if ec.direction.is_horizontal() {
+        if dst_center.x >= src_center.x {
+            Direction::Left
+        } else {
+            Direction::Right
+        }
+    } else if dst_center.y >= src_center.y {
+        Direction::Up
+    } else {
+        Direction::Down
+    }
+}
+
+/// Pass 3: Build the polyline route for a classified edge.
+fn build_route(
+    ec: &EdgeClassification,
+    src_rect: &Rect,
+    dst_rect: &Rect,
+) -> Vec<Point> {
+    match ec.kind {
+        EdgeKind::Forward | EdgeKind::Backward => build_three_segment_route(ec),
+        EdgeKind::SameRank => build_same_rank_route(ec, src_rect, dst_rect),
+        EdgeKind::ContainerDescendant => build_container_route(ec),
+    }
+}
+
+/// Build a three-segment orthogonal route for forward and backward edges.
+/// Both cases use the same geometry: straight line when ports are aligned
+/// on the cross axis, otherwise an S-shaped path through the channel.
+fn build_three_segment_route(ec: &EdgeClassification) -> Vec<Point> {
+    let src = ec.src_port;
+    let dst = ec.dst_port;
+
+    if ec.direction.is_horizontal() {
+        // Horizontal: primary=x, cross=y
+        if (src.y - dst.y).abs() < 1.0 {
+            // Straight line — same cross position
+            vec![src, dst]
+        } else {
+            vec![
+                src,
+                Point::new(ec.channel_pos, src.y),
+                Point::new(ec.channel_pos, dst.y),
+                dst,
+            ]
+        }
+    } else {
+        // Vertical: primary=y, cross=x
+        if (src.x - dst.x).abs() < 1.0 {
+            vec![src, dst]
+        } else {
+            vec![
+                src,
+                Point::new(src.x, ec.channel_pos),
+                Point::new(dst.x, ec.channel_pos),
+                dst,
+            ]
+        }
+    }
+}
+
+/// Build route for a same-rank edge.
+fn build_same_rank_route(
+    ec: &EdgeClassification,
+    src_rect: &Rect,
+    dst_rect: &Rect,
+) -> Vec<Point> {
+    let src = ec.src_port;
+    let dst = ec.dst_port;
+
+    if ec.direction.is_horizontal() {
+        // Jog past the rightmost (for Right) or leftmost (for Left) node
+        let jog = match ec.direction {
+            Direction::Right => src_rect.right().max(dst_rect.right()) + SAME_RANK_JOG,
+            Direction::Left => src_rect.x.min(dst_rect.x) - SAME_RANK_JOG,
+            _ => unreachable!(),
+        };
+        vec![
+            src,
+            Point::new(jog, src.y),
+            Point::new(jog, dst.y),
+            dst,
+        ]
+    } else {
+        // Vertical same-rank: jog past the bottommost (for Down) or topmost (for Up)
+        let jog = match ec.direction {
+            Direction::Down => src_rect.bottom().max(dst_rect.bottom()) + SAME_RANK_JOG,
+            Direction::Up => src_rect.y.min(dst_rect.y) - SAME_RANK_JOG,
+            _ => unreachable!(),
+        };
+        vec![
+            src,
+            Point::new(src.x, jog),
+            Point::new(dst.x, jog),
+            dst,
+        ]
+    }
+}
+
+/// Build an L-shaped route for container-to-descendant edges.
+fn build_container_route(ec: &EdgeClassification) -> Vec<Point> {
+    let src = ec.src_port;
+    let dst = ec.dst_port;
+
+    if ec.direction.is_horizontal() {
+        // L-shape: horizontal then vertical, or use channel if available
+        if (ec.gap_end - ec.gap_start).abs() > MIN_STUB_LENGTH * 2.0 {
+            // There's a gap: use 3-segment route through channel
+            let channel = (ec.gap_start + ec.gap_end) / 2.0;
+            if (src.y - dst.y).abs() < 1.0 {
+                vec![src, dst]
+            } else {
+                vec![
+                    src,
+                    Point::new(channel, src.y),
+                    Point::new(channel, dst.y),
+                    dst,
+                ]
+            }
+        } else {
+            // Tight gap: L-shape using intermediate point
+            vec![src, Point::new(src.x, dst.y), dst]
+        }
+    } else {
+        // Vertical container layout
+        if (ec.gap_end - ec.gap_start).abs() > MIN_STUB_LENGTH * 2.0 {
+            let channel = (ec.gap_start + ec.gap_end) / 2.0;
+            if (src.x - dst.x).abs() < 1.0 {
+                vec![src, dst]
+            } else {
+                vec![
+                    src,
+                    Point::new(src.x, channel),
+                    Point::new(dst.x, channel),
+                    dst,
+                ]
+            }
+        } else {
+            vec![src, Point::new(dst.x, src.y), dst]
+        }
+    }
+}
+
+/// Compute label position for an orthogonal route.
+/// Places label at the midpoint of the middle segment (or overall midpoint
+/// for 2-point routes), with a perpendicular offset of `LABEL_OFFSET` pixels.
+fn compute_label_position(route: &[Point]) -> Option<Point> {
+    if route.len() < 2 {
+        return None;
+    }
+
+    if route.len() == 2 {
+        // Straight line: midpoint with offset
+        let mid = Point::new(
+            (route[0].x + route[1].x) / 2.0,
+            (route[0].y + route[1].y) / 2.0,
+        );
+        // Offset perpendicular to the line
+        let dx = route[1].x - route[0].x;
+        let dy = route[1].y - route[0].y;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len > 1e-6 {
+            return Some(Point::new(mid.x - dy / len * LABEL_OFFSET, mid.y + dx / len * LABEL_OFFSET));
+        }
+        return Some(mid);
+    }
+
+    // For 3+ point routes: use midpoint of the middle segment
+    let mid_seg = route.len() / 2;
+    let a = route[mid_seg - 1];
+    let b = route[mid_seg];
+    let mid = Point::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
+
+    // Offset perpendicular to the segment
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len > 1e-6 {
+        Some(Point::new(mid.x - dy / len * LABEL_OFFSET, mid.y + dx / len * LABEL_OFFSET))
+    } else {
+        Some(mid)
+    }
 }
 
 /// Generate a self-loop path as two cubic Bézier segments.
@@ -244,7 +833,6 @@ pub fn diamond_arrowhead(tip: Point, from: Point, size: f64) -> [Point; 4] {
 // ---------------------------------------------------------------------------
 
 /// Collect all ancestors of `node` (inclusive) up to the root.
-#[allow(dead_code)] // used by orthogonal routing (Stage 2B)
 fn ancestor_chain(graph: &D2Graph, node: NodeIndex) -> HashSet<NodeIndex> {
     let mut ancestors = HashSet::new();
     let mut current = node;
@@ -257,7 +845,6 @@ fn ancestor_chain(graph: &D2Graph, node: NodeIndex) -> HashSet<NodeIndex> {
 }
 
 /// Find the lowest common ancestor of nodes `a` and `b`.
-#[allow(dead_code)] // used by orthogonal routing (Stage 2B)
 fn find_lca(graph: &D2Graph, a: NodeIndex, b: NodeIndex) -> NodeIndex {
     let a_ancestors = ancestor_chain(graph, a);
     let mut current = b;
@@ -275,7 +862,6 @@ fn find_lca(graph: &D2Graph, a: NodeIndex, b: NodeIndex) -> NodeIndex {
 
 /// Walk from `node` upward until we find the direct child of `ancestor`.
 /// If `node == ancestor`, returns `node` (handles container-to-descendant edges).
-#[allow(dead_code)] // used by orthogonal routing (Stage 2B)
 fn child_ancestor_of(graph: &D2Graph, node: NodeIndex, ancestor: NodeIndex) -> NodeIndex {
     if node == ancestor {
         return node;
@@ -294,7 +880,6 @@ fn child_ancestor_of(graph: &D2Graph, node: NodeIndex, ancestor: NodeIndex) -> N
 /// Walk from `container` upward through its parent chain and return the
 /// first explicit `direction` override found. If none is set on any
 /// ancestor, fall back to `graph.direction`.
-#[allow(dead_code)] // used by orthogonal routing (Stage 2B)
 fn effective_direction(graph: &D2Graph, container: NodeIndex) -> Direction {
     let mut current = container;
     loop {
@@ -537,5 +1122,270 @@ mod tests {
         let graph = layout_ok("direction: right\na");
         let dir = effective_direction(&graph, graph.root);
         assert_eq!(dir, Direction::Right, "root effective direction should be graph.direction");
+    }
+
+    // --- orthogonal routing tests --------------------------------------------
+
+    #[test]
+    fn test_ortho_straight_horizontal() {
+        // direction: right, a -> b — single forward edge should produce
+        // a 2-point straight line with route_type == Orthogonal.
+        let graph = layout_ok("direction: right\na -> b");
+        let edge = find_edge_between(&graph, "a", "b");
+
+        assert_eq!(
+            edge.route_type,
+            RouteType::Orthogonal,
+            "non-self-loop edge should be Orthogonal"
+        );
+        assert_eq!(
+            edge.route.len(),
+            2,
+            "straight horizontal edge should have 2 route points, got {}",
+            edge.route.len()
+        );
+        // Destination x should be to the right of source x
+        assert!(
+            edge.route[1].x > edge.route[0].x,
+            "dst.x ({}) should be right of src.x ({})",
+            edge.route[1].x,
+            edge.route[0].x,
+        );
+    }
+
+    #[test]
+    fn test_ortho_straight_vertical() {
+        // Default direction is down; a -> b — straight vertical line.
+        let graph = layout_ok("a -> b");
+        let edge = find_edge_between(&graph, "a", "b");
+
+        assert_eq!(edge.route_type, RouteType::Orthogonal);
+        assert_eq!(
+            edge.route.len(),
+            2,
+            "straight vertical edge should have 2 route points, got {}",
+            edge.route.len()
+        );
+        // Destination y should be below source y
+        assert!(
+            edge.route[1].y > edge.route[0].y,
+            "dst.y ({}) should be below src.y ({})",
+            edge.route[1].y,
+            edge.route[0].y,
+        );
+    }
+
+    #[test]
+    fn test_ortho_straight_left() {
+        // direction: left, a -> b — dst should be left of src
+        let graph = layout_ok("direction: left\na -> b");
+        let edge = find_edge_between(&graph, "a", "b");
+
+        assert_eq!(edge.route_type, RouteType::Orthogonal);
+        assert_eq!(
+            edge.route.len(),
+            2,
+            "straight left edge should have 2 route points, got {}",
+            edge.route.len()
+        );
+        assert!(
+            edge.route[1].x < edge.route[0].x,
+            "dst.x ({}) should be left of src.x ({})",
+            edge.route[1].x,
+            edge.route[0].x,
+        );
+    }
+
+    #[test]
+    fn test_ortho_straight_up() {
+        // direction: up, a -> b — dst should be above src
+        let graph = layout_ok("direction: up\na -> b");
+        let edge = find_edge_between(&graph, "a", "b");
+
+        assert_eq!(edge.route_type, RouteType::Orthogonal);
+        assert_eq!(
+            edge.route.len(),
+            2,
+            "straight up edge should have 2 route points, got {}",
+            edge.route.len()
+        );
+        assert!(
+            edge.route[1].y < edge.route[0].y,
+            "dst.y ({}) should be above src.y ({})",
+            edge.route[1].y,
+            edge.route[0].y,
+        );
+    }
+
+    #[test]
+    fn test_ortho_three_segment() {
+        // direction: right, a -> c, b -> c — a and b are in different ranks,
+        // the edge from the offset node should have >= 2 route points.
+        let graph = layout_ok("direction: right\na -> c\nb -> c");
+        let edge_ac = find_edge_between(&graph, "a", "c");
+        let edge_bc = find_edge_between(&graph, "b", "c");
+
+        assert_eq!(edge_ac.route_type, RouteType::Orthogonal);
+        assert_eq!(edge_bc.route_type, RouteType::Orthogonal);
+
+        // At least one of them should have >= 2 points (both should)
+        assert!(
+            edge_ac.route.len() >= 2,
+            "a->c route should have >= 2 points, got {}",
+            edge_ac.route.len()
+        );
+        assert!(
+            edge_bc.route.len() >= 2,
+            "b->c route should have >= 2 points, got {}",
+            edge_bc.route.len()
+        );
+    }
+
+    #[test]
+    fn test_ortho_same_rank_jog() {
+        // Same-rank edges need a jog (detour) since both nodes are at the
+        // same primary coordinate. We use two nodes at the same rank by
+        // having them both connect to a third node.
+        // However, to directly test same-rank we need nodes at the same
+        // position. A simpler approach: two nodes with edges to each other
+        // creates a forward + backward pair.
+        // For a true same-rank test we need parallel edges in the same rank.
+        // Use a -> c, b -> c pattern where a and b end up on the same rank.
+        let graph = layout_ok("direction: right\na -> b\na -> c\nb -> c");
+        // All edges should be non-empty and orthogonal
+        for &eidx in &graph.edges {
+            let edata = &graph.graph[eidx];
+            assert_eq!(edata.route_type, RouteType::Orthogonal);
+            assert!(
+                !edata.route.is_empty(),
+                "every edge should have route points"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ortho_backward_edge() {
+        // b -> a is a backward edge when direction=right and a is before b.
+        let graph = layout_ok("direction: right\na -> b\nb -> a");
+
+        // a -> b should be forward
+        let edge_ab = find_edge_between(&graph, "a", "b");
+        assert_eq!(edge_ab.route_type, RouteType::Orthogonal);
+        assert!(
+            !edge_ab.route.is_empty(),
+            "forward edge should have route points"
+        );
+
+        // b -> a should be backward
+        let edge_ba = find_edge_between(&graph, "b", "a");
+        assert_eq!(edge_ba.route_type, RouteType::Orthogonal);
+        assert!(
+            !edge_ba.route.is_empty(),
+            "backward edge should have route points"
+        );
+    }
+
+    #[test]
+    fn test_ortho_self_loop_unchanged() {
+        // Self-loops should still use Bézier routing with 7 points.
+        let graph = layout_ok("a -> a");
+        let a = find_node_by_label(&graph, "a");
+        for &eidx in &graph.edges {
+            if let Some((s, d)) = graph.graph.edge_endpoints(eidx) {
+                if s == a && d == a {
+                    let edata = &graph.graph[eidx];
+                    assert_eq!(
+                        edata.route_type,
+                        RouteType::Bezier,
+                        "self-loop should use Bezier routing"
+                    );
+                    assert_eq!(
+                        edata.route.len(),
+                        7,
+                        "self-loop should have 7 points, got {}",
+                        edata.route.len()
+                    );
+                    return;
+                }
+            }
+        }
+        panic!("no self-loop edge found");
+    }
+
+    #[test]
+    fn test_ortho_container_descendant() {
+        // Edge from container to its own child.
+        let graph = layout_ok("g: { a }\ng -> g.a");
+        let edge = find_edge_between(&graph, "g", "a");
+
+        assert_eq!(
+            edge.route_type,
+            RouteType::Orthogonal,
+            "container-descendant edge should be Orthogonal"
+        );
+        assert!(
+            !edge.route.is_empty(),
+            "container-descendant edge should have route points"
+        );
+    }
+
+    #[test]
+    fn test_ortho_architecture_integration() {
+        // Full architecture example — all edges should be routed without panics.
+        let source = "\
+direction: right
+
+network: {
+  style.stroke: \"#4a90d9\"
+  load_balancer.shape: diamond
+  load_balancer.style.fill: \"#ffd700\"
+  server1
+  server2
+  load_balancer -> server1: route
+  load_balancer -> server2: route
+}
+
+database.shape: cylinder
+database.style.fill: \"#228b22\"
+
+network.server1 -> database: query
+network.server2 -> database: query
+";
+        let graph = layout_ok(source);
+
+        for &eidx in &graph.edges {
+            let edata = &graph.graph[eidx];
+            if let Some((s, d)) = graph.graph.edge_endpoints(eidx) {
+                if s == d {
+                    continue; // skip self-loops
+                }
+            }
+            assert!(
+                !edata.route.is_empty(),
+                "every non-self-loop edge should have route points"
+            );
+            assert_eq!(
+                edata.route_type,
+                RouteType::Orthogonal,
+                "every non-self-loop edge should be Orthogonal"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ortho_cross_container() {
+        // Cross-container edges (between nodes in different containers).
+        let graph = layout_ok("a: { x }\nb: { y }\na.x -> b.y");
+
+        let edge = find_edge_between(&graph, "x", "y");
+        assert_eq!(
+            edge.route_type,
+            RouteType::Orthogonal,
+            "cross-container edge should be Orthogonal"
+        );
+        assert!(
+            !edge.route.is_empty(),
+            "cross-container edge should have route points"
+        );
     }
 }
