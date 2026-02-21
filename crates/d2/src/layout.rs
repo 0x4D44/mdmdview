@@ -590,4 +590,63 @@ platform: {
         assert_inside("c", find_by_label(&graph, "c").box_.unwrap(), "g2", g2);
         assert_inside("d", find_by_label(&graph, "d").box_.unwrap(), "g2", g2);
     }
+
+    // --- test_container_spacing_wider ----------------------------------------
+
+    /// Containers in the same rank should get at least CONTAINER_CROSS_SPACING
+    /// (60px) of horizontal gap between them, more than leaf NODE_SPACING_H.
+    #[test]
+    fn test_container_spacing_wider() {
+        // Two containers `a` and `b` in rank 0, connected to leaf `c` in rank 1.
+        let graph = layout_ok("a: { x }\nb: { y }\nc\na.x -> c\nb.y -> c");
+
+        let a = find_by_label(&graph, "a")
+            .box_
+            .expect("a should have a box");
+        let b = find_by_label(&graph, "b")
+            .box_
+            .expect("b should have a box");
+
+        // Determine which container is left and which is right
+        let (left, right) = if a.x < b.x { (a, b) } else { (b, a) };
+
+        let gap = right.x - (left.x + left.width);
+        assert!(
+            gap >= 60.0 - 0.01,
+            "gap between containers ({gap:.1}) should be >= CONTAINER_CROSS_SPACING (60.0)"
+        );
+    }
+
+    // --- test_leaf_spacing_unchanged -----------------------------------------
+
+    /// Leaf nodes (non-containers) in the same rank should use NODE_SPACING_H
+    /// (40px), not the wider container spacing.
+    #[test]
+    fn test_leaf_spacing_unchanged() {
+        // Two leaf nodes `a` and `b` in rank 0, connected to `c` in rank 1.
+        let graph = layout_ok("a -> c\nb -> c");
+
+        let a = find_by_label(&graph, "a")
+            .box_
+            .expect("a should have a box");
+        let b = find_by_label(&graph, "b")
+            .box_
+            .expect("b should have a box");
+
+        // Determine which is left and which is right
+        let (left, right) = if a.x < b.x { (a, b) } else { (b, a) };
+
+        let gap = right.x - (left.x + left.width);
+
+        // Gap should be NODE_SPACING_H (40.0), with a small tolerance
+        // for centering arithmetic.
+        assert!(
+            gap < 60.0,
+            "gap between leaf nodes ({gap:.1}) should be less than CONTAINER_CROSS_SPACING (60.0)"
+        );
+        assert!(
+            (gap - 40.0).abs() < 1.0,
+            "gap between leaf nodes ({gap:.1}) should be close to NODE_SPACING_H (40.0)"
+        );
+    }
 }
