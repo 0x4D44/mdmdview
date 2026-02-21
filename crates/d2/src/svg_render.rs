@@ -25,6 +25,102 @@ fn c(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
+/// Default bend radius for rounded corners on orthogonal polylines.
+const BEND_RADIUS: f64 = 5.0;
+
+/// Build an SVG path `d` attribute for an orthogonal polyline with rounded corners.
+///
+/// Each internal vertex gets a quadratic Bézier arc that rounds the corner.
+/// The radius is clamped so it never exceeds half the length of either adjacent
+/// segment, which handles very short segments gracefully.
+fn polyline_with_rounded_corners(points: &[Point], radius: f64) -> String {
+    if points.len() < 2 {
+        return String::new();
+    }
+
+    let mut d = String::new();
+    d.push_str(&format!("M {} {}", c(points[0].x), c(points[0].y)));
+
+    if points.len() == 2 {
+        d.push_str(&format!(" L {} {}", c(points[1].x), c(points[1].y)));
+        return d;
+    }
+
+    for i in 1..points.len() - 1 {
+        let prev = points[i - 1];
+        let curr = points[i];
+        let next = points[i + 1];
+
+        let dx1 = prev.x - curr.x;
+        let dy1 = prev.y - curr.y;
+        let len1 = (dx1 * dx1 + dy1 * dy1).sqrt();
+
+        let dx2 = next.x - curr.x;
+        let dy2 = next.y - curr.y;
+        let len2 = (dx2 * dx2 + dy2 * dy2).sqrt();
+
+        if len1 < 1e-6 || len2 < 1e-6 {
+            // Degenerate segment — just line to the vertex
+            d.push_str(&format!(" L {} {}", c(curr.x), c(curr.y)));
+            continue;
+        }
+
+        let r = radius.min(len1 / 2.0).min(len2 / 2.0);
+
+        let arc_start_x = curr.x + dx1 / len1 * r;
+        let arc_start_y = curr.y + dy1 / len1 * r;
+        let arc_end_x = curr.x + dx2 / len2 * r;
+        let arc_end_y = curr.y + dy2 / len2 * r;
+
+        d.push_str(&format!(
+            " L {} {} Q {} {} {} {}",
+            c(arc_start_x),
+            c(arc_start_y),
+            c(curr.x),
+            c(curr.y),
+            c(arc_end_x),
+            c(arc_end_y),
+        ));
+    }
+
+    // Final point
+    let last = points[points.len() - 1];
+    d.push_str(&format!(" L {} {}", c(last.x), c(last.y)));
+    d
+}
+
+/// Build an SVG path `d` attribute for a cubic Bézier spline route.
+///
+/// The route format is `[start, ctrl1, ctrl2, end, ctrl1, ctrl2, end, ...]`.
+/// Any trailing points that don't form a complete cubic segment are emitted
+/// as straight line segments.
+fn build_bezier_path(route: &[Point]) -> String {
+    let mut path = String::new();
+    path.push_str(&format!("M {} {}", route[0].x, route[0].y));
+
+    let mut i = 1;
+    while i + 2 < route.len() {
+        path.push_str(&format!(
+            " C {} {} {} {} {} {}",
+            route[i].x,
+            route[i].y,
+            route[i + 1].x,
+            route[i + 1].y,
+            route[i + 2].x,
+            route[i + 2].y,
+        ));
+        i += 3;
+    }
+
+    // Remaining points as line segments
+    while i < route.len() {
+        path.push_str(&format!(" L {} {}", route[i].x, route[i].y));
+        i += 1;
+    }
+
+    path
+}
+
 /// Pick the right font color for a node/container label.
 ///
 /// Priority:
@@ -298,30 +394,11 @@ fn render_edges(graph: &D2Graph, theme: &Theme, _options: &RenderOptions, svg: &
                 .unwrap_or_default()
         };
 
-        // Build SVG path
-        let mut path = String::new();
-        path.push_str(&format!("M {} {}", edge.route[0].x, edge.route[0].y));
-
-        // Cubic Bézier segments
-        let mut i = 1;
-        while i + 2 < edge.route.len() {
-            path.push_str(&format!(
-                " C {} {} {} {} {} {}",
-                edge.route[i].x,
-                edge.route[i].y,
-                edge.route[i + 1].x,
-                edge.route[i + 1].y,
-                edge.route[i + 2].x,
-                edge.route[i + 2].y,
-            ));
-            i += 3;
-        }
-
-        // If remaining points, add as line segments
-        while i < edge.route.len() {
-            path.push_str(&format!(" L {} {}", edge.route[i].x, edge.route[i].y));
-            i += 1;
-        }
+        // Build SVG path based on route type
+        let path = match edge.route_type {
+            RouteType::Bezier => build_bezier_path(&edge.route),
+            RouteType::Orthogonal => polyline_with_rounded_corners(&edge.route, BEND_RADIUS),
+        };
 
         svg.push_str(&format!(
             "  <path d=\"{}\" stroke=\"{}\" fill=\"none\" stroke-width=\"{}\"{}{}/>",
@@ -751,5 +828,56 @@ mod tests {
             svg.contains("fill=\"#e0e0e0\""),
             "no fill should use theme default font color, SVG:\n{svg}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // polyline_with_rounded_corners tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_polyline_two_points() {
+        // Straight line, no Q commands
+        let points = vec![Point::new(0.0, 0.0), Point::new(100.0, 0.0)];
+        let path = polyline_with_rounded_corners(&points, 5.0);
+        assert!(path.starts_with("M"));
+        assert!(path.contains("L"));
+        assert!(!path.contains("Q"));
+    }
+
+    #[test]
+    fn test_polyline_three_points_has_curve() {
+        // Right-angle bend should have Q command
+        let points = vec![
+            Point::new(0.0, 0.0),
+            Point::new(50.0, 0.0),
+            Point::new(50.0, 50.0),
+        ];
+        let path = polyline_with_rounded_corners(&points, 5.0);
+        assert!(path.contains("Q"));
+        assert!(path.contains("L"));
+    }
+
+    #[test]
+    fn test_polyline_corner_clamping() {
+        // Very short segments — radius should be clamped
+        let points = vec![
+            Point::new(0.0, 0.0),
+            Point::new(4.0, 0.0), // only 4px long
+            Point::new(4.0, 4.0),
+        ];
+        let path = polyline_with_rounded_corners(&points, 5.0);
+        assert!(path.contains("Q")); // still has curve, just smaller radius
+    }
+
+    #[test]
+    fn test_polyline_empty() {
+        let path = polyline_with_rounded_corners(&[], 5.0);
+        assert!(path.is_empty());
+    }
+
+    #[test]
+    fn test_polyline_single_point() {
+        let path = polyline_with_rounded_corners(&[Point::new(0.0, 0.0)], 5.0);
+        assert!(path.is_empty());
     }
 }

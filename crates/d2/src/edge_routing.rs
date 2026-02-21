@@ -4,10 +4,12 @@
 //! Produces cubic Bézier control points for smooth SVG path rendering.
 //! Handles shape-aware clipping, self-loops, and parallel edges.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+use petgraph::stable_graph::NodeIndex;
 
 use crate::geo::Point;
-use crate::graph::D2Graph;
+use crate::graph::{D2Graph, Direction};
 use crate::shapes::clip_to_shape;
 
 /// Perpendicular offset between parallel edges (pixels).
@@ -237,6 +239,75 @@ pub fn diamond_arrowhead(tip: Point, from: Point, size: f64) -> [Point; 4] {
     [tip, left, back, right]
 }
 
+// ---------------------------------------------------------------------------
+// Hierarchy utilities for edge routing
+// ---------------------------------------------------------------------------
+
+/// Collect all ancestors of `node` (inclusive) up to the root.
+#[allow(dead_code)] // used by orthogonal routing (Stage 2B)
+fn ancestor_chain(graph: &D2Graph, node: NodeIndex) -> HashSet<NodeIndex> {
+    let mut ancestors = HashSet::new();
+    let mut current = node;
+    ancestors.insert(current);
+    while let Some(parent) = graph.graph[current].parent {
+        ancestors.insert(parent);
+        current = parent;
+    }
+    ancestors
+}
+
+/// Find the lowest common ancestor of nodes `a` and `b`.
+#[allow(dead_code)] // used by orthogonal routing (Stage 2B)
+fn find_lca(graph: &D2Graph, a: NodeIndex, b: NodeIndex) -> NodeIndex {
+    let a_ancestors = ancestor_chain(graph, a);
+    let mut current = b;
+    if a_ancestors.contains(&current) {
+        return current;
+    }
+    while let Some(parent) = graph.graph[current].parent {
+        if a_ancestors.contains(&parent) {
+            return parent;
+        }
+        current = parent;
+    }
+    graph.root
+}
+
+/// Walk from `node` upward until we find the direct child of `ancestor`.
+/// If `node == ancestor`, returns `node` (handles container-to-descendant edges).
+#[allow(dead_code)] // used by orthogonal routing (Stage 2B)
+fn child_ancestor_of(graph: &D2Graph, node: NodeIndex, ancestor: NodeIndex) -> NodeIndex {
+    if node == ancestor {
+        return node;
+    }
+    let mut current = node;
+    while let Some(parent) = graph.graph[current].parent {
+        if parent == ancestor {
+            return current;
+        }
+        current = parent;
+    }
+    // Fallback (shouldn't happen in well-formed graph)
+    node
+}
+
+/// Walk from `container` upward through its parent chain and return the
+/// first explicit `direction` override found. If none is set on any
+/// ancestor, fall back to `graph.direction`.
+#[allow(dead_code)] // used by orthogonal routing (Stage 2B)
+fn effective_direction(graph: &D2Graph, container: NodeIndex) -> Direction {
+    let mut current = container;
+    loop {
+        if let Some(dir) = graph.graph[current].direction {
+            return dir;
+        }
+        match graph.graph[current].parent {
+            Some(parent) => current = parent,
+            None => return graph.direction,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,4 +450,92 @@ mod tests {
         assert_eq!(t.y, tip.y);
     }
 
+    // --- hierarchy utility tests ---------------------------------------------
+
+    #[test]
+    fn test_find_lca_root_level() {
+        // x and y live in different top-level containers → LCA is root
+        let graph = layout_ok("a: { x }\nb: { y }\na.x -> b.y");
+        let x = find_node_by_label(&graph, "x");
+        let y = find_node_by_label(&graph, "y");
+        let lca = find_lca(&graph, x, y);
+        assert_eq!(lca, graph.root, "LCA of nodes in separate top-level containers should be root");
+    }
+
+    #[test]
+    fn test_find_lca_siblings() {
+        // a and b are siblings inside g → LCA is g
+        let graph = layout_ok("g: { a; b; a -> b }");
+        let a = find_node_by_label(&graph, "a");
+        let b = find_node_by_label(&graph, "b");
+        let g = find_node_by_label(&graph, "g");
+        let lca = find_lca(&graph, a, b);
+        assert_eq!(lca, g, "LCA of siblings should be their parent container");
+    }
+
+    #[test]
+    fn test_find_lca_container_to_descendant() {
+        // g contains a → LCA of g and a should be g
+        let graph = layout_ok("g: { a }");
+        let g = find_node_by_label(&graph, "g");
+        let a = find_node_by_label(&graph, "a");
+        let lca = find_lca(&graph, g, a);
+        assert_eq!(lca, g, "LCA of container and its child should be the container");
+    }
+
+    #[test]
+    fn test_child_ancestor_of_direct() {
+        // a is a direct child of g
+        let graph = layout_ok("g: { a; b }");
+        let a = find_node_by_label(&graph, "a");
+        let g = find_node_by_label(&graph, "g");
+        let result = child_ancestor_of(&graph, a, g);
+        assert_eq!(result, a, "direct child should return itself");
+    }
+
+    #[test]
+    fn test_child_ancestor_of_nested() {
+        // a is nested: g → inner → a; child_ancestor_of(a, g) should be inner
+        let graph = layout_ok("g: { inner: { a } }");
+        let a = find_node_by_label(&graph, "a");
+        let g = find_node_by_label(&graph, "g");
+        let inner = find_node_by_label(&graph, "inner");
+        let result = child_ancestor_of(&graph, a, g);
+        assert_eq!(result, inner, "should return the immediate child of ancestor on the path to node");
+    }
+
+    #[test]
+    fn test_child_ancestor_of_guard() {
+        // node == ancestor → should return node itself
+        let graph = layout_ok("g: { a }");
+        let g = find_node_by_label(&graph, "g");
+        let result = child_ancestor_of(&graph, g, g);
+        assert_eq!(result, g, "when node == ancestor, should return node");
+    }
+
+    #[test]
+    fn test_effective_direction_inherit() {
+        // g has no direction override → inherits graph-level "right"
+        let graph = layout_ok("direction: right\ng: { a }");
+        let g = find_node_by_label(&graph, "g");
+        let dir = effective_direction(&graph, g);
+        assert_eq!(dir, Direction::Right, "should inherit graph-level direction");
+    }
+
+    #[test]
+    fn test_effective_direction_override() {
+        // g overrides direction to "down"
+        let graph = layout_ok("direction: right\ng: { direction: down; a }");
+        let g = find_node_by_label(&graph, "g");
+        let dir = effective_direction(&graph, g);
+        assert_eq!(dir, Direction::Down, "should use container's own direction override");
+    }
+
+    #[test]
+    fn test_effective_direction_root() {
+        // Asking for effective_direction of root → should return graph.direction
+        let graph = layout_ok("direction: right\na");
+        let dir = effective_direction(&graph, graph.root);
+        assert_eq!(dir, Direction::Right, "root effective direction should be graph.direction");
+    }
 }
