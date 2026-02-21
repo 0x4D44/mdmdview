@@ -1,0 +1,12 @@
+# 033-parallel-labeled-edges.d2
+# Reproduces: multiple labeled edges between same pair of containers (labels should spread, not stack)
+
+A: {
+  x
+}
+B: {
+  y
+}
+A.x -> B.y: first
+A.x -> B.y: second
+A.x -> B.y: third

@@ -1,0 +1,16 @@
+# 031-vertical-edge-through-node.d2
+# Reproduces: edge passing through intermediate node in vertical layout
+
+platform: Platform {
+  frontend: Frontend {
+    app: React App
+    cdn: CDN
+  }
+  backend: Backend {
+    gw: API Gateway
+    svc: Service
+  }
+  frontend.app -> frontend.cdn
+  frontend.cdn -> backend.gw: fetch
+  backend.gw -> backend.svc: route
+}
