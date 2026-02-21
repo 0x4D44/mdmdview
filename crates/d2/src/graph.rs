@@ -89,6 +89,61 @@ impl D2Graph {
     }
 }
 
+impl D2Graph {
+    /// Move a node to (new_x, new_y). If the node is a container,
+    /// shift all descendants by the same delta to preserve relative positions.
+    pub fn reposition_node(&mut self, node: NodeIndex, new_x: f64, new_y: f64) {
+        let (dx, dy) = if let Some(ref mut rect) = self.graph[node].box_ {
+            let dx = new_x - rect.x;
+            let dy = new_y - rect.y;
+            rect.x = new_x;
+            rect.y = new_y;
+            (dx, dy)
+        } else {
+            return;
+        };
+
+        // Skip subtree traversal for sub-pixel moves (floating-point drift)
+        if self.graph[node].is_container && (dx.abs() > 0.01 || dy.abs() > 0.01) {
+            let children = self.graph[node].children.clone();
+            Self::offset_subtree_inner(&mut self.graph, &children, dx, dy);
+        }
+    }
+
+    /// Shift a node and all its descendants by (dx, dy).
+    /// Use when adjusting positions relatively (e.g., component stacking).
+    pub fn offset_node(&mut self, node: NodeIndex, dx: f64, dy: f64) {
+        if let Some(ref mut rect) = self.graph[node].box_ {
+            rect.x += dx;
+            rect.y += dy;
+        }
+        if self.graph[node].is_container {
+            let children = self.graph[node].children.clone();
+            Self::offset_subtree_inner(&mut self.graph, &children, dx, dy);
+        }
+    }
+
+    /// Internal recursive offset (operates on the petgraph store directly
+    /// to avoid borrow conflicts with &mut self).
+    fn offset_subtree_inner(
+        graph: &mut petgraph::stable_graph::StableDiGraph<D2Object, D2EdgeData>,
+        nodes: &[NodeIndex],
+        dx: f64,
+        dy: f64,
+    ) {
+        for &node in nodes {
+            if let Some(ref mut rect) = graph[node].box_ {
+                rect.x += dx;
+                rect.y += dy;
+            }
+            let children = graph[node].children.clone();
+            if !children.is_empty() {
+                Self::offset_subtree_inner(graph, &children, dx, dy);
+            }
+        }
+    }
+}
+
 impl Default for D2Graph {
     fn default() -> Self {
         Self::new()

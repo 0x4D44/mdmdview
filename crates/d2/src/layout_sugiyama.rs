@@ -117,12 +117,10 @@ pub fn layout_children(
             // Shift this component so it starts at cross_offset
             let shift = cross_offset - min_cross;
             for &node in component {
-                if let Some(ref mut rect) = graph.graph[node].box_ {
-                    if is_horizontal {
-                        rect.y += shift;
-                    } else {
-                        rect.x += shift;
-                    }
+                if is_horizontal {
+                    graph.offset_node(node, 0.0, shift);
+                } else {
+                    graph.offset_node(node, shift, 0.0);
                 }
             }
 
@@ -219,18 +217,15 @@ fn arrange_in_line(graph: &mut D2Graph, children: &[NodeIndex], direction: Direc
     let mut offset = 0.0;
 
     for &child in children {
-        if let Some(ref mut rect) = graph.graph[child].box_ {
-            match direction {
-                Direction::Down | Direction::Up => {
-                    rect.x = 0.0;
-                    rect.y = offset;
-                    offset += rect.height + NODE_SPACING_V;
-                }
-                Direction::Right | Direction::Left => {
-                    rect.x = offset;
-                    rect.y = 0.0;
-                    offset += rect.width + NODE_SPACING_H;
-                }
+        let Some(rect) = graph.graph[child].box_ else { continue; };
+        match direction {
+            Direction::Down | Direction::Up => {
+                graph.reposition_node(child, 0.0, offset);
+                offset += rect.height + NODE_SPACING_V;
+            }
+            Direction::Right | Direction::Left => {
+                graph.reposition_node(child, offset, 0.0);
+                offset += rect.width + NODE_SPACING_H;
             }
         }
     }
@@ -758,28 +753,31 @@ fn assign_coordinates(
         let mut cross_offset = -total_cross / 2.0;
 
         for &node in rank_nodes {
-            if let Some(ref mut rect) = graph.graph[node].box_ {
-                match direction {
-                    Direction::Down => {
-                        rect.x = cross_offset;
-                        rect.y = rank_offsets[rank_idx];
-                        cross_offset += rect.width + NODE_SPACING_H;
-                    }
-                    Direction::Up => {
-                        rect.x = cross_offset;
-                        rect.y = -(rank_offsets[rank_idx] + rect.height);
-                        cross_offset += rect.width + NODE_SPACING_H;
-                    }
-                    Direction::Right => {
-                        rect.x = rank_offsets[rank_idx];
-                        rect.y = cross_offset;
-                        cross_offset += rect.height + NODE_SPACING_H;
-                    }
-                    Direction::Left => {
-                        rect.x = -(rank_offsets[rank_idx] + rect.width);
-                        rect.y = cross_offset;
-                        cross_offset += rect.height + NODE_SPACING_H;
-                    }
+            let Some(rect) = graph.graph[node].box_ else { continue; };
+            match direction {
+                Direction::Down => {
+                    graph.reposition_node(node, cross_offset, rank_offsets[rank_idx]);
+                    cross_offset += rect.width + NODE_SPACING_H;
+                }
+                Direction::Up => {
+                    graph.reposition_node(
+                        node,
+                        cross_offset,
+                        -(rank_offsets[rank_idx] + rect.height),
+                    );
+                    cross_offset += rect.width + NODE_SPACING_H;
+                }
+                Direction::Right => {
+                    graph.reposition_node(node, rank_offsets[rank_idx], cross_offset);
+                    cross_offset += rect.height + NODE_SPACING_H;
+                }
+                Direction::Left => {
+                    graph.reposition_node(
+                        node,
+                        -(rank_offsets[rank_idx] + rect.width),
+                        cross_offset,
+                    );
+                    cross_offset += rect.height + NODE_SPACING_H;
                 }
             }
         }
