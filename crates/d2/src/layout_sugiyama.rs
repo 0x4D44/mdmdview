@@ -523,6 +523,8 @@ mod tests {
                 route_type: crate::graph::RouteType::Bezier,
                 route: Vec::new(),
                 label_position: None,
+                label_width: 0.0,
+                label_height: 0.0,
             },
         );
         graph.edges.push(eidx);

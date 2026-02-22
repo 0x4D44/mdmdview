@@ -300,6 +300,8 @@ impl CompileContext {
                 route_type: RouteType::Bezier,
                 route: Vec::new(),
                 label_position: None,
+                label_width: 0.0,
+                label_height: 0.0,
             };
 
             let edge_idx = self.graph.graph.add_edge(src_node, dst_node, edge_data);

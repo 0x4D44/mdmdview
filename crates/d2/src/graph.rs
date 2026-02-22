@@ -217,6 +217,10 @@ pub struct D2EdgeData {
     pub route: Vec<Point>,
     /// Position for the edge label.
     pub label_position: Option<Point>,
+    /// Estimated label width in pixels (0.0 if unlabeled). Set during edge routing.
+    pub label_width: f64,
+    /// Estimated label height in pixels (0.0 if unlabeled). Set during edge routing.
+    pub label_height: f64,
 }
 
 // ---------------------------------------------------------------------------
