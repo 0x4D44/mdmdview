@@ -8,10 +8,10 @@
 
 use petgraph::stable_graph::NodeIndex;
 
+use crate::edge_routing;
 use crate::geo::Rect;
 use crate::graph::{D2Graph, Direction};
 use crate::layout_sugiyama;
-use crate::edge_routing;
 use crate::text;
 use crate::RenderOptions;
 
@@ -99,9 +99,7 @@ fn layout_recursive(
     }
 
     // Determine effective direction for this container
-    let direction = graph.graph[container]
-        .direction
-        .unwrap_or(parent_direction);
+    let direction = graph.graph[container].direction.unwrap_or(parent_direction);
 
     // First, recursively lay out any child containers
     for &child in &children {
@@ -206,9 +204,7 @@ fn compute_root_bbox(graph: &mut D2Graph) {
     }
 
     if min_x != f64::INFINITY {
-        graph.graph[graph.root].box_ = Some(Rect::new(
-            min_x, min_y, max_x - min_x, max_y - min_y,
-        ));
+        graph.graph[graph.root].box_ = Some(Rect::new(min_x, min_y, max_x - min_x, max_y - min_y));
     }
 }
 
@@ -480,8 +476,12 @@ mod tests {
     fn test_container_children_inside_parent() {
         let graph = layout_ok("a: { x; y }\nb: { p; q }\na.x -> b.p");
 
-        let a = find_by_label(&graph, "a").box_.expect("a should have a box");
-        let b = find_by_label(&graph, "b").box_.expect("b should have a box");
+        let a = find_by_label(&graph, "a")
+            .box_
+            .expect("a should have a box");
+        let b = find_by_label(&graph, "b")
+            .box_
+            .expect("b should have a box");
 
         for (leaf_label, parent_label, parent_rect) in
             [("x", "a", a), ("y", "a", a), ("p", "b", b), ("q", "b", b)]
@@ -499,8 +499,12 @@ mod tests {
     fn test_container_children_inside_parent_direction_up() {
         let graph = layout_ok("direction: up\na: { x; y }\nb: { p; q }\na.x -> b.p");
 
-        let a = find_by_label(&graph, "a").box_.expect("a should have a box");
-        let b = find_by_label(&graph, "b").box_.expect("b should have a box");
+        let a = find_by_label(&graph, "a")
+            .box_
+            .expect("a should have a box");
+        let b = find_by_label(&graph, "b")
+            .box_
+            .expect("b should have a box");
 
         for (leaf_label, parent_label, parent_rect) in
             [("x", "a", a), ("y", "a", a), ("p", "b", b), ("q", "b", b)]
@@ -518,8 +522,12 @@ mod tests {
     fn test_container_children_inside_parent_direction_left() {
         let graph = layout_ok("direction: left\na: { x; y }\nb: { p; q }\na.x -> b.p");
 
-        let a = find_by_label(&graph, "a").box_.expect("a should have a box");
-        let b = find_by_label(&graph, "b").box_.expect("b should have a box");
+        let a = find_by_label(&graph, "a")
+            .box_
+            .expect("a should have a box");
+        let b = find_by_label(&graph, "b")
+            .box_
+            .expect("b should have a box");
 
         for (leaf_label, parent_label, parent_rect) in
             [("x", "a", a), ("y", "a", a), ("p", "b", b), ("q", "b", b)]

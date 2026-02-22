@@ -1,6 +1,6 @@
-use crate::ThemeColors;
 #[cfg(any(test, feature = "mermaid-quickjs"))]
 use crate::lru_cache::{hash_str, LruCache};
+use crate::ThemeColors;
 #[cfg(feature = "mermaid-quickjs")]
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use egui::{Color32, RichText, Stroke};
@@ -1423,7 +1423,6 @@ impl MermaidRenderer {
         };
         Some([r, g, b, a])
     }
-
 }
 
 #[cfg(feature = "mermaid-quickjs")]
@@ -6314,44 +6313,19 @@ mod tests {
         let viewport_height = 900;
 
         let flow_svg = worker
-            .render_svg(
-                hash_str(flow),
-                flow,
-                viewport_width,
-                viewport_height,
-            )
+            .render_svg(hash_str(flow), flow, viewport_width, viewport_height)
             .expect("flowchart render");
         let seq_svg = worker
-            .render_svg(
-                hash_str(seq),
-                seq,
-                viewport_width,
-                viewport_height,
-            )
+            .render_svg(hash_str(seq), seq, viewport_width, viewport_height)
             .expect("sequence render");
         let class_svg = worker
-            .render_svg(
-                hash_str(class),
-                class,
-                viewport_width,
-                viewport_height,
-            )
+            .render_svg(hash_str(class), class, viewport_width, viewport_height)
             .expect("class render");
         let er_svg = worker
-            .render_svg(
-                hash_str(er),
-                er,
-                viewport_width,
-                viewport_height,
-            )
+            .render_svg(hash_str(er), er, viewport_width, viewport_height)
             .expect("er render");
         let gantt_svg = worker
-            .render_svg(
-                hash_str(gantt),
-                gantt,
-                viewport_width,
-                viewport_height,
-            )
+            .render_svg(hash_str(gantt), gantt, viewport_width, viewport_height)
             .expect("gantt render");
 
         assert!(flow_svg.contains("<svg"));
@@ -6385,12 +6359,7 @@ mod tests {
         let viewport_height = 900;
 
         let svg = worker
-            .render_svg(
-                hash_str(diagram),
-                diagram,
-                viewport_width,
-                viewport_height,
-            )
+            .render_svg(hash_str(diagram), diagram, viewport_width, viewport_height)
             .expect("diagram with html tags render");
 
         assert!(svg.contains("<svg"));
@@ -6421,12 +6390,7 @@ mod tests {
         let viewport_height = 900;
 
         let svg = worker
-            .render_svg(
-                hash_str(diagram),
-                diagram,
-                viewport_width,
-                viewport_height,
-            )
+            .render_svg(hash_str(diagram), diagram, viewport_width, viewport_height)
             .expect("subgraph diagram render");
 
         assert!(svg.contains("<svg"));
@@ -6450,12 +6414,7 @@ mod tests {
         let viewport_height = 900;
 
         let svg = worker
-            .render_svg(
-                hash_str(diagram),
-                diagram,
-                viewport_width,
-                viewport_height,
-            )
+            .render_svg(hash_str(diagram), diagram, viewport_width, viewport_height)
             .expect("ampersand in labels render");
 
         assert!(svg.contains("<svg"));

@@ -40,6 +40,11 @@ cargo test -- --nocapture
 # Pre-release validation (mirrors GitHub Actions release pipeline)
 .\scripts\prerelease.ps1
 
+# Full test runner (quality + tests + Mermaid visual + coverage → HTML report)
+cargo run --release --bin full_test
+cargo run --release --bin full_test -- --skip-coverage
+cargo run --release --bin full_test -- --quick --skip-mermaid
+
 # Code formatting and linting
 cargo fmt
 cargo clippy

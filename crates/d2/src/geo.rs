@@ -180,6 +180,10 @@ mod tests {
         // e is 5px right of a and 10px below a
         // sep_x = 5.0, sep_y = 10.0 → min_separation = 5.0
         let sep = a.min_separation(&e);
-        assert!((sep - 5.0).abs() < 1e-10, "both-axes-separated should return min gap, got {}", sep);
+        assert!(
+            (sep - 5.0).abs() < 1e-10,
+            "both-axes-separated should return min gap, got {}",
+            sep
+        );
     }
 }

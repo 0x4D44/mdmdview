@@ -148,14 +148,21 @@ pub fn render(graph: &D2Graph, options: &RenderOptions) -> String {
     // SVG header
     svg.push_str(&format!(
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{} {} {} {}\">\n",
-        c(vx), c(vy), c(vw), c(vh)
+        c(vx),
+        c(vy),
+        c(vw),
+        c(vh)
     ));
 
     // Layer 1: Background
     let bg = theme.background.to_svg_string();
     svg.push_str(&format!(
         "  <rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\"/>\n",
-        c(vx), c(vy), c(vw), c(vh), bg
+        c(vx),
+        c(vy),
+        c(vw),
+        c(vh),
+        bg
     ));
 
     // Layer 2: Container fills (outermost first via depth-first)
@@ -185,18 +192,24 @@ fn compute_viewbox(graph: &D2Graph) -> (f64, f64, f64, f64) {
     // Include all node bounding boxes
     for &idx in &graph.objects {
         if let Some(rect) = &graph.graph[idx].box_ {
-            let extra = if graph.graph[idx].style.shadow { 3.0 } else { 0.0 }
-                + if graph.graph[idx].style.multiple {
-                    8.0
-                } else {
-                    0.0
-                }
-                + if graph.graph[idx].style.three_d {
-                    6.0
-                } else {
-                    0.0
-                };
-            let three_d_top = if graph.graph[idx].style.three_d { 6.0 } else { 0.0 };
+            let extra = if graph.graph[idx].style.shadow {
+                3.0
+            } else {
+                0.0
+            } + if graph.graph[idx].style.multiple {
+                8.0
+            } else {
+                0.0
+            } + if graph.graph[idx].style.three_d {
+                6.0
+            } else {
+                0.0
+            };
+            let three_d_top = if graph.graph[idx].style.three_d {
+                6.0
+            } else {
+                0.0
+            };
             min_x = min_x.min(rect.x);
             min_y = min_y.min(rect.y - three_d_top);
             max_x = max_x.max(rect.x + rect.width + extra);
@@ -268,8 +281,17 @@ fn render_container_fills(
                 svg.push_str(&format!(
                     "  <rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\" \
                      fill=\"{}\" stroke=\"{}\" stroke-width=\"{}\"{}{}/><!-- container: {} -->\n",
-                    rect.x, rect.y, rect.width, rect.height, rx, fill, stroke, sw,
-                    opacity_attr, dash_attr, obj.id,
+                    rect.x,
+                    rect.y,
+                    rect.width,
+                    rect.height,
+                    rx,
+                    fill,
+                    stroke,
+                    sw,
+                    opacity_attr,
+                    dash_attr,
+                    obj.id,
                 ));
             }
         }
@@ -304,11 +326,7 @@ fn render_shapes(graph: &D2Graph, theme: &Theme, _options: &RenderOptions, svg: 
             None => continue,
         };
 
-        let fill = obj
-            .style
-            .fill
-            .unwrap_or(theme.node_fill)
-            .to_svg_string();
+        let fill = obj.style.fill.unwrap_or(theme.node_fill).to_svg_string();
         let stroke = obj
             .style
             .stroke
@@ -408,7 +426,14 @@ fn render_edges(graph: &D2Graph, theme: &Theme, _options: &RenderOptions, svg: &
 
         // Source arrowhead
         if edge.src_arrow != ArrowheadType::None && edge.route.len() >= 2 {
-            render_arrowhead(svg, &edge.src_arrow, edge.route[0], edge.route[1], &stroke, sw);
+            render_arrowhead(
+                svg,
+                &edge.src_arrow,
+                edge.route[0],
+                edge.route[1],
+                &stroke,
+                sw,
+            );
         }
 
         // Destination arrowhead
@@ -811,7 +836,8 @@ mod tests {
     #[test]
     fn test_explicit_font_color_overrides_auto_contrast() {
         // When font_color is explicitly set, it should be used regardless of fill.
-        let graph = layout_ok("a: Hello {\n  style.fill: \"#d4edda\"\n  style.font-color: \"#ff0000\"\n}");
+        let graph =
+            layout_ok("a: Hello {\n  style.fill: \"#d4edda\"\n  style.font-color: \"#ff0000\"\n}");
         let mut options = RenderOptions::default();
         options.dark_mode = true;
         let svg = render(&graph, &options);

@@ -1,8 +1,8 @@
+#[cfg(feature = "d2")]
+use crate::d2_renderer;
 use crate::image_decode;
 use crate::lru_cache::hash_str;
 use crate::mermaid_renderer::MermaidRenderer;
-#[cfg(feature = "d2")]
-use crate::d2_renderer;
 #[cfg(feature = "pikchr")]
 use crate::pikchr_renderer;
 use crate::table_support::{
@@ -12803,10 +12803,7 @@ contexts:
         with_test_ui(|_, ui| {
             // A valid data URI should now decode and return a texture
             let loaded = renderer.get_or_load_image_texture(ui, &valid_data_uri);
-            assert!(
-                loaded.is_some(),
-                "valid data URI should produce a texture"
-            );
+            assert!(loaded.is_some(), "valid data URI should produce a texture");
             let (_, w, h) = loaded.unwrap();
             assert_eq!((w, h), (1, 1), "expected 1x1 pixel image");
 
@@ -13490,10 +13487,7 @@ contexts:
             assert!(loaded.is_none(), "garbage image bytes should return None");
             // Failure should be cached under the hash key
             assert!(
-                renderer
-                    .image_failures
-                    .borrow()
-                    .contains_key(&expected_key),
+                renderer.image_failures.borrow().contains_key(&expected_key),
                 "failure should be cached under the hash key"
             );
         });
@@ -13567,10 +13561,7 @@ contexts:
     fn test_placeholder_label_data_uri_truncated() {
         let renderer = MarkdownRenderer::new();
         // Use a data URI with invalid image bytes so the placeholder path is taken
-        let long_data_uri = format!(
-            "data:image/png;base64,{}",
-            "A".repeat(1000)
-        );
+        let long_data_uri = format!("data:image/png;base64,{}", "A".repeat(1000));
         let span = InlineSpan::Image {
             src: long_data_uri.clone(),
             alt: "".to_string(),
@@ -13579,7 +13570,10 @@ contexts:
         with_test_ui(|_, ui| {
             // Ensure the data URI fails to load (garbage bytes)
             let loaded = renderer.get_or_load_image_texture(ui, &long_data_uri);
-            assert!(loaded.is_none(), "garbage data URI should not produce a texture");
+            assert!(
+                loaded.is_none(),
+                "garbage data URI should not produce a texture"
+            );
             // Render the span — this exercises the placeholder path
             // The placeholder should show "Embedded image (data URI)" instead of the raw base64
             renderer.render_inline_span(ui, &span, None, None);
@@ -13639,7 +13633,10 @@ contexts:
     fn test_data_uri_cache_key_different_uris_differ() {
         let key1 = data_uri_cache_key("data:image/png;base64,AAAA");
         let key2 = data_uri_cache_key("data:image/png;base64,BBBB");
-        assert_ne!(key1, key2, "different URIs must produce different cache keys");
+        assert_ne!(
+            key1, key2,
+            "different URIs must produce different cache keys"
+        );
     }
 
     #[test]
@@ -13654,10 +13651,7 @@ contexts:
     #[test]
     fn test_data_uri_cache_key_fixed_length() {
         let short_uri = "data:image/png;base64,AA==";
-        let long_uri = format!(
-            "data:image/png;base64,{}",
-            "A".repeat(1_000_000)
-        );
+        let long_uri = format!("data:image/png;base64,{}", "A".repeat(1_000_000));
         let short_key = data_uri_cache_key(short_uri);
         let long_key = data_uri_cache_key(&long_uri);
         assert_eq!(
@@ -13668,7 +13662,12 @@ contexts:
             long_key.len()
         );
         // "data-uri:" (9 chars) + 16 hex digits = 25 chars
-        assert_eq!(short_key.len(), 25, "expected 25-char cache key, got {}", short_key.len());
+        assert_eq!(
+            short_key.len(),
+            25,
+            "expected 25-char cache key, got {}",
+            short_key.len()
+        );
     }
 
     #[cfg(feature = "pikchr")]
@@ -13692,7 +13691,10 @@ contexts:
         let elements = renderer.parse("```pikchr\nbox \"Hello\"\n```").unwrap();
         match &elements[0] {
             MarkdownElement::CodeBlock { highlighted, .. } => {
-                assert!(highlighted.is_none(), "Pikchr blocks should skip syntax highlighting");
+                assert!(
+                    highlighted.is_none(),
+                    "Pikchr blocks should skip syntax highlighting"
+                );
             }
             _ => panic!("Expected CodeBlock"),
         }
@@ -13719,7 +13721,10 @@ contexts:
         let elements = renderer.parse("```d2\na -> b\n```").unwrap();
         match &elements[0] {
             MarkdownElement::CodeBlock { highlighted, .. } => {
-                assert!(highlighted.is_none(), "D2 blocks should skip syntax highlighting");
+                assert!(
+                    highlighted.is_none(),
+                    "D2 blocks should skip syntax highlighting"
+                );
             }
             _ => panic!("Expected CodeBlock"),
         }

@@ -14,13 +14,13 @@ pub mod table_support;
 pub mod theme;
 pub mod window_state;
 
+#[cfg(feature = "d2")]
+pub(crate) mod d2_renderer;
 pub(crate) mod image_decode;
 pub(crate) mod lru_cache;
 pub(crate) mod mermaid_renderer;
 #[cfg(feature = "pikchr")]
 pub(crate) mod pikchr_renderer;
-#[cfg(feature = "d2")]
-pub(crate) mod d2_renderer;
 
 // Automatically lower the test binary's process priority on Windows.
 // The full test suite (~986 tests, ~8 minutes) saturates all CPU cores,

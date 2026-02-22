@@ -15,7 +15,7 @@
 //! for visual debugging. A companion helper always dumps *all* SVGs there so
 //! the Python comparison tooling can diff them against reference images.
 
-use mdmdview_d2::{RenderOptions, render_d2_to_svg};
+use mdmdview_d2::{render_d2_to_svg, RenderOptions};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -117,10 +117,10 @@ fn liang_barsky(p0: Pt, p1: Pt, aabb: &AABB) -> bool {
     let mut t_max = 1.0_f64;
 
     let edges = [
-        (-dx, -(aabb.x - p0.x)),           // left
-        (dx, aabb.right() - p0.x),          // right
-        (-dy, -(aabb.y - p0.y)),            // top
-        (dy, aabb.bottom() - p0.y),         // bottom
+        (-dx, -(aabb.x - p0.x)),    // left
+        (dx, aabb.right() - p0.x),  // right
+        (-dy, -(aabb.y - p0.y)),    // top
+        (dy, aabb.bottom() - p0.y), // bottom
     ];
 
     for &(p, q) in &edges {
@@ -488,10 +488,7 @@ fn parse_path_d(d: &str) -> (Vec<Seg>, Vec<Pt>) {
                     let end = Pt { x: ex, y: ey };
 
                     // Approximate with line segment for intersection test
-                    segments.push(Seg {
-                        a: current,
-                        b: end,
-                    });
+                    segments.push(Seg { a: current, b: end });
 
                     // Sample along the quadratic curve
                     let cp = Pt { x: cx, y: cy };
@@ -525,10 +522,7 @@ fn parse_path_d(d: &str) -> (Vec<Seg>, Vec<Pt>) {
                     let ey = tokens[i + 6].parse::<f64>().unwrap_or(0.0);
                     let end = Pt { x: ex, y: ey };
 
-                    segments.push(Seg {
-                        a: current,
-                        b: end,
-                    });
+                    segments.push(Seg { a: current, b: end });
 
                     // Sample along the cubic curve
                     let cp1 = Pt { x: c1x, y: c1y };
@@ -762,8 +756,7 @@ fn check_invariants(
                     w: nr.w + 2.0 * endpoint_expand,
                     h: nr.h + 2.0 * endpoint_expand,
                 };
-                point_in_aabb(path.start_pt, &expanded)
-                    || point_in_aabb(path.end_pt, &expanded)
+                point_in_aabb(path.start_pt, &expanded) || point_in_aabb(path.end_pt, &expanded)
             })
             .map(|(ni, _)| ni)
             .collect();
@@ -798,7 +791,9 @@ fn check_invariants(
                 // Check if this is a container-child relationship
                 let is_nested = a.contains(b) || b.contains(a);
                 // Also check if both are inside the same container
-                let both_in_container = container_rects.iter().any(|c| c.contains(a) && c.contains(b));
+                let both_in_container = container_rects
+                    .iter()
+                    .any(|c| c.contains(a) && c.contains(b));
                 // The overlap is only a violation if they're genuinely colliding siblings
                 if !is_nested {
                     violations.push(Violation {
@@ -938,11 +933,7 @@ fn run_single_fixture(path: &Path) -> (String, Vec<Violation>, Option<String>) {
     let source = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
-            return (
-                name,
-                vec![],
-                Some(format!("failed to read fixture: {e}")),
-            );
+            return (name, vec![], Some(format!("failed to read fixture: {e}")));
         }
     };
 
@@ -950,11 +941,7 @@ fn run_single_fixture(path: &Path) -> (String, Vec<Violation>, Option<String>) {
     let result = match render_d2_to_svg(&source, &options) {
         Ok(r) => r,
         Err(e) => {
-            return (
-                name,
-                vec![],
-                Some(format!("render_d2_to_svg failed: {e}")),
-            );
+            return (name, vec![], Some(format!("render_d2_to_svg failed: {e}")));
         }
     };
 
@@ -1101,18 +1088,43 @@ mod helper_tests {
 
     #[test]
     fn test_aabb_overlaps() {
-        let a = AABB { x: 0.0, y: 0.0, w: 10.0, h: 10.0 };
-        let b = AABB { x: 5.0, y: 5.0, w: 10.0, h: 10.0 };
+        let a = AABB {
+            x: 0.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+        };
+        let b = AABB {
+            x: 5.0,
+            y: 5.0,
+            w: 10.0,
+            h: 10.0,
+        };
         assert!(a.overlaps(&b));
 
-        let c = AABB { x: 20.0, y: 20.0, w: 10.0, h: 10.0 };
+        let c = AABB {
+            x: 20.0,
+            y: 20.0,
+            w: 10.0,
+            h: 10.0,
+        };
         assert!(!a.overlaps(&c));
     }
 
     #[test]
     fn test_aabb_contains() {
-        let outer = AABB { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
-        let inner = AABB { x: 10.0, y: 10.0, w: 20.0, h: 20.0 };
+        let outer = AABB {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+        };
+        let inner = AABB {
+            x: 10.0,
+            y: 10.0,
+            w: 20.0,
+            h: 20.0,
+        };
         assert!(outer.contains(&inner));
         assert!(!inner.contains(&outer));
     }
@@ -1121,7 +1133,12 @@ mod helper_tests {
     fn test_liang_barsky_hit() {
         let p0 = Pt { x: 0.0, y: 5.0 };
         let p1 = Pt { x: 20.0, y: 5.0 };
-        let aabb = AABB { x: 5.0, y: 0.0, w: 10.0, h: 10.0 };
+        let aabb = AABB {
+            x: 5.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+        };
         assert!(liang_barsky(p0, p1, &aabb));
     }
 
@@ -1129,7 +1146,12 @@ mod helper_tests {
     fn test_liang_barsky_miss() {
         let p0 = Pt { x: 0.0, y: 15.0 };
         let p1 = Pt { x: 20.0, y: 15.0 };
-        let aabb = AABB { x: 5.0, y: 0.0, w: 10.0, h: 10.0 };
+        let aabb = AABB {
+            x: 5.0,
+            y: 0.0,
+            w: 10.0,
+            h: 10.0,
+        };
         assert!(!liang_barsky(p0, p1, &aabb));
     }
 
@@ -1148,7 +1170,10 @@ mod helper_tests {
     fn test_tokenize_path() {
         let d = "M 10 20 L 30 40 Q 50 60 70 80";
         let tokens = tokenize_path(d);
-        assert_eq!(tokens, vec!["M", "10", "20", "L", "30", "40", "Q", "50", "60", "70", "80"]);
+        assert_eq!(
+            tokens,
+            vec!["M", "10", "20", "L", "30", "40", "Q", "50", "60", "70", "80"]
+        );
     }
 
     #[test]

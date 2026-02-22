@@ -32,7 +32,6 @@ pub use graph::{
 };
 pub use theme::Theme;
 
-
 // ---------------------------------------------------------------------------
 // Public API types
 // ---------------------------------------------------------------------------
@@ -159,7 +158,10 @@ mod tests {
         // Two shapes (rects by default) + at least one path for the edge
         assert!(svg.contains("a"), "expected label 'a'");
         assert!(svg.contains("b"), "expected label 'b'");
-        assert!(svg.contains("<path"), "expected a <path> element for the edge");
+        assert!(
+            svg.contains("<path"),
+            "expected a <path> element for the edge"
+        );
     }
 
     // 3. Container -----------------------------------------------------------
@@ -282,10 +284,7 @@ network.server2 -> database: query\n\
         let svg = render_ok(source);
         // All 8 shapes should be present
         for label in &["a", "b", "c", "d", "e", "f", "g", "h"] {
-            assert!(
-                svg.contains(label),
-                "expected label '{label}' in SVG"
-            );
+            assert!(svg.contains(label), "expected label '{label}' in SVG");
         }
         // At least 4 edges
         let path_count = svg.matches("<path").count();
@@ -310,10 +309,25 @@ network.server2 -> database: query\n\
     #[test]
     fn test_e2e_all_shapes() {
         let shapes = [
-            "rectangle", "square", "circle", "oval", "diamond", "hexagon",
-            "cylinder", "cloud", "person", "package", "queue", "page",
-            "parallelogram", "document", "step", "callout", "stored_data",
-            "text", "code",
+            "rectangle",
+            "square",
+            "circle",
+            "oval",
+            "diamond",
+            "hexagon",
+            "cylinder",
+            "cloud",
+            "person",
+            "package",
+            "queue",
+            "page",
+            "parallelogram",
+            "document",
+            "step",
+            "callout",
+            "stored_data",
+            "text",
+            "code",
         ];
         for shape_name in &shapes {
             let source = format!("x.shape: {shape_name}");
