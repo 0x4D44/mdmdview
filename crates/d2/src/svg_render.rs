@@ -12,7 +12,7 @@
 
 use petgraph::stable_graph::NodeIndex;
 
-use crate::edge_routing::{arrowhead_polygon, diamond_arrowhead};
+use crate::edge_routing::{arrowhead_polygon, diamond_arrowhead, LABEL_HALO_PADDING};
 use crate::geo::Point;
 use crate::graph::*;
 use crate::shapes::{multiple_svg, shadow_svg, shape_svg, three_d_svg};
@@ -619,11 +619,18 @@ fn render_labels(graph: &D2Graph, theme: &Theme, options: &RenderOptions, svg: &
             .to_svg_string();
         let font_size = edge.style.font_size.unwrap_or(theme.font_size);
 
-        // Estimate label dimensions for halo
-        let char_width = font_size * 0.55;
-        let label_width = label.chars().count() as f64 * char_width;
-        let label_height = font_size * 1.2;
-        let pad = 3.0;
+        // Use stored label dimensions (with fallback to estimation)
+        let label_width = if edge.label_width > 0.0 {
+            edge.label_width
+        } else {
+            label.chars().count() as f64 * font_size * 0.55 // fallback
+        };
+        let label_height = if edge.label_height > 0.0 {
+            edge.label_height
+        } else {
+            font_size * 1.2 // fallback
+        };
+        let pad = LABEL_HALO_PADDING;
 
         // Background halo
         svg.push_str(&format!(
