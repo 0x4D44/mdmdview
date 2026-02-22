@@ -33,8 +33,16 @@ pub fn shape_svg(
             let mut svg = format!(
                 "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\" \
                  fill=\"{}\" stroke=\"{}\" stroke-width=\"{}\"{}{}/>",
-                rect.x, rect.y, rect.width, rect.height, rx, fill, stroke, stroke_width,
-                opacity_attr, dash_attr,
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                rx,
+                fill,
+                stroke,
+                stroke_width,
+                opacity_attr,
+                dash_attr,
             );
             if double_border {
                 let inset = stroke_width * 2.0;
@@ -199,24 +207,38 @@ pub fn shape_svg(
                 bx = bx,
                 by = by,
                 // Bottom-right bump
-                c1x = x + w * 0.15, c1y = y + h * 1.05,
-                c2x = x + w * 0.85, c2y = y + h * 1.05,
-                p1x = x + w, p1y = y + h * 0.65,
+                c1x = x + w * 0.15,
+                c1y = y + h * 1.05,
+                c2x = x + w * 0.85,
+                c2y = y + h * 1.05,
+                p1x = x + w,
+                p1y = y + h * 0.65,
                 // Right bump up
-                c3x = x + w * 1.05, c3y = y + h * 0.35,
-                c4x = x + w * 0.9,  c4y = y + h * 0.1,
-                p2x = x + w * 0.7,  p2y = y + h * 0.15,
+                c3x = x + w * 1.05,
+                c3y = y + h * 0.35,
+                c4x = x + w * 0.9,
+                c4y = y + h * 0.1,
+                p2x = x + w * 0.7,
+                p2y = y + h * 0.15,
                 // Top bump
-                c5x = x + w * 0.6,  c5y = y - h * 0.05,
-                c6x = x + w * 0.4,  c6y = y - h * 0.05,
-                p3x = x + w * 0.3,  p3y = y + h * 0.15,
+                c5x = x + w * 0.6,
+                c5y = y - h * 0.05,
+                c6x = x + w * 0.4,
+                c6y = y - h * 0.05,
+                p3x = x + w * 0.3,
+                p3y = y + h * 0.15,
                 // Left bump down
-                c7x = x + w * 0.1,  c7y = y + h * 0.1,
-                c8x = x - w * 0.05, c8y = y + h * 0.35,
-                p4x = x,            p4y = y + h * 0.65,
+                c7x = x + w * 0.1,
+                c7y = y + h * 0.1,
+                c8x = x - w * 0.05,
+                c8y = y + h * 0.35,
+                p4x = x,
+                p4y = y + h * 0.65,
                 // Back to start
-                c9x  = x - w * 0.05, c9y  = y + h * 0.85,
-                c10x = x - w * 0.05, c10y = y + h * 0.95,
+                c9x = x - w * 0.05,
+                c9y = y + h * 0.85,
+                c10x = x - w * 0.05,
+                c10y = y + h * 0.95,
                 fill = fill,
                 stroke = stroke,
                 sw = stroke_width,
@@ -310,8 +332,16 @@ pub fn shape_svg(
             format!(
                 "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\" \
                  fill=\"{}\" stroke=\"{}\" stroke-width=\"{}\"{}{}/>",
-                rect.x, rect.y, rect.width, rect.height, rx, fill, stroke, stroke_width,
-                opacity_attr, dash_attr,
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                rx,
+                fill,
+                stroke,
+                stroke_width,
+                opacity_attr,
+                dash_attr,
             )
         }
     }
@@ -356,7 +386,14 @@ pub fn clip_to_rect(rect: &Rect, from: Point, toward: Point) -> Point {
         let y = cy + ddy * t;
         if y >= rect.y && y <= rect.y + rect.height && t < min_t && t > 0.0 {
             min_t = t;
-            result = Point::new(if ddx > 0.0 { rect.x + rect.width } else { rect.x }, y);
+            result = Point::new(
+                if ddx > 0.0 {
+                    rect.x + rect.width
+                } else {
+                    rect.x
+                },
+                y,
+            );
         }
     }
 
@@ -437,12 +474,12 @@ fn clip_to_hexagon(rect: &Rect, _from: Point, toward: Point) -> Point {
 
     // Hexagon vertices (matching the SVG generator)
     let vertices = [
-        Point::new(rect.x + inset, rect.y),                   // top-left
-        Point::new(rect.x + rect.width - inset, rect.y),      // top-right
-        Point::new(rect.x + rect.width, cy),                  // right
+        Point::new(rect.x + inset, rect.y),              // top-left
+        Point::new(rect.x + rect.width - inset, rect.y), // top-right
+        Point::new(rect.x + rect.width, cy),             // right
         Point::new(rect.x + rect.width - inset, rect.y + rect.height), // bottom-right
-        Point::new(rect.x + inset, rect.y + rect.height),     // bottom-left
-        Point::new(rect.x, cy),                                // left
+        Point::new(rect.x + inset, rect.y + rect.height), // bottom-left
+        Point::new(rect.x, cy),                          // left
     ];
 
     let dx = toward.x - cx;
@@ -485,12 +522,7 @@ fn clip_to_hexagon(rect: &Rect, _from: Point, toward: Point) -> Point {
 }
 
 /// Generate SVG for shadow effect (offset duplicate at 30% opacity).
-pub fn shadow_svg(
-    shape: ShapeType,
-    rect: &Rect,
-    fill: &str,
-    stroke_width: f64,
-) -> String {
+pub fn shadow_svg(shape: ShapeType, rect: &Rect, fill: &str, stroke_width: f64) -> String {
     let shadow_rect = Rect::new(rect.x + 3.0, rect.y + 3.0, rect.width, rect.height);
     shape_svg(
         shape,

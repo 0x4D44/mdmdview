@@ -25,6 +25,11 @@ cargo test -- --nocapture
 .\scripts\full_test.ps1
 .\scripts\full_test.ps1 -SkipCoverage
 
+# Full test runner (Rust binary, generates HTML report)
+cargo run --release --bin full_test
+cargo run --release --bin full_test -- --skip-coverage
+cargo run --release --bin full_test -- --quick --skip-mermaid
+
 # Code coverage
 cargo llvm-cov --workspace --summary-only
 ```
@@ -323,6 +328,49 @@ Runs the complete test suite with optional coverage:
 ```
 
 Uses `cargo-llvm-cov` for coverage (install with `cargo install cargo-llvm-cov`).
+
+### Full Test Runner (`full_test.exe`)
+
+Single Rust binary that runs all quality checks, tests, Mermaid visual comparisons, and coverage — then generates a self-contained HTML report.
+
+```bash
+# Full run (all phases)
+cargo run --release --bin full_test
+
+# Skip coverage (much faster)
+cargo run --release --bin full_test -- --skip-coverage
+
+# Quick run, no Mermaid visual tests
+cargo run --release --bin full_test -- --quick --skip-mermaid
+
+# All options
+cargo run --release --bin full_test -- --help
+```
+
+**Phases** (run sequentially, fast-to-slow):
+
+1. **Quality checks** — `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`
+2. **Unit + D2 tests** — `cargo test --release --lib --tests --workspace --no-fail-fast -- --test-threads=1`
+   - Uses `--lib --tests` (not `--all-targets`) to avoid relinking the running binary on Windows
+3. **Mermaid visual tests** — builds mdmdview, screenshots each of 15 Mermaid test cases, pixel-diffs against reference images
+   - Thresholds: <12% diff and <45,000 pixels (per-channel tolerance: 60)
+   - Reference images in `tests/mermaid_visual/reference/`
+   - Actual output in `tests/mermaid_visual/actual_full_test/`
+4. **Coverage** — `cargo llvm-cov --workspace --branch --json --no-cfg-coverage` (gracefully skipped if `cargo-llvm-cov` not installed)
+
+**CLI flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--skip-quality` | Skip fmt/clippy checks |
+| `--skip-coverage` | Skip coverage analysis |
+| `--skip-mermaid` | Skip Mermaid visual tests |
+| `--quick` | Exclude ignored tests |
+| `--help` | Show usage |
+
+**Output:** Self-contained HTML report saved to `tests/results/{YYYY.MM.DD} - full test report.html` with auto-increment on date collision. Features dark mode support, dashboard cards, collapsible test breakdown, and Mermaid visual results table.
+
+**Exit code:** 1 if any phase has hard failures, 0 otherwise.
 
 ---
 

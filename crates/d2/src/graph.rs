@@ -663,10 +663,7 @@ mod tests {
     #[test]
     fn test_color_to_svg() {
         assert_eq!(Color::Hex(255, 0, 0).to_svg_string(), "#ff0000");
-        assert_eq!(
-            Color::HexAlpha(255, 0, 0, 128).to_svg_string(),
-            "#ff000080"
-        );
+        assert_eq!(Color::HexAlpha(255, 0, 0, 128).to_svg_string(), "#ff000080");
     }
 
     #[test]
@@ -697,9 +694,17 @@ mod tests {
         // The problematic fills from the stress test
         let light_green = Color::Hex(0xd4, 0xed, 0xda); // #d4edda
         let light_pink = Color::Hex(0xf8, 0xd7, 0xda); // #f8d7da
-        // Both should be "light" (luminance > 0.179)
-        assert!(light_green.luminance() > 0.179, "light green lum={}", light_green.luminance());
-        assert!(light_pink.luminance() > 0.179, "light pink lum={}", light_pink.luminance());
+                                                       // Both should be "light" (luminance > 0.179)
+        assert!(
+            light_green.luminance() > 0.179,
+            "light green lum={}",
+            light_green.luminance()
+        );
+        assert!(
+            light_pink.luminance() > 0.179,
+            "light pink lum={}",
+            light_pink.luminance()
+        );
     }
 
     #[test]
@@ -707,8 +712,14 @@ mod tests {
         let light_green = Color::Hex(0xd4, 0xed, 0xda);
         let dark_navy = Color::Hex(0x00, 0x00, 0x80);
         // Light fill → dark text
-        assert_eq!(light_green.contrasting_text_color(), Color::Hex(0x17, 0x17, 0x17));
+        assert_eq!(
+            light_green.contrasting_text_color(),
+            Color::Hex(0x17, 0x17, 0x17)
+        );
         // Dark fill → light text
-        assert_eq!(dark_navy.contrasting_text_color(), Color::Hex(0xE0, 0xE0, 0xE0));
+        assert_eq!(
+            dark_navy.contrasting_text_color(),
+            Color::Hex(0xE0, 0xE0, 0xE0)
+        );
     }
 }

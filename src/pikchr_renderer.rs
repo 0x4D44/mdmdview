@@ -307,15 +307,10 @@ impl PikchrRenderer {
 
         // Upload to GPU
         let rgba = pixmap.data().to_vec();
-        let image = egui::ColorImage::from_rgba_unmultiplied(
-            [raster_w as usize, raster_h as usize],
-            &rgba,
-        );
-        let texture = ctx.load_texture(
-            texture_key.to_string(),
-            image,
-            egui::TextureOptions::LINEAR,
-        );
+        let image =
+            egui::ColorImage::from_rgba_unmultiplied([raster_w as usize, raster_h as usize], &rgba);
+        let texture =
+            ctx.load_texture(texture_key.to_string(), image, egui::TextureOptions::LINEAR);
 
         Ok(PikchrTextureEntry {
             texture,
@@ -357,20 +352,11 @@ impl PikchrRenderer {
     }
 
     /// Display a Pikchr error block with the error message and original source code.
-    fn render_error_block(
-        &self,
-        ui: &mut egui::Ui,
-        error: &str,
-        code: &str,
-        code_font_size: f32,
-    ) {
+    fn render_error_block(&self, ui: &mut egui::Ui, error: &str, code: &str, code_font_size: f32) {
         let tc = ThemeColors::current(ui.visuals().dark_mode);
         egui::Frame::none()
             .fill(tc.box_bg)
-            .stroke(egui::Stroke::new(
-                1.0,
-                egui::Color32::from_rgb(200, 80, 80),
-            ))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(200, 80, 80)))
             .inner_margin(8.0)
             .show(ui, |ui| {
                 ui.label(
@@ -479,10 +465,10 @@ mod tests {
         // Same bucket for nearby widths (round() gives +/-16px half-buckets)
         assert_eq!(bucket_width(640.0), bucket_width(641.0));
         assert_eq!(bucket_width(640.0), bucket_width(655.0)); // 655/32=20.47 -> rounds to 20
-        // Different buckets once we cross the half-bucket boundary
+                                                              // Different buckets once we cross the half-bucket boundary
         assert_ne!(bucket_width(640.0), bucket_width(656.0)); // 656/32=20.5 -> rounds to 21
         assert_ne!(bucket_width(640.0), bucket_width(672.0)); // clearly different bucket
-        // Verify actual bucket values
+                                                              // Verify actual bucket values
         assert_eq!(bucket_width(640.0), 640); // 640/32=20.0 -> 20*32=640
         assert_eq!(bucket_width(672.0), 672); // 672/32=21.0 -> 21*32=672
     }
@@ -502,21 +488,33 @@ mod tests {
     fn test_sample_simple_flow() {
         let code = "arrow right 200% \"Request\" above\nbox \"Server\" fit rad 10px\narrow right 200% \"Response\" above";
         let result = PikchrRenderer::render_pikchr_to_svg(code, false);
-        assert!(result.is_ok(), "Simple flow sample failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Simple flow sample failed: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_sample_architecture_diagram() {
         let code = "box \"Browser\" fit rad 10px\narrow right 250% \"HTTP\" above\nbox \"Web Server\" fit rad 10px\narrow right 250% \"SQL\" above\ncylinder \"Database\" fit";
         let result = PikchrRenderer::render_pikchr_to_svg(code, false);
-        assert!(result.is_ok(), "Architecture sample failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Architecture sample failed: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn test_sample_decision_flow() {
         let code = "box \"Start\" fit rad 50%\narrow from last box.s down\ndiamond \"OK?\" fit\narrow from last diamond.e right 200% \"Yes\" above\nbox \"Done\" fit rad 50%\narrow from last diamond.s down \"No\" ljust\nbox \"Retry\" fit rad 10px\narrow from last box.w left 0.5in then up until even with 1st box then right to 1st box.w";
         let result = PikchrRenderer::render_pikchr_to_svg(code, false);
-        assert!(result.is_ok(), "Decision flow sample failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Decision flow sample failed: {:?}",
+            result.err()
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -627,8 +625,7 @@ mod tests {
 
     #[test]
     fn test_spline_produces_path() {
-        let svg =
-            PikchrRenderer::render_pikchr_to_svg("spline right then down", false).unwrap();
+        let svg = PikchrRenderer::render_pikchr_to_svg("spline right then down", false).unwrap();
         assert!(
             svg.contains("<path"),
             "spline should produce <path> element, got:\n{}",
@@ -662,8 +659,8 @@ mod tests {
     fn test_svg_dimensions_are_reasonable() {
         let svg = PikchrRenderer::render_pikchr_to_svg("box \"Test\" fit", false).unwrap();
         // Pikchr uses viewBox="x y width height" for dimensions
-        let (w, h) = extract_viewbox_size(&svg)
-            .expect("SVG should have a parseable viewBox attribute");
+        let (w, h) =
+            extract_viewbox_size(&svg).expect("SVG should have a parseable viewBox attribute");
         assert!(w > 0.0, "viewBox width must be > 0, got {}", w);
         assert!(h > 0.0, "viewBox height must be > 0, got {}", h);
         assert!(w < 10000.0, "viewBox width must be < 10000, got {}", w);
@@ -678,10 +675,8 @@ mod tests {
             false,
         )
         .unwrap();
-        let (w_small, _) =
-            extract_viewbox_size(&small).expect("small SVG should have viewBox");
-        let (w_large, _) =
-            extract_viewbox_size(&large).expect("large SVG should have viewBox");
+        let (w_small, _) = extract_viewbox_size(&small).expect("small SVG should have viewBox");
+        let (w_large, _) = extract_viewbox_size(&large).expect("large SVG should have viewBox");
         assert!(
             w_large > w_small,
             "Chain of boxes should be wider than single box: {} vs {}",
@@ -722,8 +717,7 @@ mod tests {
 
     #[test]
     fn test_unicode_labels() {
-        let svg =
-            PikchrRenderer::render_pikchr_to_svg("box \"日本語\" fit", false).unwrap();
+        let svg = PikchrRenderer::render_pikchr_to_svg("box \"日本語\" fit", false).unwrap();
         assert!(
             svg.contains("日本語"),
             "Unicode label '日本語' missing from SVG"
@@ -733,8 +727,7 @@ mod tests {
     #[test]
     fn test_special_characters_in_labels() {
         // Test that angle brackets are XML-escaped in SVG output
-        let svg =
-            PikchrRenderer::render_pikchr_to_svg("box \"x < y\" fit", false).unwrap();
+        let svg = PikchrRenderer::render_pikchr_to_svg("box \"x < y\" fit", false).unwrap();
         // Pikchr XML-escapes < to &lt; in text content
         assert!(
             svg.contains("&lt;"),
@@ -743,8 +736,7 @@ mod tests {
         );
 
         // Test ampersand: Pikchr XML-escapes & to &amp;
-        let svg2 =
-            PikchrRenderer::render_pikchr_to_svg("box \"A & B\" fit", false).unwrap();
+        let svg2 = PikchrRenderer::render_pikchr_to_svg("box \"A & B\" fit", false).unwrap();
         assert!(
             svg2.contains("&amp;"),
             "SVG should contain XML-escaped '&':\n{}",
@@ -758,9 +750,8 @@ mod tests {
 
     #[test]
     fn test_error_message_has_content() {
-        let err =
-            PikchrRenderer::render_pikchr_to_svg("this is not valid pikchr }{}{", false)
-                .unwrap_err();
+        let err = PikchrRenderer::render_pikchr_to_svg("this is not valid pikchr }{}{", false)
+            .unwrap_err();
         assert!(
             !err.is_empty(),
             "Error message should not be empty for invalid syntax"
@@ -778,10 +769,8 @@ mod tests {
         // Errors are keyed by code_hash, not theme -- same syntax error in
         // light and dark mode should produce the same error message.
         let invalid = "totally broken pikchr syntax }{}{";
-        let err_light =
-            PikchrRenderer::render_pikchr_to_svg(invalid, false).unwrap_err();
-        let err_dark =
-            PikchrRenderer::render_pikchr_to_svg(invalid, true).unwrap_err();
+        let err_light = PikchrRenderer::render_pikchr_to_svg(invalid, false).unwrap_err();
+        let err_dark = PikchrRenderer::render_pikchr_to_svg(invalid, true).unwrap_err();
         assert_eq!(
             err_light, err_dark,
             "Same syntax error should produce same message regardless of theme"
@@ -791,11 +780,9 @@ mod tests {
     #[test]
     fn test_multiple_errors_are_distinct() {
         let err1 =
-            PikchrRenderer::render_pikchr_to_svg("invalid syntax aaa }{}{", false)
-                .unwrap_err();
+            PikchrRenderer::render_pikchr_to_svg("invalid syntax aaa }{}{", false).unwrap_err();
         let err2 =
-            PikchrRenderer::render_pikchr_to_svg("different invalid bbb }{}{", false)
-                .unwrap_err();
+            PikchrRenderer::render_pikchr_to_svg("different invalid bbb }{}{", false).unwrap_err();
         // Different invalid inputs may produce different error messages
         // (at minimum they should both be errors, which we've already asserted
         // by unwrap_err). If they happen to be the same generic error, that's
@@ -818,9 +805,8 @@ mod tests {
         // Dark mode should contain light strokes (e.g., "white" or rgb(255,255,255))
         let light_has_black =
             light.contains("black") || light.contains("rgb(0,0,0)") || light.contains("#000");
-        let dark_has_white = dark.contains("white")
-            || dark.contains("rgb(255,255,255)")
-            || dark.contains("#fff");
+        let dark_has_white =
+            dark.contains("white") || dark.contains("rgb(255,255,255)") || dark.contains("#fff");
 
         assert!(
             light_has_black,
@@ -921,13 +907,13 @@ arrow right 200% "Output" above"#;
 
         // Must have proper SVG wrapper
         assert!(svg.starts_with("<svg"), "SVG must start with <svg tag");
-        assert!(svg.trim_end().ends_with("</svg>"), "SVG must end with </svg>");
+        assert!(
+            svg.trim_end().ends_with("</svg>"),
+            "SVG must end with </svg>"
+        );
 
         // Must have viewBox for proper scaling
-        assert!(
-            svg.contains("viewBox"),
-            "SVG should have viewBox attribute"
-        );
+        assert!(svg.contains("viewBox"), "SVG should have viewBox attribute");
 
         // Arrow produces polygon elements (arrowheads)
         assert!(
@@ -936,7 +922,10 @@ arrow right 200% "Output" above"#;
         );
 
         // Labels appear as text elements
-        assert!(svg.contains("<text"), "Labels should produce <text> elements");
+        assert!(
+            svg.contains("<text"),
+            "Labels should produce <text> elements"
+        );
         assert!(svg.contains("Input"), "Label 'Input' must be in SVG");
         assert!(svg.contains("Process"), "Label 'Process' must be in SVG");
         assert!(svg.contains("Output"), "Label 'Output' must be in SVG");
@@ -980,15 +969,15 @@ arrow right 200% "Output" above"#;
         // SVG without Pikchr's style pattern should pass through unchanged
         let svg = "<svg viewBox='0 0 100 50'><text>Hello</text></svg>";
         let result = PikchrRenderer::inject_svg_font_family(svg);
-        assert_eq!(result, svg, "SVG without matching style should be unchanged");
+        assert_eq!(
+            result, svg,
+            "SVG without matching style should be unchanged"
+        );
     }
 
     #[test]
     fn test_supersample_constant_is_reasonable() {
-        assert!(
-            PIKCHR_SUPERSAMPLE >= 1.0,
-            "Supersample must be >= 1.0"
-        );
+        assert!(PIKCHR_SUPERSAMPLE >= 1.0, "Supersample must be >= 1.0");
         assert!(
             PIKCHR_SUPERSAMPLE <= 4.0,
             "Supersample > 4.0 would waste memory"

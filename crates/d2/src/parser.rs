@@ -974,7 +974,9 @@ mod tests {
     fn test_number_value() {
         let ast = parse_ok("x.style.stroke-width: 3");
         if let MapNode::Key(key) = &ast.nodes[0] {
-            assert!(matches!(&key.primary, Some(ScalarValue::Number(n)) if (*n - 3.0).abs() < 0.001));
+            assert!(
+                matches!(&key.primary, Some(ScalarValue::Number(n)) if (*n - 3.0).abs() < 0.001)
+            );
         } else {
             panic!("expected Key node");
         }
@@ -1024,7 +1026,9 @@ mod tests {
         let ast = parse_ok("x.width: 200");
         if let MapNode::Key(key) = &ast.nodes[0] {
             assert_eq!(key.key.segments[1].value, "width");
-            assert!(matches!(&key.primary, Some(ScalarValue::Number(n)) if (*n - 200.0).abs() < 0.001));
+            assert!(
+                matches!(&key.primary, Some(ScalarValue::Number(n)) if (*n - 200.0).abs() < 0.001)
+            );
         } else {
             panic!("expected Key node");
         }
@@ -1057,7 +1061,11 @@ cache -> db: cache miss
             .iter()
             .filter(|n| matches!(n, MapNode::Key(_)))
             .count();
-        assert!(key_count >= 6, "expected at least 6 key nodes, got {}", key_count);
+        assert!(
+            key_count >= 6,
+            "expected at least 6 key nodes, got {}",
+            key_count
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1102,10 +1110,7 @@ cache -> db: cache miss
             !result.errors.is_empty(),
             "expected error for missing `}}`, got none"
         );
-        let has_brace_error = result
-            .errors
-            .iter()
-            .any(|e| e.message.contains('}'));
+        let has_brace_error = result.errors.iter().any(|e| e.message.contains('}'));
         assert!(
             has_brace_error,
             "expected an error mentioning `}}`, got: {:?}",

@@ -222,7 +222,9 @@ fn arrange_in_line(graph: &mut D2Graph, children: &[NodeIndex], direction: Direc
     let mut offset = 0.0;
 
     for &child in children {
-        let Some(rect) = graph.graph[child].box_ else { continue; };
+        let Some(rect) = graph.graph[child].box_ else {
+            continue;
+        };
         match direction {
             Direction::Down | Direction::Up => {
                 graph.reposition_node(child, 0.0, offset);
@@ -505,11 +507,7 @@ mod tests {
     }
 
     /// Helper: add an edge between two children and register it.
-    fn add_edge(
-        graph: &mut D2Graph,
-        src: NodeIndex,
-        dst: NodeIndex,
-    ) -> EdgeIndex {
+    fn add_edge(graph: &mut D2Graph, src: NodeIndex, dst: NodeIndex) -> EdgeIndex {
         use crate::graph::{ArrowheadType, D2EdgeData};
 
         let eidx = graph.graph.add_edge(
@@ -647,8 +645,7 @@ mod tests {
         let d_pos = ordered[1].iter().position(|&n| n == d).unwrap();
 
         // If a < b then c < d (no crossing), or if b < a then d < c
-        let same_order = (a_pos < b_pos && c_pos < d_pos)
-            || (b_pos < a_pos && d_pos < c_pos);
+        let same_order = (a_pos < b_pos && c_pos < d_pos) || (b_pos < a_pos && d_pos < c_pos);
         assert!(
             same_order,
             "crossing reduction should not introduce crossings: \
@@ -720,11 +717,7 @@ mod tests {
 }
 
 /// Assign x,y coordinates to nodes based on rank and order.
-fn assign_coordinates(
-    graph: &mut D2Graph,
-    ordered_ranks: &[Vec<NodeIndex>],
-    direction: Direction,
-) {
+fn assign_coordinates(graph: &mut D2Graph, ordered_ranks: &[Vec<NodeIndex>], direction: Direction) {
     if ordered_ranks.is_empty() {
         return;
     }
@@ -742,11 +735,21 @@ fn assign_coordinates(
         let max_size = rank_nodes
             .iter()
             .filter_map(|&node| graph.graph[node].box_)
-            .map(|rect| if is_horizontal { rect.width } else { rect.height })
+            .map(|rect| {
+                if is_horizontal {
+                    rect.width
+                } else {
+                    rect.height
+                }
+            })
             .fold(0.0f64, f64::max);
 
         let has_container = rank_nodes.iter().any(|&n| graph.graph[n].is_container);
-        let rank_spacing = if has_container { CONTAINER_RANK_SPACING } else { NODE_SPACING_V };
+        let rank_spacing = if has_container {
+            CONTAINER_RANK_SPACING
+        } else {
+            NODE_SPACING_V
+        };
         rank_offset += max_size + rank_spacing;
     }
 
@@ -764,7 +767,11 @@ fn assign_coordinates(
             let mut total = 0.0;
             for (i, &n) in nodes_with_boxes.iter().enumerate() {
                 let rect = graph.graph[n].box_.unwrap();
-                total += if is_horizontal { rect.height } else { rect.width };
+                total += if is_horizontal {
+                    rect.height
+                } else {
+                    rect.width
+                };
                 if i + 1 < nodes_with_boxes.len() {
                     total += if graph.graph[n].is_container {
                         CONTAINER_CROSS_SPACING
@@ -779,7 +786,9 @@ fn assign_coordinates(
         let mut cross_offset = -total_cross / 2.0;
 
         for &node in rank_nodes {
-            let Some(rect) = graph.graph[node].box_ else { continue; };
+            let Some(rect) = graph.graph[node].box_ else {
+                continue;
+            };
             let cross_spacing = if graph.graph[node].is_container {
                 CONTAINER_CROSS_SPACING
             } else {

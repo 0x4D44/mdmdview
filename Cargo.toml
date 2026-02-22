@@ -6,7 +6,7 @@ edition = "2021"
 
 [package]
 name = "mdmdview"
-version = "1.8.0"
+version = "1.9.0"
 edition.workspace = true
 description = "A markdown viewer for Windows"
 authors = ["0x4D44 <martingdavidson@gmail.com>"]
@@ -15,6 +15,10 @@ license = "MIT"
 [[bin]]
 name = "mdmdview"
 path = "src/main.rs"
+
+[[bin]]
+name = "full_test"
+path = "src/bin/full_test.rs"
 
 [dependencies]
 # Disable accesskit (accessibility) to reduce idle CPU/GPU usage
@@ -41,6 +45,7 @@ htmlescape = "0.3"
 ttf-parser = "0.25"
 ureq = "2.9"
 base64 = "0.22"
+chrono = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"

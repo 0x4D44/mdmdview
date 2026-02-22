@@ -294,15 +294,10 @@ impl D2Renderer {
 
         // Upload to GPU
         let rgba = pixmap.data().to_vec();
-        let image = egui::ColorImage::from_rgba_unmultiplied(
-            [raster_w as usize, raster_h as usize],
-            &rgba,
-        );
-        let texture = ctx.load_texture(
-            texture_key.to_string(),
-            image,
-            egui::TextureOptions::LINEAR,
-        );
+        let image =
+            egui::ColorImage::from_rgba_unmultiplied([raster_w as usize, raster_h as usize], &rgba);
+        let texture =
+            ctx.load_texture(texture_key.to_string(), image, egui::TextureOptions::LINEAR);
 
         Ok(D2TextureEntry {
             texture,
@@ -323,20 +318,11 @@ impl D2Renderer {
     }
 
     /// Display a D2 error block with the error message and original source code.
-    fn render_error_block(
-        &self,
-        ui: &mut egui::Ui,
-        error: &str,
-        code: &str,
-        code_font_size: f32,
-    ) {
+    fn render_error_block(&self, ui: &mut egui::Ui, error: &str, code: &str, code_font_size: f32) {
         let tc = ThemeColors::current(ui.visuals().dark_mode);
         egui::Frame::none()
             .fill(tc.box_bg)
-            .stroke(egui::Stroke::new(
-                1.0,
-                egui::Color32::from_rgb(200, 80, 80),
-            ))
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(200, 80, 80)))
             .inner_margin(8.0)
             .show(ui, |ui| {
                 ui.label(
@@ -372,7 +358,11 @@ mod tests {
     #[test]
     fn test_render_simple_diagram() {
         let svg = D2Renderer::render_d2_to_svg("a -> b", false);
-        assert!(svg.is_ok(), "Simple D2 diagram should render: {:?}", svg.err());
+        assert!(
+            svg.is_ok(),
+            "Simple D2 diagram should render: {:?}",
+            svg.err()
+        );
         let svg = svg.unwrap();
         assert!(svg.contains("<svg"));
     }
@@ -448,6 +438,9 @@ mod tests {
     #[test]
     fn test_supersample_constant_is_reasonable() {
         assert!(D2_SUPERSAMPLE >= 1.0, "Supersample must be >= 1.0");
-        assert!(D2_SUPERSAMPLE <= 4.0, "Supersample > 4.0 would waste memory");
+        assert!(
+            D2_SUPERSAMPLE <= 4.0,
+            "Supersample > 4.0 would waste memory"
+        );
     }
 }

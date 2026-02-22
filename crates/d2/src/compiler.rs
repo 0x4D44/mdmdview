@@ -318,10 +318,18 @@ impl CompileContext {
                     // Edges in this key were just added; count matching pairs.
                     if !key.edges.is_empty() {
                         let first_edge = &key.edges[0];
-                        let src_segs: Vec<&str> =
-                            first_edge.src.segments.iter().map(|s| s.value.as_str()).collect();
-                        let dst_segs: Vec<&str> =
-                            first_edge.dst.segments.iter().map(|s| s.value.as_str()).collect();
+                        let src_segs: Vec<&str> = first_edge
+                            .src
+                            .segments
+                            .iter()
+                            .map(|s| s.value.as_str())
+                            .collect();
+                        let dst_segs: Vec<&str> = first_edge
+                            .dst
+                            .segments
+                            .iter()
+                            .map(|s| s.value.as_str())
+                            .collect();
                         let src_node = self.resolve_or_create_path(&src_segs, parent)?;
                         let dst_node = self.resolve_or_create_path(&dst_segs, parent)?;
 
@@ -767,7 +775,8 @@ mod tests {
 
     #[test]
     fn test_arrowhead_types() {
-        let graph = compile_ok("a -> b: {\n  source-arrowhead: diamond\n  target-arrowhead: circle\n}");
+        let graph =
+            compile_ok("a -> b: {\n  source-arrowhead: diamond\n  target-arrowhead: circle\n}");
         let edge = &graph.graph[graph.edges[0]];
         assert_eq!(edge.src_arrow, ArrowheadType::Diamond);
         assert_eq!(edge.dst_arrow, ArrowheadType::Circle);
@@ -825,11 +834,22 @@ api -> db: queries
     #[test]
     fn test_self_edge() {
         let graph = compile_ok("a -> a");
-        assert_eq!(graph.objects.len(), 1, "self-edge should create exactly 1 node");
+        assert_eq!(
+            graph.objects.len(),
+            1,
+            "self-edge should create exactly 1 node"
+        );
         assert_eq!(graph.graph[graph.objects[0]].id, "a");
-        assert_eq!(graph.edges.len(), 1, "self-edge should create exactly 1 edge");
+        assert_eq!(
+            graph.edges.len(),
+            1,
+            "self-edge should create exactly 1 edge"
+        );
         let (src, dst) = graph.graph.edge_endpoints(graph.edges[0]).unwrap();
-        assert_eq!(src, dst, "self-edge source and destination must be the same node");
+        assert_eq!(
+            src, dst,
+            "self-edge source and destination must be the same node"
+        );
     }
 
     #[test]

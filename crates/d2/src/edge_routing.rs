@@ -117,12 +117,7 @@ pub fn route_all_edges(graph: &mut D2Graph, font_size: f64, font_family: &str) {
 /// Compute a port point on the boundary of a shape.
 /// `direction` is the exit/entry side; `port_cross` is the desired cross-axis
 /// coordinate (y for horizontal exits, x for vertical exits).
-fn compute_port(
-    shape: ShapeType,
-    rect: &Rect,
-    direction: Direction,
-    port_cross: f64,
-) -> Point {
+fn compute_port(shape: ShapeType, rect: &Rect, direction: Direction, port_cross: f64) -> Point {
     match shape {
         ShapeType::Diamond | ShapeType::Hexagon | ShapeType::Circle | ShapeType::Oval => {
             // Clip from center toward the exit side at the desired cross position
@@ -203,7 +198,12 @@ fn backward_entry(direction: Direction) -> Direction {
 }
 
 /// Route all non-self-loop edges using the three-pass orthogonal algorithm.
-fn route_orthogonal_edges(graph: &mut D2Graph, edge_indices: &[EdgeIndex], font_size: f64, font_family: &str) {
+fn route_orthogonal_edges(
+    graph: &mut D2Graph,
+    edge_indices: &[EdgeIndex],
+    font_size: f64,
+    font_family: &str,
+) {
     if edge_indices.is_empty() {
         return;
     }
@@ -240,9 +240,8 @@ fn route_orthogonal_edges(graph: &mut D2Graph, edge_indices: &[EdgeIndex], font_
             // Container-to-descendant: compute gap between the actual nodes
             let src_center = src_rect.center();
             let dst_center = dst_rect.center();
-            let (gap_start, gap_end) = compute_container_gap(
-                &src_rect, &dst_rect, &src_center, &dst_center, direction,
-            );
+            let (gap_start, gap_end) =
+                compute_container_gap(&src_rect, &dst_rect, &src_center, &dst_center, direction);
             classified.push(EdgeClassification {
                 edge_idx: eidx,
                 src,
@@ -272,8 +271,8 @@ fn route_orthogonal_edges(graph: &mut D2Graph, edge_indices: &[EdgeIndex], font_
         let src_anc_center = src_anc_rect.center();
         let dst_anc_center = dst_anc_rect.center();
 
-        let primary_diff = primary_coord(&src_anc_center, direction)
-            - primary_coord(&dst_anc_center, direction);
+        let primary_diff =
+            primary_coord(&src_anc_center, direction) - primary_coord(&dst_anc_center, direction);
 
         // Determine kind
         let kind = if primary_diff.abs() < 1.0 {
@@ -294,12 +293,8 @@ fn route_orthogonal_edges(graph: &mut D2Graph, edge_indices: &[EdgeIndex], font_
 
         // Compute gap interval
         let (gap_start, gap_end) = match kind {
-            EdgeKind::Forward => compute_forward_gap(
-                &src_anc_rect, &dst_anc_rect, direction,
-            ),
-            EdgeKind::Backward => compute_backward_gap(
-                &src_anc_rect, &dst_anc_rect, direction,
-            ),
+            EdgeKind::Forward => compute_forward_gap(&src_anc_rect, &dst_anc_rect, direction),
+            EdgeKind::Backward => compute_backward_gap(&src_anc_rect, &dst_anc_rect, direction),
             EdgeKind::SameRank => (0.0, 0.0),
             EdgeKind::ContainerDescendant => unreachable!(),
         };
@@ -356,15 +351,17 @@ fn route_orthogonal_edges(graph: &mut D2Graph, edge_indices: &[EdgeIndex], font_
 
         // Label position: at 50% of route arc length for labeled edges,
         // adjusted to avoid overlapping node boxes.
-        let (label_pos, label_w, label_h) =
-            if let Some(ref text) = graph.graph[ec.edge_idx].label {
-                let fs = graph.graph[ec.edge_idx].style.font_size.unwrap_or(font_size);
-                let m = crate::text::measure_and_wrap_label(text, fs, font_family);
-                let pos = compute_label_position(&route, 0.5, m.width, m.height, &node_rects);
-                (pos, m.width, m.height)
-            } else {
-                (None, 0.0, 0.0)
-            };
+        let (label_pos, label_w, label_h) = if let Some(ref text) = graph.graph[ec.edge_idx].label {
+            let fs = graph.graph[ec.edge_idx]
+                .style
+                .font_size
+                .unwrap_or(font_size);
+            let m = crate::text::measure_and_wrap_label(text, fs, font_family);
+            let pos = compute_label_position(&route, 0.5, m.width, m.height, &node_rects);
+            (pos, m.width, m.height)
+        } else {
+            (None, 0.0, 0.0)
+        };
 
         graph.graph[ec.edge_idx].route = route;
         graph.graph[ec.edge_idx].route_type = RouteType::Orthogonal;
@@ -420,7 +417,11 @@ fn allocate_channels(graph: &D2Graph, classified: &mut [EdgeClassification]) {
         if ec.kind == EdgeKind::SameRank || ec.kind == EdgeKind::ContainerDescendant {
             continue; // SameRank and ContainerDescendant edges don't use channels
         }
-        let key = (ec.lca, ec.gap_start.round() as i64, ec.gap_end.round() as i64);
+        let key = (
+            ec.lca,
+            ec.gap_start.round() as i64,
+            ec.gap_end.round() as i64,
+        );
         groups.entry(key).or_default().push(i);
     }
 
@@ -441,14 +442,30 @@ fn allocate_channels(graph: &D2Graph, classified: &mut [EdgeClassification]) {
         sorted.sort_by(|&a, &b| {
             let ea = &classified[a];
             let eb = &classified[b];
-            let src_a = graph.graph[ea.src].box_.map(|r| cross_center(&r, direction)).unwrap_or(0.0);
-            let src_b = graph.graph[eb.src].box_.map(|r| cross_center(&r, direction)).unwrap_or(0.0);
-            let dst_a = graph.graph[ea.dst].box_.map(|r| cross_center(&r, direction)).unwrap_or(0.0);
-            let dst_b = graph.graph[eb.dst].box_.map(|r| cross_center(&r, direction)).unwrap_or(0.0);
+            let src_a = graph.graph[ea.src]
+                .box_
+                .map(|r| cross_center(&r, direction))
+                .unwrap_or(0.0);
+            let src_b = graph.graph[eb.src]
+                .box_
+                .map(|r| cross_center(&r, direction))
+                .unwrap_or(0.0);
+            let dst_a = graph.graph[ea.dst]
+                .box_
+                .map(|r| cross_center(&r, direction))
+                .unwrap_or(0.0);
+            let dst_b = graph.graph[eb.dst]
+                .box_
+                .map(|r| cross_center(&r, direction))
+                .unwrap_or(0.0);
             src_a
                 .partial_cmp(&src_b)
                 .unwrap_or(std::cmp::Ordering::Equal)
-                .then(dst_a.partial_cmp(&dst_b).unwrap_or(std::cmp::Ordering::Equal))
+                .then(
+                    dst_a
+                        .partial_cmp(&dst_b)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
         });
 
         let n = sorted.len();
@@ -535,11 +552,9 @@ fn allocate_dest_ports(graph: &D2Graph, classified: &mut [EdgeClassification]) {
     for (i, ec) in classified.iter().enumerate() {
         let entry_side = match ec.kind {
             EdgeKind::Forward => forward_entry(ec.direction),
-            EdgeKind::SameRank => forward_exit(ec.direction),  // jog enters from the same side it exits
+            EdgeKind::SameRank => forward_exit(ec.direction), // jog enters from the same side it exits
             EdgeKind::Backward => backward_entry(ec.direction),
-            EdgeKind::ContainerDescendant => {
-                container_entry_side(graph, ec)
-            }
+            EdgeKind::ContainerDescendant => container_entry_side(graph, ec),
         };
         groups.entry((ec.dst, entry_side)).or_default().push(i);
     }
@@ -586,8 +601,14 @@ fn allocate_dest_ports(graph: &D2Graph, classified: &mut [EdgeClassification]) {
 
 /// Determine exit side for a container-descendant edge.
 fn container_exit_side(graph: &D2Graph, ec: &EdgeClassification) -> Direction {
-    let src_center = graph.graph[ec.src].box_.map(|r| r.center()).unwrap_or(Point::new(0.0, 0.0));
-    let dst_center = graph.graph[ec.dst].box_.map(|r| r.center()).unwrap_or(Point::new(0.0, 0.0));
+    let src_center = graph.graph[ec.src]
+        .box_
+        .map(|r| r.center())
+        .unwrap_or(Point::new(0.0, 0.0));
+    let dst_center = graph.graph[ec.dst]
+        .box_
+        .map(|r| r.center())
+        .unwrap_or(Point::new(0.0, 0.0));
     if ec.direction.is_horizontal() {
         if src_center.x <= dst_center.x {
             Direction::Right
@@ -603,8 +624,14 @@ fn container_exit_side(graph: &D2Graph, ec: &EdgeClassification) -> Direction {
 
 /// Determine entry side for a container-descendant edge.
 fn container_entry_side(graph: &D2Graph, ec: &EdgeClassification) -> Direction {
-    let src_center = graph.graph[ec.src].box_.map(|r| r.center()).unwrap_or(Point::new(0.0, 0.0));
-    let dst_center = graph.graph[ec.dst].box_.map(|r| r.center()).unwrap_or(Point::new(0.0, 0.0));
+    let src_center = graph.graph[ec.src]
+        .box_
+        .map(|r| r.center())
+        .unwrap_or(Point::new(0.0, 0.0));
+    let dst_center = graph.graph[ec.dst]
+        .box_
+        .map(|r| r.center())
+        .unwrap_or(Point::new(0.0, 0.0));
     if ec.direction.is_horizontal() {
         if dst_center.x >= src_center.x {
             Direction::Left
@@ -619,11 +646,7 @@ fn container_entry_side(graph: &D2Graph, ec: &EdgeClassification) -> Direction {
 }
 
 /// Pass 3: Build the polyline route for a classified edge.
-fn build_route(
-    ec: &EdgeClassification,
-    src_rect: &Rect,
-    dst_rect: &Rect,
-) -> Vec<Point> {
+fn build_route(ec: &EdgeClassification, src_rect: &Rect, dst_rect: &Rect) -> Vec<Point> {
     match ec.kind {
         EdgeKind::Forward | EdgeKind::Backward => build_three_segment_route(ec),
         EdgeKind::SameRank => build_same_rank_route(ec, src_rect, dst_rect),
@@ -667,11 +690,7 @@ fn build_three_segment_route(ec: &EdgeClassification) -> Vec<Point> {
 }
 
 /// Build route for a same-rank edge.
-fn build_same_rank_route(
-    ec: &EdgeClassification,
-    src_rect: &Rect,
-    dst_rect: &Rect,
-) -> Vec<Point> {
+fn build_same_rank_route(ec: &EdgeClassification, src_rect: &Rect, dst_rect: &Rect) -> Vec<Point> {
     let src = ec.src_port;
     let dst = ec.dst_port;
 
@@ -682,12 +701,7 @@ fn build_same_rank_route(
             Direction::Left => src_rect.x.min(dst_rect.x) - SAME_RANK_JOG,
             _ => unreachable!(),
         };
-        vec![
-            src,
-            Point::new(jog, src.y),
-            Point::new(jog, dst.y),
-            dst,
-        ]
+        vec![src, Point::new(jog, src.y), Point::new(jog, dst.y), dst]
     } else {
         // Vertical same-rank: jog past the bottommost (for Down) or topmost (for Up)
         let jog = match ec.direction {
@@ -695,12 +709,7 @@ fn build_same_rank_route(
             Direction::Up => src_rect.y.min(dst_rect.y) - SAME_RANK_JOG,
             _ => unreachable!(),
         };
-        vec![
-            src,
-            Point::new(src.x, jog),
-            Point::new(dst.x, jog),
-            dst,
-        ]
+        vec![src, Point::new(src.x, jog), Point::new(dst.x, jog), dst]
     }
 }
 
@@ -1006,7 +1015,14 @@ fn compute_label_position(
 
     // Fast path: no nodes to dodge.
     if node_rects.is_empty() {
-        return label_position_at(route, &seg_lengths, total, percentage, label_width, label_height);
+        return label_position_at(
+            route,
+            &seg_lengths,
+            total,
+            percentage,
+            label_width,
+            label_height,
+        );
     }
 
     // Try candidates at various positions along the route.
@@ -1017,7 +1033,9 @@ fn compute_label_position(
     let mut best_clearance = f64::NEG_INFINITY;
 
     for &pct in &CANDIDATES {
-        if let Some(pos) = label_position_at(route, &seg_lengths, total, pct, label_width, label_height) {
+        if let Some(pos) =
+            label_position_at(route, &seg_lengths, total, pct, label_width, label_height)
+        {
             let lr = label_bounding_rect(pos, label_width, label_height);
             let clearance = label_clearance(&lr, node_rects);
             if clearance > best_clearance {
@@ -1034,7 +1052,12 @@ fn compute_label_position(
     // If best position still overlaps a node, nudge it away.
     if best_clearance < 0.0 {
         if let Some(pos) = best_pos {
-            best_pos = Some(nudge_away_from_nodes(pos, label_width, label_height, node_rects));
+            best_pos = Some(nudge_away_from_nodes(
+                pos,
+                label_width,
+                label_height,
+                node_rects,
+            ));
         }
     }
 
@@ -1336,7 +1359,10 @@ mod tests {
         let x = find_node_by_label(&graph, "x");
         let y = find_node_by_label(&graph, "y");
         let lca = find_lca(&graph, x, y);
-        assert_eq!(lca, graph.root, "LCA of nodes in separate top-level containers should be root");
+        assert_eq!(
+            lca, graph.root,
+            "LCA of nodes in separate top-level containers should be root"
+        );
     }
 
     #[test]
@@ -1357,7 +1383,10 @@ mod tests {
         let g = find_node_by_label(&graph, "g");
         let a = find_node_by_label(&graph, "a");
         let lca = find_lca(&graph, g, a);
-        assert_eq!(lca, g, "LCA of container and its child should be the container");
+        assert_eq!(
+            lca, g,
+            "LCA of container and its child should be the container"
+        );
     }
 
     #[test]
@@ -1378,7 +1407,10 @@ mod tests {
         let g = find_node_by_label(&graph, "g");
         let inner = find_node_by_label(&graph, "inner");
         let result = child_ancestor_of(&graph, a, g);
-        assert_eq!(result, inner, "should return the immediate child of ancestor on the path to node");
+        assert_eq!(
+            result, inner,
+            "should return the immediate child of ancestor on the path to node"
+        );
     }
 
     #[test]
@@ -1396,7 +1428,11 @@ mod tests {
         let graph = layout_ok("direction: right\ng: { a }");
         let g = find_node_by_label(&graph, "g");
         let dir = effective_direction(&graph, g);
-        assert_eq!(dir, Direction::Right, "should inherit graph-level direction");
+        assert_eq!(
+            dir,
+            Direction::Right,
+            "should inherit graph-level direction"
+        );
     }
 
     #[test]
@@ -1405,7 +1441,11 @@ mod tests {
         let graph = layout_ok("direction: right\ng: { direction: down; a }");
         let g = find_node_by_label(&graph, "g");
         let dir = effective_direction(&graph, g);
-        assert_eq!(dir, Direction::Down, "should use container's own direction override");
+        assert_eq!(
+            dir,
+            Direction::Down,
+            "should use container's own direction override"
+        );
     }
 
     #[test]
@@ -1413,7 +1453,11 @@ mod tests {
         // Asking for effective_direction of root → should return graph.direction
         let graph = layout_ok("direction: right\na");
         let dir = effective_direction(&graph, graph.root);
-        assert_eq!(dir, Direction::Right, "root effective direction should be graph.direction");
+        assert_eq!(
+            dir,
+            Direction::Right,
+            "root effective direction should be graph.direction"
+        );
     }
 
     // --- orthogonal routing tests --------------------------------------------
@@ -1689,22 +1733,32 @@ network.server2 -> database: query
         // and offset above the line (negative Y offset)
         let graph = layout_ok("direction: right\na -> b: hello");
         let edge = find_edge_between(&graph, "a", "b");
-        let label_pos = edge.label_position.expect("labeled edge should have position");
+        let label_pos = edge
+            .label_position
+            .expect("labeled edge should have position");
 
         let a_rect = graph.graph[find_node_by_label(&graph, "a")].box_.unwrap();
         let b_rect = graph.graph[find_node_by_label(&graph, "b")].box_.unwrap();
 
         // Label x should be between the two nodes
-        assert!(label_pos.x > a_rect.right() && label_pos.x < b_rect.x,
+        assert!(
+            label_pos.x > a_rect.right() && label_pos.x < b_rect.x,
             "label x ({}) should be between a.right ({}) and b.left ({})",
-            label_pos.x, a_rect.right(), b_rect.x);
+            label_pos.x,
+            a_rect.right(),
+            b_rect.x
+        );
 
         // For a 2-point straight horizontal route, the label should be offset
         // above the line (y < line y)
         assert_eq!(edge.route.len(), 2, "straight edge should have 2 points");
         let line_y = (edge.route[0].y + edge.route[1].y) / 2.0;
-        assert!(label_pos.y < line_y,
-            "label y ({}) should be above the line y ({})", label_pos.y, line_y);
+        assert!(
+            label_pos.y < line_y,
+            "label y ({}) should be above the line y ({})",
+            label_pos.y,
+            line_y
+        );
     }
 
     #[test]
@@ -1713,22 +1767,32 @@ network.server2 -> database: query
         // offset left of the line
         let graph = layout_ok("a -> b: hello");
         let edge = find_edge_between(&graph, "a", "b");
-        let label_pos = edge.label_position.expect("labeled edge should have position");
+        let label_pos = edge
+            .label_position
+            .expect("labeled edge should have position");
 
         let a_rect = graph.graph[find_node_by_label(&graph, "a")].box_.unwrap();
         let b_rect = graph.graph[find_node_by_label(&graph, "b")].box_.unwrap();
 
         // Label y should be between the two nodes
-        assert!(label_pos.y > a_rect.bottom() && label_pos.y < b_rect.y,
+        assert!(
+            label_pos.y > a_rect.bottom() && label_pos.y < b_rect.y,
             "label y ({}) should be between a.bottom ({}) and b.top ({})",
-            label_pos.y, a_rect.bottom(), b_rect.y);
+            label_pos.y,
+            a_rect.bottom(),
+            b_rect.y
+        );
 
         // For a 2-point straight vertical route, the label should be offset
         // left of the line (x < line x)
         assert_eq!(edge.route.len(), 2, "straight edge should have 2 points");
         let line_x = (edge.route[0].x + edge.route[1].x) / 2.0;
-        assert!(label_pos.x < line_x,
-            "label x ({}) should be left of the line x ({})", label_pos.x, line_x);
+        assert!(
+            label_pos.x < line_x,
+            "label x ({}) should be left of the line x ({})",
+            label_pos.x,
+            line_x
+        );
     }
 
     #[test]
@@ -1736,7 +1800,10 @@ network.server2 -> database: query
         // Unlabeled edge should have no label position
         let graph = layout_ok("direction: right\na -> b");
         let edge = find_edge_between(&graph, "a", "b");
-        assert!(edge.label_position.is_none(), "unlabeled edge should have no label position");
+        assert!(
+            edge.label_position.is_none(),
+            "unlabeled edge should have no label position"
+        );
     }
 
     #[test]
@@ -1751,8 +1818,11 @@ network.server2 -> database: query
 
         // Labels should not be at the exact same position
         let dist = ((pos_ac.x - pos_bc.x).powi(2) + (pos_ac.y - pos_bc.y).powi(2)).sqrt();
-        assert!(dist > 1.0,
-            "labels should be spread apart, got distance {}", dist);
+        assert!(
+            dist > 1.0,
+            "labels should be spread apart, got distance {}",
+            dist
+        );
     }
 
     #[test]
@@ -1819,42 +1889,52 @@ network.server2 -> database: query
         let edge_bc = find_edge_between(&graph, "b", "c");
 
         // Pick whichever edge has a 4-point route (the offset one)
-        let (edge, src_label, dst_label) = if edge_ac.route.len() == 4 {
-            (edge_ac, "a", "c")
-        } else if edge_bc.route.len() == 4 {
-            (edge_bc, "b", "c")
-        } else {
-            // Both edges are 2-point straight lines; this test needs a 4-point route.
-            // Add a label and re-layout to force the geometry check on the labeled version.
-            let graph2 = layout_ok("direction: right\na -> c: label\nb -> c");
-            let e = find_edge_between(&graph2, "a", "c");
-            if e.route.len() == 4 {
-                let src_rect = graph2.graph[find_node_by_label(&graph2, "a")].box_.unwrap();
-                let dst_rect = graph2.graph[find_node_by_label(&graph2, "c")].box_.unwrap();
-                let label_pos = e.label_position.expect("labeled edge should have position");
-                let gap_mid_x = (src_rect.right() + dst_rect.x) / 2.0;
-                // Label x should be near the gap midpoint (within 40% of gap width)
-                let gap_width = (dst_rect.x - src_rect.right()).abs();
-                assert!(
+        let (edge, src_label, dst_label) =
+            if edge_ac.route.len() == 4 {
+                (edge_ac, "a", "c")
+            } else if edge_bc.route.len() == 4 {
+                (edge_bc, "b", "c")
+            } else {
+                // Both edges are 2-point straight lines; this test needs a 4-point route.
+                // Add a label and re-layout to force the geometry check on the labeled version.
+                let graph2 = layout_ok("direction: right\na -> c: label\nb -> c");
+                let e = find_edge_between(&graph2, "a", "c");
+                if e.route.len() == 4 {
+                    let src_rect = graph2.graph[find_node_by_label(&graph2, "a")].box_.unwrap();
+                    let dst_rect = graph2.graph[find_node_by_label(&graph2, "c")].box_.unwrap();
+                    let label_pos = e.label_position.expect("labeled edge should have position");
+                    let gap_mid_x = (src_rect.right() + dst_rect.x) / 2.0;
+                    // Label x should be near the gap midpoint (within 40% of gap width)
+                    let gap_width = (dst_rect.x - src_rect.right()).abs();
+                    assert!(
                     (label_pos.x - gap_mid_x).abs() < gap_width * 0.4,
                     "label x ({}) should be near gap midpoint ({}) within 40% of gap width ({})",
                     label_pos.x, gap_mid_x, gap_width
                 );
+                    return;
+                }
+                // If still no 4-point route, the test passes vacuously
                 return;
-            }
-            // If still no 4-point route, the test passes vacuously
-            return;
-        };
+            };
 
         // For the found 4-point edge, add a label and verify
-        let labeled_src = format!("direction: right\n{} -> {}: lbl\nb -> c", src_label, dst_label);
+        let labeled_src = format!(
+            "direction: right\n{} -> {}: lbl\nb -> c",
+            src_label, dst_label
+        );
         let graph2 = layout_ok(&labeled_src);
         let edge2 = find_edge_between(&graph2, src_label, dst_label);
 
         if edge2.route.len() >= 4 {
-            let src_rect = graph2.graph[find_node_by_label(&graph2, src_label)].box_.unwrap();
-            let dst_rect = graph2.graph[find_node_by_label(&graph2, dst_label)].box_.unwrap();
-            let label_pos = edge2.label_position.expect("labeled edge should have position");
+            let src_rect = graph2.graph[find_node_by_label(&graph2, src_label)]
+                .box_
+                .unwrap();
+            let dst_rect = graph2.graph[find_node_by_label(&graph2, dst_label)]
+                .box_
+                .unwrap();
+            let label_pos = edge2
+                .label_position
+                .expect("labeled edge should have position");
 
             // The label x should be near the midpoint of the gap between source and dest
             let gap_mid_x = (src_rect.right() + dst_rect.x) / 2.0;
@@ -1862,7 +1942,9 @@ network.server2 -> database: query
             assert!(
                 (label_pos.x - gap_mid_x).abs() < gap_width * 0.4,
                 "label x ({}) should be near gap midpoint ({}) within 40% of gap width ({})",
-                label_pos.x, gap_mid_x, gap_width
+                label_pos.x,
+                gap_mid_x,
+                gap_width
             );
         }
         let _ = edge; // suppress unused warning
@@ -1874,16 +1956,23 @@ network.server2 -> database: query
         // the route line by at least label_height / 2.
         let graph = layout_ok("direction: right\na -> b: hello");
         let edge = find_edge_between(&graph, "a", "b");
-        let label_pos = edge.label_position.expect("labeled edge should have position");
+        let label_pos = edge
+            .label_position
+            .expect("labeled edge should have position");
 
-        assert_eq!(edge.route.len(), 2, "straight horizontal edge should have 2 points");
+        assert_eq!(
+            edge.route.len(),
+            2,
+            "straight horizontal edge should have 2 points"
+        );
         let line_y = (edge.route[0].y + edge.route[1].y) / 2.0;
 
         // Label should be above the line
         assert!(
             label_pos.y < line_y,
             "label y ({}) should be above line y ({})",
-            label_pos.y, line_y
+            label_pos.y,
+            line_y
         );
 
         // The offset should be at least label_height / 2
@@ -1891,7 +1980,8 @@ network.server2 -> database: query
         assert!(
             offset >= edge.label_height / 2.0,
             "vertical offset ({}) should be >= label_height/2 ({})",
-            offset, edge.label_height / 2.0
+            offset,
+            edge.label_height / 2.0
         );
     }
 
@@ -1901,16 +1991,23 @@ network.server2 -> database: query
         // of the route line by at least label_width / 2.
         let graph = layout_ok("a -> b: hello");
         let edge = find_edge_between(&graph, "a", "b");
-        let label_pos = edge.label_position.expect("labeled edge should have position");
+        let label_pos = edge
+            .label_position
+            .expect("labeled edge should have position");
 
-        assert_eq!(edge.route.len(), 2, "straight vertical edge should have 2 points");
+        assert_eq!(
+            edge.route.len(),
+            2,
+            "straight vertical edge should have 2 points"
+        );
         let line_x = (edge.route[0].x + edge.route[1].x) / 2.0;
 
         // Label should be left of the line
         assert!(
             label_pos.x < line_x,
             "label x ({}) should be left of line x ({})",
-            label_pos.x, line_x
+            label_pos.x,
+            line_x
         );
 
         // The offset should be at least label_width / 2
@@ -1918,7 +2015,8 @@ network.server2 -> database: query
         assert!(
             offset >= edge.label_width / 2.0,
             "horizontal offset ({}) should be >= label_width/2 ({})",
-            offset, edge.label_width / 2.0
+            offset,
+            edge.label_width / 2.0
         );
     }
 
@@ -1964,12 +2062,25 @@ orders -> pg: CRUD";
             let dst_idx = find_node_by_label(&graph, dst_label);
             let edge = find_edge_between(&graph, src_label, dst_label);
             let label_pos = edge.label_position.unwrap_or_else(|| {
-                panic!("edge {} -> {} should have a label position", src_label, dst_label)
+                panic!(
+                    "edge {} -> {} should have a label position",
+                    src_label, dst_label
+                )
             });
             let lw = edge.label_width;
             let lh = edge.label_height;
-            assert!(lw > 0.0, "label_width should be > 0 for {} -> {}", src_label, dst_label);
-            assert!(lh > 0.0, "label_height should be > 0 for {} -> {}", src_label, dst_label);
+            assert!(
+                lw > 0.0,
+                "label_width should be > 0 for {} -> {}",
+                src_label,
+                dst_label
+            );
+            assert!(
+                lh > 0.0,
+                "label_height should be > 0 for {} -> {}",
+                src_label,
+                dst_label
+            );
 
             // Build label bounding rect with halo padding (matches nudge logic)
             let halo = LABEL_HALO_PADDING;
@@ -1990,10 +2101,17 @@ orders -> pg: CRUD";
                     "label for edge {} -> {} overlaps non-endpoint node {:?} \
                      (label_rect: x={:.1} y={:.1} w={:.1} h={:.1}, \
                       node_rect: x={:.1} y={:.1} w={:.1} h={:.1})",
-                    src_label, dst_label,
+                    src_label,
+                    dst_label,
                     graph.graph[nidx].label,
-                    label_rect.x, label_rect.y, label_rect.width, label_rect.height,
-                    nrect.x, nrect.y, nrect.width, nrect.height,
+                    label_rect.x,
+                    label_rect.y,
+                    label_rect.width,
+                    label_rect.height,
+                    nrect.x,
+                    nrect.y,
+                    nrect.width,
+                    nrect.height,
                 );
             }
         }
@@ -2065,9 +2183,15 @@ orders -> pg: CRUD";
         // should ensure labels don't overlap any non-endpoint leaf node.
         let graph = layout_ok("direction: right\na -> b: first\nb -> c: second\na -> c: direct");
 
-        let node_rects: Vec<(String, crate::geo::Rect)> = graph.objects.iter()
+        let node_rects: Vec<(String, crate::geo::Rect)> = graph
+            .objects
+            .iter()
             .filter(|&&idx| idx != graph.root && !graph.graph[idx].is_container)
-            .filter_map(|&idx| graph.graph[idx].box_.map(|r| (graph.graph[idx].label.clone(), r)))
+            .filter_map(|&idx| {
+                graph.graph[idx]
+                    .box_
+                    .map(|r| (graph.graph[idx].label.clone(), r))
+            })
             .collect();
 
         for &eidx in &graph.edges {
@@ -2076,7 +2200,9 @@ orders -> pg: CRUD";
                 Some(p) => p,
                 None => continue,
             };
-            if edge.label_width < 1.0 || edge.label_height < 1.0 { continue; }
+            if edge.label_width < 1.0 || edge.label_height < 1.0 {
+                continue;
+            }
 
             let (src, dst) = graph.graph.edge_endpoints(eidx).unwrap();
             let pad = LABEL_HALO_PADDING;
@@ -2089,10 +2215,16 @@ orders -> pg: CRUD";
 
             for &(ref name, rect) in &node_rects {
                 let node_idx = find_node_by_label(&graph, name);
-                if node_idx == src || node_idx == dst { continue; }
-                assert!(!lr.intersects(&rect),
+                if node_idx == src || node_idx == dst {
+                    continue;
+                }
+                assert!(
+                    !lr.intersects(&rect),
                     "label at ({:.1},{:.1}) overlaps non-endpoint node '{}'",
-                    pos.x, pos.y, name);
+                    pos.x,
+                    pos.y,
+                    name
+                );
             }
         }
     }
@@ -2183,7 +2315,8 @@ orders -> pg: CRUD";
             assert!(
                 !ortho_segment_hits_rect(&edge_ac.route[i], &edge_ac.route[i + 1], &b_rect, 2.0),
                 "a->c route segment {}-{} should not pass through b's rect (horizontal layout)",
-                i, i + 1,
+                i,
+                i + 1,
             );
         }
     }
@@ -2195,7 +2328,8 @@ orders -> pg: CRUD";
         let graph = layout_ok("a -> b");
         let edge = find_edge_between(&graph, "a", "b");
         assert_eq!(
-            edge.route.len(), 2,
+            edge.route.len(),
+            2,
             "simple a->b should remain a 2-point straight line, got {}",
             edge.route.len()
         );
