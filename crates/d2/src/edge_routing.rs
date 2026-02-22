@@ -22,8 +22,12 @@ const MIN_STUB_LENGTH: f64 = 15.0;
 /// Jog distance past the rightmost/bottommost node for same-rank edges (pixels).
 const SAME_RANK_JOG: f64 = 30.0;
 
-/// Perpendicular offset for edge labels from the path segment (pixels).
-const LABEL_OFFSET: f64 = 10.0;
+/// Padding between label edge and route line (pixels).
+const LABEL_PADDING: f64 = 4.0;
+
+/// Padding around label text for the background halo (pixels).
+/// Shared between edge_routing (nudge) and svg_render (halo rect).
+pub(crate) const LABEL_HALO_PADDING: f64 = 3.0;
 
 // ---------------------------------------------------------------------------
 // Edge classification types
@@ -55,7 +59,7 @@ enum EdgeKind {
 
 /// Route all edges in the graph.
 /// Self-loops get Bézier curves; all other edges get orthogonal routing.
-pub fn route_all_edges(graph: &mut D2Graph) {
+pub fn route_all_edges(graph: &mut D2Graph, font_size: f64, font_family: &str) {
     let edge_indices: Vec<EdgeIndex> = graph.edges.clone();
 
     // Collect self-loop indices and route them with Bézier curves
@@ -81,13 +85,21 @@ pub fn route_all_edges(graph: &mut D2Graph) {
             ));
             graph.graph[eidx].route = route;
             graph.graph[eidx].label_position = label_pos;
+
+            // Measure and store label dimensions for self-loops
+            if let Some(ref label_text) = graph.graph[eidx].label {
+                let fs = graph.graph[eidx].style.font_size.unwrap_or(font_size);
+                let m = crate::text::measure_and_wrap_label(label_text, fs, font_family);
+                graph.graph[eidx].label_width = m.width;
+                graph.graph[eidx].label_height = m.height;
+            }
         } else {
             non_self_loops.push(eidx);
         }
     }
 
     // Route all non-self-loop edges orthogonally
-    route_orthogonal_edges(graph, &non_self_loops);
+    route_orthogonal_edges(graph, &non_self_loops, font_size, font_family);
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +195,7 @@ fn backward_entry(direction: Direction) -> Direction {
 }
 
 /// Route all non-self-loop edges using the three-pass orthogonal algorithm.
-fn route_orthogonal_edges(graph: &mut D2Graph, edge_indices: &[EdgeIndex]) {
+fn route_orthogonal_edges(graph: &mut D2Graph, edge_indices: &[EdgeIndex], font_size: f64, font_family: &str) {
     if edge_indices.is_empty() {
         return;
     }
@@ -315,22 +327,33 @@ fn route_orthogonal_edges(graph: &mut D2Graph, edge_indices: &[EdgeIndex]) {
     // -----------------------------------------------------------------------
     // Pass 3: Build routes and write back to graph
     // -----------------------------------------------------------------------
+
+    // Collect all non-container node rects once for label overlap avoidance.
+    let node_rects = collect_node_rects(graph);
+
     for ec in &classified {
         let src_rect = graph.graph[ec.src].box_.unwrap();
         let dst_rect = graph.graph[ec.dst].box_.unwrap();
 
         let route = build_route(ec, &src_rect, &dst_rect);
 
-        // Label position: midpoint of the route for labeled edges
-        let label_pos = if graph.graph[ec.edge_idx].label.is_some() {
-            compute_label_position(&route)
-        } else {
-            None
-        };
+        // Label position: at 50% of route arc length for labeled edges,
+        // adjusted to avoid overlapping node boxes.
+        let (label_pos, label_w, label_h) =
+            if let Some(ref text) = graph.graph[ec.edge_idx].label {
+                let fs = graph.graph[ec.edge_idx].style.font_size.unwrap_or(font_size);
+                let m = crate::text::measure_and_wrap_label(text, fs, font_family);
+                let pos = compute_label_position(&route, 0.5, m.width, m.height, &node_rects);
+                (pos, m.width, m.height)
+            } else {
+                (None, 0.0, 0.0)
+            };
 
         graph.graph[ec.edge_idx].route = route;
         graph.graph[ec.edge_idx].route_type = RouteType::Orthogonal;
         graph.graph[ec.edge_idx].label_position = label_pos;
+        graph.graph[ec.edge_idx].label_width = label_w;
+        graph.graph[ec.edge_idx].label_height = label_h;
     }
 }
 
@@ -708,39 +731,180 @@ fn build_container_route(ec: &EdgeClassification) -> Vec<Point> {
     }
 }
 
-/// Compute label position for an orthogonal route.
-/// Places label at the midpoint of the enter segment (last segment before
-/// the destination) for 3+ point routes, or at the overall midpoint for
-/// 2-point routes, with an axis-aware offset of `LABEL_OFFSET` pixels.
-/// Horizontal segments offset upward (-Y), vertical segments offset leftward (-X).
-fn compute_label_position(route: &[Point]) -> Option<Point> {
+/// Compute a label candidate position at a given percentage along the route.
+/// Returns the label center point, offset perpendicular to the segment.
+fn label_position_at(
+    route: &[Point],
+    seg_lengths: &[f64],
+    total_length: f64,
+    percentage: f64,
+    label_width: f64,
+    label_height: f64,
+) -> Option<Point> {
+    if total_length < 1e-6 {
+        return Some(route[0]);
+    }
+
+    let target = total_length * percentage.clamp(0.0, 1.0);
+    let mut accumulated = 0.0;
+
+    for (i, &seg_len) in seg_lengths.iter().enumerate() {
+        if accumulated + seg_len >= target || i == seg_lengths.len() - 1 {
+            let t = if seg_len > 1e-6 {
+                (target - accumulated) / seg_len
+            } else {
+                0.5
+            };
+            let a = route[i];
+            let b = route[i + 1];
+            let px = a.x + (b.x - a.x) * t;
+            let py = a.y + (b.y - a.y) * t;
+
+            // Axis-aware perpendicular offset.
+            let dx = b.x - a.x;
+            let dy = b.y - a.y;
+
+            return if dx.abs() > dy.abs() {
+                // Horizontal segment: offset upward by half label height
+                let offset = (label_height / 2.0) + LABEL_PADDING;
+                Some(Point::new(px, py - offset))
+            } else {
+                // Vertical segment: offset leftward by half label width
+                let offset = (label_width / 2.0) + LABEL_PADDING;
+                Some(Point::new(px - offset, py))
+            };
+        }
+        accumulated += seg_len;
+    }
+
+    None
+}
+
+/// Build a bounding Rect for a label centered at `pos`, including halo padding.
+fn label_bounding_rect(pos: Point, label_width: f64, label_height: f64) -> Rect {
+    let half_w = label_width / 2.0 + LABEL_HALO_PADDING;
+    let half_h = label_height / 2.0 + LABEL_HALO_PADDING;
+    Rect::new(pos.x - half_w, pos.y - half_h, half_w * 2.0, half_h * 2.0)
+}
+
+/// Minimum clearance between a label rect and the closest node rect.
+/// Returns `f64::INFINITY` when `node_rects` is empty.
+fn label_clearance(label_rect: &Rect, node_rects: &[Rect]) -> f64 {
+    node_rects
+        .iter()
+        .map(|nr| label_rect.min_separation(nr))
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Nudge a label position away from the nearest overlapping node.
+fn nudge_away_from_nodes(
+    pos: Point,
+    label_width: f64,
+    label_height: f64,
+    node_rects: &[Rect],
+) -> Point {
+    let lr = label_bounding_rect(pos, label_width, label_height);
+
+    // Find the worst-overlapping node
+    let mut worst_sep = 0.0_f64;
+    let mut worst_node: Option<&Rect> = None;
+    for nr in node_rects {
+        let sep = lr.min_separation(nr);
+        if sep < worst_sep {
+            worst_sep = sep;
+            worst_node = Some(nr);
+        }
+    }
+
+    if let Some(node) = worst_node {
+        let nc = node.center();
+        let dx = pos.x - nc.x;
+        let dy = pos.y - nc.y;
+        let dist = (dx * dx + dy * dy).sqrt();
+
+        if dist > 1e-6 {
+            let nudge = (-worst_sep) + LABEL_PADDING;
+            Point::new(pos.x + (dx / dist) * nudge, pos.y + (dy / dist) * nudge)
+        } else {
+            // Coincident centers — nudge upward
+            Point::new(pos.x, pos.y - (-worst_sep) - LABEL_PADDING)
+        }
+    } else {
+        pos
+    }
+}
+
+/// Collect all non-container node bounding boxes for label overlap avoidance.
+fn collect_node_rects(graph: &D2Graph) -> Vec<Rect> {
+    graph
+        .objects
+        .iter()
+        .filter(|&&idx| idx != graph.root && !graph.graph[idx].is_container)
+        .filter_map(|&idx| graph.graph[idx].box_)
+        .collect()
+}
+
+/// Compute label position at a percentage along total route arc length,
+/// avoiding overlap with node bounding boxes.
+///
+/// Tries multiple candidate positions along the route and picks the one
+/// with the greatest clearance from all node rects. If the best candidate
+/// still overlaps, nudges it away from the nearest node.
+fn compute_label_position(
+    route: &[Point],
+    percentage: f64,
+    label_width: f64,
+    label_height: f64,
+    node_rects: &[Rect],
+) -> Option<Point> {
     if route.len() < 2 {
         return None;
     }
 
-    // Select the segment to place the label on
-    let (a, b) = if route.len() == 2 {
-        (route[0], route[1])
-    } else {
-        // Enter segment: last segment before destination
-        let n = route.len();
-        (route[n - 2], route[n - 1])
-    };
-
-    let mid = Point::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0);
-    let dx = b.x - a.x;
-    let dy = b.y - a.y;
-
-    if dx.abs() < 1e-6 && dy.abs() < 1e-6 {
-        return Some(mid);
+    // Pre-compute segment lengths and total arc length.
+    let mut seg_lengths: Vec<f64> = Vec::with_capacity(route.len() - 1);
+    let mut total = 0.0;
+    for i in 0..route.len() - 1 {
+        let len = route[i].distance_to(&route[i + 1]);
+        seg_lengths.push(len);
+        total += len;
     }
 
-    // Axis-aware offset: horizontal → upward, vertical → leftward
-    if dx.abs() > dy.abs() {
-        Some(Point::new(mid.x, mid.y - LABEL_OFFSET))
-    } else {
-        Some(Point::new(mid.x - LABEL_OFFSET, mid.y))
+    // Fast path: no nodes to dodge.
+    if node_rects.is_empty() {
+        return label_position_at(route, &seg_lengths, total, percentage, label_width, label_height);
     }
+
+    // Try candidates at various positions along the route.
+    // Preferred position (percentage) is tried first; alternatives spread outward.
+    const CANDIDATES: [f64; 9] = [0.5, 0.35, 0.65, 0.2, 0.8, 0.15, 0.85, 0.4, 0.6];
+
+    let mut best_pos: Option<Point> = None;
+    let mut best_clearance = f64::NEG_INFINITY;
+
+    for &pct in &CANDIDATES {
+        if let Some(pos) = label_position_at(route, &seg_lengths, total, pct, label_width, label_height) {
+            let lr = label_bounding_rect(pos, label_width, label_height);
+            let clearance = label_clearance(&lr, node_rects);
+            if clearance > best_clearance {
+                best_clearance = clearance;
+                best_pos = Some(pos);
+                // Early exit: large enough clearance, no need to keep searching
+                if clearance > LABEL_PADDING {
+                    break;
+                }
+            }
+        }
+    }
+
+    // If best position still overlaps a node, nudge it away.
+    if best_clearance < 0.0 {
+        if let Some(pos) = best_pos {
+            best_pos = Some(nudge_away_from_nodes(pos, label_width, label_height, node_rects));
+        }
+    }
+
+    best_pos
 }
 
 /// Generate a self-loop path as two cubic Bézier segments.
