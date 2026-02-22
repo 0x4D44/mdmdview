@@ -228,6 +228,24 @@ fn compute_viewbox(graph: &D2Graph) -> (f64, f64, f64, f64) {
         }
     }
 
+    // Include edge label bounding rects (Fix A: prevents label clipping)
+    for &eidx in &graph.edges {
+        let edge = &graph.graph[eidx];
+        if let Some(pos) = edge.label_position {
+            if edge.label_width > 0.0 && edge.label_height > 0.0 {
+                let pad = LABEL_HALO_PADDING;
+                let lx = pos.x - edge.label_width / 2.0 - pad;
+                let ly = pos.y - edge.label_height / 2.0 - pad;
+                let lr = lx + edge.label_width + pad * 2.0;
+                let lb = ly + edge.label_height + pad * 2.0;
+                min_x = min_x.min(lx);
+                min_y = min_y.min(ly);
+                max_x = max_x.max(lr);
+                max_y = max_y.max(lb);
+            }
+        }
+    }
+
     if min_x == f64::INFINITY {
         // Empty diagram
         return (0.0, 0.0, 100.0, 100.0);
