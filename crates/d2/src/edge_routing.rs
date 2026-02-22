@@ -1924,4 +1924,76 @@ orders -> pg: CRUD";
         }
         assert!(found, "self-loop edge on 'a' should exist");
     }
+
+    #[test]
+    fn test_nudge_finds_clear_position() {
+        // Three-node chain where nodes are relatively close. The nudge mechanism
+        // should ensure labels don't overlap any non-endpoint leaf node.
+        let graph = layout_ok("direction: right\na -> b: first\nb -> c: second\na -> c: direct");
+
+        let node_rects: Vec<(String, crate::geo::Rect)> = graph.objects.iter()
+            .filter(|&&idx| idx != graph.root && !graph.graph[idx].is_container)
+            .filter_map(|&idx| graph.graph[idx].box_.map(|r| (graph.graph[idx].label.clone(), r)))
+            .collect();
+
+        for &eidx in &graph.edges {
+            let edge = &graph.graph[eidx];
+            let pos = match edge.label_position {
+                Some(p) => p,
+                None => continue,
+            };
+            if edge.label_width < 1.0 || edge.label_height < 1.0 { continue; }
+
+            let (src, dst) = graph.graph.edge_endpoints(eidx).unwrap();
+            let pad = LABEL_HALO_PADDING;
+            let lr = crate::geo::Rect::new(
+                pos.x - edge.label_width / 2.0 - pad,
+                pos.y - edge.label_height / 2.0 - pad,
+                edge.label_width + pad * 2.0,
+                edge.label_height + pad * 2.0,
+            );
+
+            for &(ref name, rect) in &node_rects {
+                let node_idx = find_node_by_label(&graph, name);
+                if node_idx == src || node_idx == dst { continue; }
+                assert!(!lr.intersects(&rect),
+                    "label at ({:.1},{:.1}) overlaps non-endpoint node '{}'",
+                    pos.x, pos.y, name);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore] // Label-vs-label overlap not detected by design (mitigated by channel spreading).
+              // See design doc: "Label-vs-label overlap: Not detected. Mitigated by channel
+              // spreading. Follow-up if conformance tests surface real cases."
+    fn test_parallel_labels_no_overlap() {
+        // Two labeled edges sharing the same gap: their label rects should not overlap.
+        let graph = layout_ok("direction: right\na -> c: alpha\nb -> c: beta");
+
+        let edge_ac = find_edge_between(&graph, "a", "c");
+        let edge_bc = find_edge_between(&graph, "b", "c");
+
+        let pos_ac = edge_ac.label_position.expect("a->c label");
+        let pos_bc = edge_bc.label_position.expect("b->c label");
+
+        let pad = LABEL_HALO_PADDING;
+        let lr_ac = crate::geo::Rect::new(
+            pos_ac.x - edge_ac.label_width / 2.0 - pad,
+            pos_ac.y - edge_ac.label_height / 2.0 - pad,
+            edge_ac.label_width + pad * 2.0,
+            edge_ac.label_height + pad * 2.0,
+        );
+        let lr_bc = crate::geo::Rect::new(
+            pos_bc.x - edge_bc.label_width / 2.0 - pad,
+            pos_bc.y - edge_bc.label_height / 2.0 - pad,
+            edge_bc.label_width + pad * 2.0,
+            edge_bc.label_height + pad * 2.0,
+        );
+
+        assert!(!lr_ac.intersects(&lr_bc),
+            "parallel labels should not overlap: ac at ({:.1},{:.1}) size {:.1}x{:.1}, bc at ({:.1},{:.1}) size {:.1}x{:.1}",
+            pos_ac.x, pos_ac.y, edge_ac.label_width, edge_ac.label_height,
+            pos_bc.x, pos_bc.y, edge_bc.label_width, edge_bc.label_height);
+    }
 }
