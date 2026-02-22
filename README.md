@@ -343,7 +343,8 @@ mdmdview/
 │   ├── main.wxs                  # WiX installer source (stable GUIDs)
 │   └── License.rtf               # License shown during install
 ├── Cargo.toml                    # Dependencies and build config
-└── README.md                     # This file
+├── README.md                     # This file
+└── tests.md                      # Comprehensive testing guide
 ```
 
 ### Core Components
@@ -431,20 +432,22 @@ The WiX source file (`wix/main.wxs`) is checked into the repository. **Do not re
 
 ### Testing
 
+The project has 1,100+ tests across four categories: unit tests, D2 conformance tests, visual regression tests, and Mermaid visual tests. See **[tests.md](tests.md)** for the full testing guide.
+
 ```bash
-# Run all unit tests
-cargo test
+# Run all unit tests (~8 minutes)
+nice -n 10 mdtimeout 600 cargo test
 
-# Run tests with output
-cargo test -- --nocapture
-
-# Run specific test module
+# Run a specific module (seconds)
 cargo test markdown_renderer
 cargo test app
 cargo test window_state
 
-# Run tests for search functionality
-cargo test search
+# Run with output
+cargo test -- --nocapture
+
+# Pre-release validation
+.\scripts\prerelease.ps1
 ```
 
 ### Visual Regression (Optional)

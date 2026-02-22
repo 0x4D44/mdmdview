@@ -24,7 +24,8 @@ cargo run
 # Run with a specific file
 cargo run -- document.md
 
-# Run tests (~986 tests, takes ~8 minutes on Windows)
+# Run tests (~1,100+ tests, takes ~8 minutes on Windows)
+# See tests.md for the full testing guide
 # Test binary auto-lowers to BELOW_NORMAL priority (see lib.rs test_priority)
 # Use nice + mdtimeout so compilation also runs at low priority
 nice -n 10 mdtimeout 600 cargo test
@@ -282,15 +283,18 @@ Key types for markdown representation:
 - Texture cache managed by MarkdownRenderer
 
 ### Testing Strategy
-- Unit tests for markdown parsing and rendering
-- Integration tests for file loading (use `tempfile` crate)
-- Search functionality tests (Unicode normalization, accent handling)
-- Window state persistence tests
-- Build metadata tests for version parsing and metadata extraction
-- Use `tempfile` crate for file system tests
+
+See **[tests.md](tests.md)** for the comprehensive testing guide covering all test categories, infrastructure, and CI pipelines.
+
+- ~1,100+ tests across unit, D2 conformance, visual regression, and Mermaid visual categories
+- Unit tests for markdown parsing, rendering, app state, window persistence, diagrams, and build metadata
+- D2 conformance tests validate four geometric invariants on diagram output
+- Visual regression tests (26 cases) pixel-diff mdmdview screenshots against baselines
+- Mermaid visual tests (15 cases) compare against official Mermaid CLI output
+- Use `tempfile` crate for file system tests; no mocks — thread-local injection instead
 - Run specific test modules: `cargo test markdown_renderer`, `cargo test app`
 - Run tests after any changes to parsing/rendering logic
-- **Timeouts**: Full test suite (~986 tests) takes ~8 minutes. Always use `nice -n 10 mdtimeout 600` for full runs. Individual test modules complete in seconds.
+- **Timeouts**: Full test suite takes ~8 minutes. Always use `nice -n 10 mdtimeout 600` for full runs. Individual test modules complete in seconds.
 - **CPU priority**: Test binaries automatically lower to `BELOW_NORMAL_PRIORITY_CLASS` on Windows via a `.CRT$XCU` initializer in `lib.rs`. This prevents the ~8-minute test suite from starving interactive applications (especially over remote desktop). Use `nice -n 10` for the `cargo test` command itself to also lower compilation priority.
 
 ### File Operations
