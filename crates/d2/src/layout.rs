@@ -50,7 +50,7 @@ pub fn layout(graph: &mut D2Graph, options: &RenderOptions) -> Result<(), Layout
     normalize_positions(graph);
 
     // Phase 4b: Edge routing (last!)
-    edge_routing::route_all_edges(graph);
+    edge_routing::route_all_edges(graph, font_size, font_family);
 
     Ok(())
 }
