@@ -29,6 +29,14 @@ const LABEL_PADDING: f64 = 4.0;
 /// Shared between edge_routing (nudge) and svg_render (halo rect).
 pub(crate) const LABEL_HALO_PADDING: f64 = 3.0;
 
+/// Maximum perpendicular offset for label placement (pixels).
+/// Prevents labels from drifting too far from their edge on wide/tall labels.
+/// The conformance threshold is 50px; 40px leaves margin for halo padding.
+const MAX_LABEL_OFFSET: f64 = 40.0;
+
+/// Margin for detour routes around blocking nodes (pixels).
+const DETOUR_MARGIN: f64 = 10.0;
+
 // ---------------------------------------------------------------------------
 // Edge classification types
 // ---------------------------------------------------------------------------
@@ -328,14 +336,23 @@ fn route_orthogonal_edges(graph: &mut D2Graph, edge_indices: &[EdgeIndex], font_
     // Pass 3: Build routes and write back to graph
     // -----------------------------------------------------------------------
 
-    // Collect all non-container node rects once for label overlap avoidance.
-    let node_rects = collect_node_rects(graph);
+    // Collect all non-container node rects once for detour and label overlap avoidance.
+    let indexed_rects = collect_node_rects_indexed(graph);
+    let node_rects: Vec<Rect> = indexed_rects.iter().map(|&(_, r)| r).collect();
 
     for ec in &classified {
         let src_rect = graph.graph[ec.src].box_.unwrap();
         let dst_rect = graph.graph[ec.dst].box_.unwrap();
 
-        let route = build_route(ec, &src_rect, &dst_rect);
+        let mut route = build_route(ec, &src_rect, &dst_rect);
+
+        // For forward/backward edges, detour around intermediate nodes
+        if matches!(ec.kind, EdgeKind::Forward | EdgeKind::Backward) {
+            let blockers = find_blocking_rects(&route, ec.src, ec.dst, &indexed_rects);
+            if !blockers.is_empty() {
+                route = detour_around_blockers(route, &blockers, ec.direction);
+            }
+        }
 
         // Label position: at 50% of route arc length for labeled edges,
         // adjusted to avoid overlapping node boxes.
@@ -731,6 +748,133 @@ fn build_container_route(ec: &EdgeClassification) -> Vec<Point> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Detour routing — avoid intermediate nodes for skip-rank edges
+// ---------------------------------------------------------------------------
+
+/// Check if an axis-aligned segment from `a` to `b` intersects `rect`,
+/// shrinking the rect by `margin` to avoid false positives at boundaries.
+fn ortho_segment_hits_rect(a: &Point, b: &Point, rect: &Rect, margin: f64) -> bool {
+    let rx = rect.x + margin;
+    let ry = rect.y + margin;
+    let rr = rect.right() - margin;
+    let rb = rect.bottom() - margin;
+    if rr <= rx || rb <= ry {
+        return false; // rect too small after margin shrink
+    }
+
+    let (x1, x2) = if a.x <= b.x { (a.x, b.x) } else { (b.x, a.x) };
+    let (y1, y2) = if a.y <= b.y { (a.y, b.y) } else { (b.y, a.y) };
+
+    // Ranges must overlap on both axes
+    x1 < rr && x2 > rx && y1 < rb && y2 > ry
+}
+
+/// Find non-endpoint, non-container node rects that any route segment passes through.
+fn find_blocking_rects(
+    route: &[Point],
+    src: NodeIndex,
+    dst: NodeIndex,
+    all_nodes: &[(NodeIndex, Rect)],
+) -> Vec<Rect> {
+    let margin = 2.0;
+    let mut blockers = Vec::new();
+
+    for &(idx, rect) in all_nodes {
+        if idx == src || idx == dst {
+            continue;
+        }
+        for i in 0..route.len().saturating_sub(1) {
+            if ortho_segment_hits_rect(&route[i], &route[i + 1], &rect, margin) {
+                blockers.push(rect);
+                break;
+            }
+        }
+    }
+
+    blockers
+}
+
+/// Detour a route around blocking node rects.
+/// Returns the original route unchanged if no blockers, otherwise builds
+/// a 6-point orthogonal route that goes around the union bounding box.
+fn detour_around_blockers(
+    route: Vec<Point>,
+    blockers: &[Rect],
+    direction: Direction,
+) -> Vec<Point> {
+    if blockers.is_empty() || route.len() < 2 {
+        return route;
+    }
+
+    // Union bounding box of all blockers
+    let mut bbox_x = blockers[0].x;
+    let mut bbox_y = blockers[0].y;
+    let mut bbox_r = blockers[0].right();
+    let mut bbox_b = blockers[0].bottom();
+    for r in &blockers[1..] {
+        bbox_x = bbox_x.min(r.x);
+        bbox_y = bbox_y.min(r.y);
+        bbox_r = bbox_r.max(r.right());
+        bbox_b = bbox_b.max(r.bottom());
+    }
+
+    let src = route[0];
+    let dst = *route.last().unwrap();
+    let m = DETOUR_MARGIN;
+
+    if direction.is_horizontal() {
+        // Primary = x, cross = y. Detour above or below the bbox.
+        let avg_port_y = (src.y + dst.y) / 2.0;
+        let above_y = bbox_y - m;
+        let below_y = bbox_b + m;
+        let detour_y = if (avg_port_y - above_y).abs() <= (avg_port_y - below_y).abs() {
+            above_y
+        } else {
+            below_y
+        };
+
+        vec![
+            src,
+            Point::new(bbox_x - m, src.y),
+            Point::new(bbox_x - m, detour_y),
+            Point::new(bbox_r + m, detour_y),
+            Point::new(bbox_r + m, dst.y),
+            dst,
+        ]
+    } else {
+        // Primary = y, cross = x. Detour left or right of the bbox.
+        let avg_port_x = (src.x + dst.x) / 2.0;
+        let left_x = bbox_x - m;
+        let right_x = bbox_r + m;
+        let detour_x = if (avg_port_x - left_x).abs() <= (avg_port_x - right_x).abs() {
+            left_x
+        } else {
+            right_x
+        };
+
+        vec![
+            src,
+            Point::new(src.x, bbox_y - m),
+            Point::new(detour_x, bbox_y - m),
+            Point::new(detour_x, bbox_b + m),
+            Point::new(dst.x, bbox_b + m),
+            dst,
+        ]
+    }
+}
+
+/// Collect all non-container node bounding boxes with their indices,
+/// for detour and label overlap avoidance.
+fn collect_node_rects_indexed(graph: &D2Graph) -> Vec<(NodeIndex, Rect)> {
+    graph
+        .objects
+        .iter()
+        .filter(|&&idx| idx != graph.root && !graph.graph[idx].is_container)
+        .filter_map(|&idx| graph.graph[idx].box_.map(|r| (idx, r)))
+        .collect()
+}
+
 /// Compute a label candidate position at a given percentage along the route.
 /// Returns the label center point, offset perpendicular to the segment.
 fn label_position_at(
@@ -765,12 +909,12 @@ fn label_position_at(
             let dy = b.y - a.y;
 
             return if dx.abs() > dy.abs() {
-                // Horizontal segment: offset upward by half label height
-                let offset = (label_height / 2.0) + LABEL_PADDING;
+                // Horizontal segment: offset upward by half label height, capped
+                let offset = ((label_height / 2.0) + LABEL_PADDING).min(MAX_LABEL_OFFSET);
                 Some(Point::new(px, py - offset))
             } else {
-                // Vertical segment: offset leftward by half label width
-                let offset = (label_width / 2.0) + LABEL_PADDING;
+                // Vertical segment: offset leftward by half label width, capped
+                let offset = ((label_width / 2.0) + LABEL_PADDING).min(MAX_LABEL_OFFSET);
                 Some(Point::new(px - offset, py))
             };
         }
@@ -832,16 +976,6 @@ fn nudge_away_from_nodes(
     } else {
         pos
     }
-}
-
-/// Collect all non-container node bounding boxes for label overlap avoidance.
-fn collect_node_rects(graph: &D2Graph) -> Vec<Rect> {
-    graph
-        .objects
-        .iter()
-        .filter(|&&idx| idx != graph.root && !graph.graph[idx].is_container)
-        .filter_map(|&idx| graph.graph[idx].box_)
-        .collect()
 }
 
 /// Compute label position at a percentage along total route arc length,
@@ -1995,5 +2129,75 @@ orders -> pg: CRUD";
             "parallel labels should not overlap: ac at ({:.1},{:.1}) size {:.1}x{:.1}, bc at ({:.1},{:.1}) size {:.1}x{:.1}",
             pos_ac.x, pos_ac.y, edge_ac.label_width, edge_ac.label_height,
             pos_bc.x, pos_bc.y, edge_bc.label_width, edge_bc.label_height);
+    }
+
+    // --- detour routing tests ------------------------------------------------
+
+    #[test]
+    fn test_detour_avoids_intermediate_node() {
+        // 3-node vertical chain: a -> b, a -> c, b -> c
+        // The a -> c edge should not pass through b's rect
+        let graph = layout_ok("a -> b\na -> c\nb -> c");
+
+        let b_rect = graph.graph[find_node_by_label(&graph, "b")].box_.unwrap();
+        let edge_ac = find_edge_between(&graph, "a", "c");
+
+        // Verify route has more than 2 points (detour was applied)
+        assert!(
+            edge_ac.route.len() > 2,
+            "a->c should have a detour route (>2 points), got {}",
+            edge_ac.route.len()
+        );
+
+        // Check that no segment of a->c route intersects b's rect
+        for i in 0..edge_ac.route.len().saturating_sub(1) {
+            assert!(
+                !ortho_segment_hits_rect(&edge_ac.route[i], &edge_ac.route[i + 1], &b_rect, 2.0),
+                "a->c route segment {}-{} at ({:.1},{:.1})->({:.1},{:.1}) should not pass through b's rect \
+                 (x={:.1} y={:.1} w={:.1} h={:.1})",
+                i, i + 1,
+                edge_ac.route[i].x, edge_ac.route[i].y,
+                edge_ac.route[i + 1].x, edge_ac.route[i + 1].y,
+                b_rect.x, b_rect.y, b_rect.width, b_rect.height,
+            );
+        }
+    }
+
+    #[test]
+    fn test_detour_horizontal_direction() {
+        // Same pattern with direction: right
+        let graph = layout_ok("direction: right\na -> b\na -> c\nb -> c");
+
+        let b_rect = graph.graph[find_node_by_label(&graph, "b")].box_.unwrap();
+        let edge_ac = find_edge_between(&graph, "a", "c");
+
+        // Verify route has more than 2 points (detour was applied)
+        assert!(
+            edge_ac.route.len() > 2,
+            "a->c should have a detour route (>2 points) in horizontal layout, got {}",
+            edge_ac.route.len()
+        );
+
+        // Check that no segment of a->c route intersects b's rect
+        for i in 0..edge_ac.route.len().saturating_sub(1) {
+            assert!(
+                !ortho_segment_hits_rect(&edge_ac.route[i], &edge_ac.route[i + 1], &b_rect, 2.0),
+                "a->c route segment {}-{} should not pass through b's rect (horizontal layout)",
+                i, i + 1,
+            );
+        }
+    }
+
+    #[test]
+    fn test_detour_no_false_positive() {
+        // Simple a -> b with no intermediate nodes — route should be unchanged
+        // (straight line, 2 points).
+        let graph = layout_ok("a -> b");
+        let edge = find_edge_between(&graph, "a", "b");
+        assert_eq!(
+            edge.route.len(), 2,
+            "simple a->b should remain a 2-point straight line, got {}",
+            edge.route.len()
+        );
     }
 }
