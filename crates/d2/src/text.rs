@@ -83,6 +83,7 @@ pub fn shape_padding(shape: ShapeType) -> (f64, f64) {
         ShapeType::Diamond => (40.0, 30.0),
         ShapeType::Hexagon => (25.0, 15.0),
         ShapeType::Cylinder => (20.0, 30.0),
+        ShapeType::Person => (20.0, 30.0),
         ShapeType::Text => (0.0, 0.0),
         _ => (20.0, 12.0), // Rectangle/Square and all others
     }

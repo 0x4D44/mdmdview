@@ -721,13 +721,22 @@ fn render_labels(graph: &D2Graph, theme: &Theme, options: &RenderOptions, svg: &
         let font_style = if obj.style.italic { "italic" } else { "normal" };
 
         let cx = rect.x + rect.width / 2.0;
-        // For cylinders, shift the label center down by ry/2 so it sits
-        // in the rectangular body below the elliptical top cap.
-        let cy = if obj.shape == ShapeType::Cylinder {
-            let ry = 10.0_f64.min(rect.height * 0.15);
-            rect.y + rect.height / 2.0 + ry / 2.0
-        } else {
-            rect.y + rect.height / 2.0
+        // Shapes with a decorative top region need the label shifted down
+        // into the usable body area.
+        let cy = match obj.shape {
+            ShapeType::Cylinder => {
+                // Body sits below the elliptical top cap (height 2*ry).
+                let ry = 10.0_f64.min(rect.height * 0.15);
+                rect.y + rect.height / 2.0 + ry / 2.0
+            }
+            ShapeType::Person => {
+                // Body sits below the circle head.
+                let head_r = rect.width.min(rect.height) * 0.2;
+                let body_top = rect.y + 2.0 * head_r + 6.0;
+                let body_bottom = rect.y + rect.height - 2.0;
+                (body_top + body_bottom) / 2.0
+            }
+            _ => rect.y + rect.height / 2.0,
         };
 
         let decoration = if obj.style.underline {
@@ -1024,6 +1033,48 @@ mod tests {
             clearance >= 4.0,
             "cylinder label top ({text_top:.1}) must be >= 4px below \
              cap bottom ({cap_bottom:.1}), got {clearance:.1}px clearance.\n\
+             SVG:\n{svg}"
+        );
+    }
+
+    /// Extract cx, cy, r from the first `<circle>` in the SVG.
+    fn extract_first_circle(svg: &str) -> (f64, f64, f64) {
+        let start = svg.find("<circle ").expect("should contain <circle>");
+        let end = svg[start..].find("/>").unwrap() + start;
+        let tag = &svg[start..end];
+
+        let cx = extract_svg_attr_f64(tag, "cx");
+        let cy = extract_svg_attr_f64(tag, "cy");
+        let r = extract_svg_attr_f64(tag, "r");
+        (cx, cy, r)
+    }
+
+    fn extract_svg_attr_f64(tag: &str, attr: &str) -> f64 {
+        let needle = format!("{attr}=\"");
+        let pos = tag.find(&needle).unwrap_or_else(|| panic!("missing {attr}"));
+        let start = pos + needle.len();
+        let end = tag[start..].find('"').unwrap() + start;
+        tag[start..end].parse().unwrap()
+    }
+
+    #[test]
+    fn test_person_label_below_head() {
+        // Person labels must sit in the rectangular body, below the head circle.
+        let graph = layout_ok("user: User {shape: person}");
+        let svg = render(&graph, &RenderOptions::default());
+
+        let label_y = extract_text_y(&svg, "User");
+        let (_head_cx, head_cy, head_r) = extract_first_circle(&svg);
+        let head_bottom = head_cy + head_r;
+
+        let font_size = 14.0;
+        let text_top = label_y - font_size / 2.0;
+
+        let clearance = text_top - head_bottom;
+        assert!(
+            clearance >= 4.0,
+            "person label top ({text_top:.1}) must be >= 4px below \
+             head bottom ({head_bottom:.1}), got {clearance:.1}px clearance.\n\
              SVG:\n{svg}"
         );
     }
