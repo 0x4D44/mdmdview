@@ -369,6 +369,9 @@ fn route_orthogonal_edges(
         graph.graph[ec.edge_idx].label_width = label_w;
         graph.graph[ec.edge_idx].label_height = label_h;
     }
+
+    // Pass 4: Resolve inter-label overlaps
+    resolve_label_overlaps(graph, &node_rects);
 }
 
 /// Compute gap for a forward edge (src before dst in layout direction).
@@ -1010,6 +1013,93 @@ fn nudge_away_from_nodes(
         }
     } else {
         pos
+    }
+}
+
+/// Post-placement pass: resolve overlapping edge labels by nudging them apart.
+/// Each overlapping pair is separated along the axis with less overlap,
+/// moving each label by half the needed separation.
+fn resolve_label_overlaps(graph: &mut D2Graph, node_rects: &[Rect]) {
+    // Collect indices of edges that have placed labels.
+    let labeled: Vec<EdgeIndex> = graph
+        .edges
+        .iter()
+        .filter(|&&eidx| {
+            let edge = &graph.graph[eidx];
+            edge.label_position.is_some() && edge.label_width > 0.0
+        })
+        .copied()
+        .collect();
+
+    if labeled.len() < 2 {
+        return;
+    }
+
+    // For each overlapping pair, nudge apart using current (possibly already-nudged) positions.
+    for i in 0..labeled.len() {
+        for j in (i + 1)..labeled.len() {
+            let ei = labeled[i];
+            let ej = labeled[j];
+
+            // Read current positions (may have been nudged by earlier iterations).
+            let pos_i = match graph.graph[ei].label_position {
+                Some(p) => p,
+                None => continue,
+            };
+            let pos_j = match graph.graph[ej].label_position {
+                Some(p) => p,
+                None => continue,
+            };
+
+            let rect_i = label_bounding_rect(pos_i, graph.graph[ei].label_width, graph.graph[ei].label_height);
+            let rect_j = label_bounding_rect(pos_j, graph.graph[ej].label_width, graph.graph[ej].label_height);
+
+            if !rect_i.intersects(&rect_j) {
+                continue;
+            }
+
+            // Compute overlap on each axis.
+            let overlap_x = rect_i.right().min(rect_j.right()) - rect_i.x.max(rect_j.x);
+            let overlap_y = rect_i.bottom().min(rect_j.bottom()) - rect_i.y.max(rect_j.y);
+
+            // Nudge along the axis with LESS overlap (minimum displacement).
+            if overlap_x < overlap_y {
+                // Separate horizontally.
+                let half = (overlap_x / 2.0) + LABEL_PADDING;
+                if pos_i.x <= pos_j.x {
+                    graph.graph[ei].label_position = Some(Point::new(pos_i.x - half, pos_i.y));
+                    graph.graph[ej].label_position = Some(Point::new(pos_j.x + half, pos_j.y));
+                } else {
+                    graph.graph[ei].label_position = Some(Point::new(pos_i.x + half, pos_i.y));
+                    graph.graph[ej].label_position = Some(Point::new(pos_j.x - half, pos_j.y));
+                }
+            } else {
+                // Separate vertically.
+                let half = (overlap_y / 2.0) + LABEL_PADDING;
+                if pos_i.y <= pos_j.y {
+                    graph.graph[ei].label_position = Some(Point::new(pos_i.x, pos_i.y - half));
+                    graph.graph[ej].label_position = Some(Point::new(pos_j.x, pos_j.y + half));
+                } else {
+                    graph.graph[ei].label_position = Some(Point::new(pos_i.x, pos_i.y + half));
+                    graph.graph[ej].label_position = Some(Point::new(pos_j.x, pos_j.y - half));
+                }
+            }
+        }
+    }
+
+    // After nudging labels apart, re-check each against node rects.
+    for &eidx in &labeled {
+        let pos = match graph.graph[eidx].label_position {
+            Some(p) => p,
+            None => continue,
+        };
+        let w = graph.graph[eidx].label_width;
+        let h = graph.graph[eidx].label_height;
+        let lr = label_bounding_rect(pos, w, h);
+        let clearance = label_clearance(&lr, node_rects);
+        if clearance < 0.0 {
+            graph.graph[eidx].label_position = Some(nudge_away_from_nodes(pos, w, h, node_rects));
+        }
     }
 }
 
@@ -2303,9 +2393,6 @@ orders -> pg: CRUD";
     }
 
     #[test]
-    #[ignore] // Label-vs-label overlap not detected by design (mitigated by channel spreading).
-              // See design doc: "Label-vs-label overlap: Not detected. Mitigated by channel
-              // spreading. Follow-up if conformance tests surface real cases."
     fn test_parallel_labels_no_overlap() {
         // Two labeled edges sharing the same gap: their label rects should not overlap.
         let graph = layout_ok("direction: right\na -> c: alpha\nb -> c: beta");
