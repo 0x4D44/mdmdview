@@ -253,10 +253,15 @@ impl CompileContext {
             self.graph.graph[target].label = primary.as_str();
         }
 
-        // Process nested map value
+        // Process nested map value.
+        // Only mark as container if the map actually creates child objects.
+        // Property-only maps like `{shape: person}` or `{style.fill: red}`
+        // don't make the node a container — they're just attribute blocks.
         if let Some(Value::Map(ref map)) = key.value {
-            self.graph.graph[target].is_container = true;
             self.compile_map(map, target)?;
+            if !self.graph.graph[target].children.is_empty() {
+                self.graph.graph[target].is_container = true;
+            }
         }
 
         Ok(())
@@ -861,5 +866,46 @@ api -> db: queries
             graph.graph[graph.objects[0]].style.fill.is_some(),
             "expected fill to be set via dotted-key style inside container"
         );
+    }
+
+    #[test]
+    fn test_inline_shape_not_container() {
+        // `user: User {shape: person}` should create a Person shape, NOT a container.
+        // The `{...}` block here is an attribute map, not a child container.
+        let graph = compile_ok("user: User {shape: person}");
+        assert_eq!(graph.objects.len(), 1);
+        let obj = &graph.graph[graph.objects[0]];
+        assert_eq!(obj.id, "user");
+        assert_eq!(obj.label, "User");
+        assert_eq!(obj.shape, ShapeType::Person);
+        assert!(
+            !obj.is_container,
+            "shape with inline property map should NOT be marked as container"
+        );
+    }
+
+    #[test]
+    fn test_inline_style_not_container() {
+        // Property-only map should not create a container
+        let graph = compile_ok("x: {\n  style.fill: red\n  shape: diamond\n}");
+        let obj = &graph.graph[graph.objects[0]];
+        assert_eq!(obj.shape, ShapeType::Diamond);
+        assert!(
+            !obj.is_container,
+            "node with only properties should NOT be a container"
+        );
+    }
+
+    #[test]
+    fn test_container_with_children_and_shape() {
+        // A node with both children AND a shape IS a container
+        let graph = compile_ok("group: {\n  shape: hexagon\n  a\n  b\n}");
+        let group = &graph.graph[graph.objects[0]];
+        assert_eq!(group.shape, ShapeType::Hexagon);
+        assert!(
+            group.is_container,
+            "node with children should be a container even if it also has shape"
+        );
+        assert_eq!(group.children.len(), 2);
     }
 }
