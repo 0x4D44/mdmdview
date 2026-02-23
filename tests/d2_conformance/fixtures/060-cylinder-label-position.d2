@@ -1,0 +1,10 @@
+# 060-cylinder-label-position.d2
+# Tests: cylinder shape label must sit inside the rectangular body,
+# not overlap the elliptical top cap.
+
+users: Users {shape: cylinder}
+cache: Cache {shape: cylinder}
+db: PostgreSQL {shape: cylinder}
+
+users -> cache: sessions
+cache -> db: persist

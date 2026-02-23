@@ -964,46 +964,67 @@ mod tests {
         );
     }
 
+    /// Extract the y attribute from a `<text>` tag preceding the given marker text.
+    fn extract_text_y(svg: &str, marker_text: &str) -> f64 {
+        let marker = format!(">{marker_text}</text>");
+        let text_tag_end = svg
+            .find(&marker)
+            .unwrap_or_else(|| panic!("should contain '{marker_text}' label"));
+        let text_tag_start = svg[..text_tag_end]
+            .rfind("<text ")
+            .expect("should find <text");
+        let text_tag = &svg[text_tag_start..text_tag_end];
+
+        let y_pos = text_tag.find(" y=\"").expect("text tag should have y attr");
+        let y_start = y_pos + 4;
+        let y_end = text_tag[y_start..].find('"').unwrap() + y_start;
+        text_tag[y_start..y_end]
+            .parse()
+            .unwrap_or_else(|_| panic!("y attr '{}' should be a number", &text_tag[y_start..y_end]))
+    }
+
+    /// Extract cy attribute from the first `<ellipse>` in the SVG.
+    fn extract_first_ellipse_cy_ry(svg: &str) -> (f64, f64) {
+        let start = svg.find("<ellipse ").expect("should contain <ellipse>");
+        let end = svg[start..].find("/>").unwrap() + start;
+        let tag = &svg[start..end];
+
+        let cy_pos = tag.find("cy=\"").expect("ellipse needs cy");
+        let cy_start = cy_pos + 4;
+        let cy_end = tag[cy_start..].find('"').unwrap() + cy_start;
+        let cy: f64 = tag[cy_start..cy_end].parse().unwrap();
+
+        let ry_pos = tag.find("ry=\"").expect("ellipse needs ry");
+        let ry_start = ry_pos + 4;
+        let ry_end = tag[ry_start..].find('"').unwrap() + ry_start;
+        let ry: f64 = tag[ry_start..ry_end].parse().unwrap();
+
+        (cy, ry)
+    }
+
     #[test]
     fn test_cylinder_label_below_cap() {
-        // Cylinder labels should be centered in the rectangular body,
-        // not at the geometric center of the bounding box (which overlaps
-        // the elliptical top cap).
+        // Cylinder labels must sit in the rectangular body, fully below the
+        // elliptical top cap.  We verify this against the actual SVG output:
+        // the label text y must be below cap_bottom + half the font height.
         let graph = layout_ok("db: User {shape: cylinder}");
         let svg = render(&graph, &RenderOptions::default());
 
-        let obj = &graph.graph[graph.objects[0]];
-        let rect = obj.box_.unwrap();
-        let ry = 10.0_f64.min(rect.height * 0.15);
+        let label_y = extract_text_y(&svg, "User");
+        let (cap_cy, cap_ry) = extract_first_ellipse_cy_ry(&svg);
+        let cap_bottom = cap_cy + cap_ry;
 
-        // Expected: label centered in the body below the cap
-        let expected_cy = rect.y + rect.height / 2.0 + ry / 2.0;
-        let geo_center = rect.y + rect.height / 2.0;
+        // With dominant-baseline="central", the y value is the text center.
+        // The top of the text glyph is roughly y - font_size/2.
+        let font_size = 14.0;
+        let text_top = label_y - font_size / 2.0;
 
-        // Find the <text ...>User</text> element and extract its y attribute.
-        // Pattern: y="<number>" ... dominant-baseline="central">User</text>
-        let text_tag_end = svg.find(">User</text>").expect("should contain User label");
-        // Walk backwards to find the opening <text
-        let text_tag_start = svg[..text_tag_end].rfind("<text ").expect("should find <text");
-        let text_tag = &svg[text_tag_start..text_tag_end];
-
-        // Extract y="..." from the tag
-        let y_pos = text_tag.find(" y=\"").expect("text tag should have y attr");
-        let y_start = y_pos + 4; // skip ' y="'
-        let y_end = text_tag[y_start..].find('"').unwrap() + y_start;
-        let y_val: f64 = text_tag[y_start..y_end]
-            .parse()
-            .unwrap_or_else(|_| panic!("y attr '{}' should be a number", &text_tag[y_start..y_end]));
-
-        // Label should be closer to the body center than the geometric center
-        let offset_from_geo = y_val - geo_center;
+        let clearance = text_top - cap_bottom;
         assert!(
-            offset_from_geo > 0.5,
-            "cylinder label y={y_val:.2} should be shifted below geometric center {geo_center:.2}"
-        );
-        assert!(
-            (y_val - expected_cy).abs() < 0.1,
-            "cylinder label y={y_val:.2} should be {expected_cy:.2} (center + ry/2 offset)"
+            clearance >= 4.0,
+            "cylinder label top ({text_top:.1}) must be >= 4px below \
+             cap bottom ({cap_bottom:.1}), got {clearance:.1}px clearance.\n\
+             SVG:\n{svg}"
         );
     }
 }
