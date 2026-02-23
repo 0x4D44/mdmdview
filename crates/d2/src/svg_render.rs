@@ -721,7 +721,14 @@ fn render_labels(graph: &D2Graph, theme: &Theme, options: &RenderOptions, svg: &
         let font_style = if obj.style.italic { "italic" } else { "normal" };
 
         let cx = rect.x + rect.width / 2.0;
-        let cy = rect.y + rect.height / 2.0;
+        // For cylinders, shift the label center down by ry/2 so it sits
+        // in the rectangular body below the elliptical top cap.
+        let cy = if obj.shape == ShapeType::Cylinder {
+            let ry = 10.0_f64.min(rect.height * 0.15);
+            rect.y + rect.height / 2.0 + ry / 2.0
+        } else {
+            rect.y + rect.height / 2.0
+        };
 
         let decoration = if obj.style.underline {
             " text-decoration=\"underline\""
@@ -954,6 +961,49 @@ mod tests {
         assert!(
             svg.contains(" L ") || svg.contains(" Q "),
             "orthogonal route SVG should contain L or Q commands"
+        );
+    }
+
+    #[test]
+    fn test_cylinder_label_below_cap() {
+        // Cylinder labels should be centered in the rectangular body,
+        // not at the geometric center of the bounding box (which overlaps
+        // the elliptical top cap).
+        let graph = layout_ok("db: User {shape: cylinder}");
+        let svg = render(&graph, &RenderOptions::default());
+
+        let obj = &graph.graph[graph.objects[0]];
+        let rect = obj.box_.unwrap();
+        let ry = 10.0_f64.min(rect.height * 0.15);
+
+        // Expected: label centered in the body below the cap
+        let expected_cy = rect.y + rect.height / 2.0 + ry / 2.0;
+        let geo_center = rect.y + rect.height / 2.0;
+
+        // Find the <text ...>User</text> element and extract its y attribute.
+        // Pattern: y="<number>" ... dominant-baseline="central">User</text>
+        let text_tag_end = svg.find(">User</text>").expect("should contain User label");
+        // Walk backwards to find the opening <text
+        let text_tag_start = svg[..text_tag_end].rfind("<text ").expect("should find <text");
+        let text_tag = &svg[text_tag_start..text_tag_end];
+
+        // Extract y="..." from the tag
+        let y_pos = text_tag.find(" y=\"").expect("text tag should have y attr");
+        let y_start = y_pos + 4; // skip ' y="'
+        let y_end = text_tag[y_start..].find('"').unwrap() + y_start;
+        let y_val: f64 = text_tag[y_start..y_end]
+            .parse()
+            .unwrap_or_else(|_| panic!("y attr '{}' should be a number", &text_tag[y_start..y_end]));
+
+        // Label should be closer to the body center than the geometric center
+        let offset_from_geo = y_val - geo_center;
+        assert!(
+            offset_from_geo > 0.5,
+            "cylinder label y={y_val:.2} should be shifted below geometric center {geo_center:.2}"
+        );
+        assert!(
+            (y_val - expected_cy).abs() < 0.1,
+            "cylinder label y={y_val:.2} should be {expected_cy:.2} (center + ry/2 offset)"
         );
     }
 }
