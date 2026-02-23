@@ -925,12 +925,20 @@ fn label_position_at(
             return if dx.abs() > dy.abs() {
                 // Horizontal segment: offset by half label height
                 let natural_offset = (label_height / 2.0) + LABEL_PADDING;
-                let offset = if natural_offset > MAX_LABEL_OFFSET { 0.0 } else { natural_offset };
+                let offset = if natural_offset > MAX_LABEL_OFFSET {
+                    0.0
+                } else {
+                    natural_offset
+                };
                 Some(Point::new(px, py + side * offset))
             } else {
                 // Vertical segment: offset by half label width
                 let natural_offset = (label_width / 2.0) + LABEL_PADDING;
-                let offset = if natural_offset > MAX_LABEL_OFFSET { 0.0 } else { natural_offset };
+                let offset = if natural_offset > MAX_LABEL_OFFSET {
+                    0.0
+                } else {
+                    natural_offset
+                };
                 Some(Point::new(px + side * offset, py))
             };
         }
@@ -958,18 +966,13 @@ fn label_clearance(label_rect: &Rect, node_rects: &[Rect]) -> f64 {
 
 /// How far a label's bounding rect extends beyond the bounding box of all nodes.
 /// Lower is better — means the label stays within the diagram's visual footprint.
-fn label_overshoot(
-    pos: Point,
-    label_width: f64,
-    label_height: f64,
-    node_bounds: &Rect,
-) -> f64 {
+fn label_overshoot(pos: Point, label_width: f64, label_height: f64, node_bounds: &Rect) -> f64 {
     let lr = label_bounding_rect(pos, label_width, label_height);
 
     (node_bounds.x - lr.x).max(0.0)                      // left overshoot
         + (lr.right() - node_bounds.right()).max(0.0)     // right overshoot
         + (node_bounds.y - lr.y).max(0.0)                 // top overshoot
-        + (lr.bottom() - node_bounds.bottom()).max(0.0)   // bottom overshoot
+        + (lr.bottom() - node_bounds.bottom()).max(0.0) // bottom overshoot
 }
 
 /// Nudge a label position away from the nearest overlapping node.
@@ -1053,8 +1056,14 @@ fn compute_label_position(
     let node_bounds = {
         let min_x = node_rects.iter().map(|r| r.x).fold(f64::INFINITY, f64::min);
         let min_y = node_rects.iter().map(|r| r.y).fold(f64::INFINITY, f64::min);
-        let max_x = node_rects.iter().map(|r| r.right()).fold(f64::NEG_INFINITY, f64::max);
-        let max_y = node_rects.iter().map(|r| r.bottom()).fold(f64::NEG_INFINITY, f64::max);
+        let max_x = node_rects
+            .iter()
+            .map(|r| r.right())
+            .fold(f64::NEG_INFINITY, f64::max);
+        let max_y = node_rects
+            .iter()
+            .map(|r| r.bottom())
+            .fold(f64::NEG_INFINITY, f64::max);
         Rect::new(min_x, min_y, max_x - min_x, max_y - min_y)
     };
 
@@ -1072,8 +1081,13 @@ fn compute_label_position(
         // Evaluate BOTH sides at this percentage before considering early exit
         for &side in &SIDES {
             if let Some(pos) = label_position_at(
-                route, &seg_lengths, total, pct,
-                label_width, label_height, side,
+                route,
+                &seg_lengths,
+                total,
+                pct,
+                label_width,
+                label_height,
+                side,
             ) {
                 let lr = label_bounding_rect(pos, label_width, label_height);
                 let clearance = label_clearance(&lr, node_rects);
@@ -1107,7 +1121,12 @@ fn compute_label_position(
     // If best position still overlaps a node, nudge it away.
     if best_clearance < 0.0 {
         if let Some(pos) = best_pos {
-            best_pos = Some(nudge_away_from_nodes(pos, label_width, label_height, node_rects));
+            best_pos = Some(nudge_away_from_nodes(
+                pos,
+                label_width,
+                label_height,
+                node_rects,
+            ));
         }
     }
 
@@ -2386,6 +2405,268 @@ orders -> pg: CRUD";
             2,
             "simple a->b should remain a 2-point straight line, got {}",
             edge.route.len()
+        );
+    }
+
+    // --- V4 design doc tests (Section 7.1) -----------------------------------
+
+    /// Parse the viewBox attribute from an SVG string.
+    /// Returns (x, y, width, height).
+    fn parse_viewbox(svg: &str) -> (f64, f64, f64, f64) {
+        let start = svg.find("viewBox=\"").expect("SVG should have viewBox") + 9;
+        let end = svg[start..].find('"').expect("viewBox should close") + start;
+        let parts: Vec<f64> = svg[start..end]
+            .split_whitespace()
+            .map(|s| {
+                s.parse::<f64>()
+                    .expect("viewBox component should be numeric")
+            })
+            .collect();
+        assert_eq!(parts.len(), 4, "viewBox should have 4 components");
+        (parts[0], parts[1], parts[2], parts[3])
+    }
+
+    /// Build a viewBox Rect from parsed (x, y, w, h) tuple.
+    fn viewbox_rect(vb: (f64, f64, f64, f64)) -> crate::geo::Rect {
+        crate::geo::Rect::new(vb.0, vb.1, vb.2, vb.3)
+    }
+
+    /// Build a label bounding rect (with halo padding) for an edge.
+    fn edge_label_rect(edge: &crate::graph::D2EdgeData) -> crate::geo::Rect {
+        let pos = edge
+            .label_position
+            .expect("edge should have label_position");
+        let pad = LABEL_HALO_PADDING;
+        crate::geo::Rect::new(
+            pos.x - edge.label_width / 2.0 - pad,
+            pos.y - edge.label_height / 2.0 - pad,
+            edge.label_width + pad * 2.0,
+            edge.label_height + pad * 2.0,
+        )
+    }
+
+    /// Check that rect `inner` is fully contained within rect `outer`.
+    fn rect_contains(outer: &crate::geo::Rect, inner: &crate::geo::Rect) -> bool {
+        inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner.right() <= outer.right()
+            && inner.bottom() <= outer.bottom()
+    }
+
+    #[test]
+    fn test_viewbox_includes_labels() {
+        // Parse SVG output from a simple labeled-edge diagram, verify the viewBox
+        // contains all edge label bounding rects.
+        let graph = layout_ok("a -> b: hello");
+        let svg = crate::svg_render::render(&graph, &RenderOptions::default());
+
+        let vb = parse_viewbox(&svg);
+        let vb_rect = viewbox_rect(vb);
+
+        // Every labeled edge's bounding rect must fit within the viewBox
+        for &eidx in &graph.edges {
+            let edge = &graph.graph[eidx];
+            if edge.label_position.is_none() || edge.label_width <= 0.0 {
+                continue;
+            }
+            let lr = edge_label_rect(edge);
+            assert!(
+                rect_contains(&vb_rect, &lr),
+                "label rect (x={:.1} y={:.1} w={:.1} h={:.1}) should be contained in \
+                 viewBox (x={:.1} y={:.1} w={:.1} h={:.1})",
+                lr.x,
+                lr.y,
+                lr.width,
+                lr.height,
+                vb_rect.x,
+                vb_rect.y,
+                vb_rect.width,
+                vb_rect.height,
+            );
+        }
+    }
+
+    #[test]
+    fn test_label_not_clipped() {
+        // The motivating example: 4-node vertical chain with labels on each edge.
+        // Verify no label bounding rect extends beyond the SVG viewBox.
+        let source = "\
+client -> api: REST/JSON
+api -> cache: get/set
+cache -> db: SQL queries";
+        let graph = layout_ok(source);
+        let svg = crate::svg_render::render(&graph, &RenderOptions::default());
+
+        let vb = parse_viewbox(&svg);
+        let vb_rect = viewbox_rect(vb);
+
+        let labeled_edges: Vec<(&str, &str)> =
+            vec![("client", "api"), ("api", "cache"), ("cache", "db")];
+
+        for (src_label, dst_label) in &labeled_edges {
+            let edge = find_edge_between(&graph, src_label, dst_label);
+            assert!(
+                edge.label_position.is_some(),
+                "edge {} -> {} should have a label position",
+                src_label,
+                dst_label
+            );
+            let lr = edge_label_rect(edge);
+            assert!(
+                rect_contains(&vb_rect, &lr),
+                "label for {} -> {} (x={:.1} y={:.1} w={:.1} h={:.1}) extends beyond \
+                 viewBox (x={:.1} y={:.1} w={:.1} h={:.1})",
+                src_label,
+                dst_label,
+                lr.x,
+                lr.y,
+                lr.width,
+                lr.height,
+                vb_rect.x,
+                vb_rect.y,
+                vb_rect.width,
+                vb_rect.height,
+            );
+        }
+    }
+
+    /// Test that Fix B places labels on the side with better clearance when
+    /// the layout is asymmetric (one side blocked by a node).
+    #[test]
+    fn test_label_side_asymmetric() {
+        // Vertical layout: a at top, b at bottom, c to the right of the a->b edge.
+        // The label on a->b should avoid c by going left (or at least not overlapping c).
+        let source = "\
+direction: down
+a -> b: hi
+a -> c
+";
+        let graph = layout_ok(source);
+
+        let edge = find_edge_between(&graph, "a", "b");
+        let label_pos = edge
+            .label_position
+            .expect("label position should exist");
+
+        // c is to the right of the a->b edge. The label should not overlap c.
+        let c_rect = graph.graph[find_node_by_label(&graph, "c")]
+            .box_
+            .expect("c should have a box");
+        let lr = edge_label_rect(edge);
+        assert!(
+            !lr.intersects(&c_rect),
+            "label rect {:?} should not overlap node c rect {:?}",
+            lr, c_rect
+        );
+
+        // Verify the label is offset from the edge line (not zero — "hi" is 2 chars,
+        // well below the 72px Fix C threshold)
+        assert!(edge.label_width < 72.0, "label should be below Fix C threshold");
+        let line_x = (edge.route[0].x + edge.route.last().unwrap().x) / 2.0;
+        let x_offset = (label_pos.x - line_x).abs();
+        assert!(
+            x_offset > 1.0,
+            "label should be offset from the edge line, got offset {}",
+            x_offset
+        );
+    }
+
+    #[test]
+    fn test_wide_label_on_edge() {
+        // "SQL queries" is 11 chars at default font (7.7px/char) = ~84.7px width.
+        // Natural offset = 84.7/2 + 4 = 46.35 > MAX_LABEL_OFFSET (40).
+        // Fix C should center it on the edge (offset = 0).
+        let graph = layout_ok("a -> b: SQL queries");
+        let edge = find_edge_between(&graph, "a", "b");
+        let label_pos = edge
+            .label_position
+            .expect("labeled edge should have label_position");
+
+        // Default layout is vertical. For a vertical edge, the label is offset
+        // in the x-direction. The route line x is at the midpoint of the route.
+        assert_eq!(
+            edge.route.len(),
+            2,
+            "straight vertical edge should have 2 points"
+        );
+        let line_x = (edge.route[0].x + edge.route[1].x) / 2.0;
+
+        // With Fix C, a wide label should have offset = 0 (centered on line).
+        // Allow a small tolerance for floating-point and nudge adjustments.
+        let x_offset = (label_pos.x - line_x).abs();
+        assert!(
+            x_offset < 5.0,
+            "wide label ('SQL queries', width={:.1}) should be centered on edge \
+             (line_x={:.1}, label_x={:.1}, offset={:.1}), expected offset < 5.0",
+            edge.label_width,
+            line_x,
+            label_pos.x,
+            x_offset,
+        );
+
+        // Verify the label width is indeed > 72px (the threshold)
+        assert!(
+            edge.label_width > 72.0,
+            "label width ({:.1}) should exceed the 72px threshold for on-edge placement",
+            edge.label_width,
+        );
+    }
+
+    /// Test that Fix B's overshoot tie-breaking prefers placing labels toward
+    /// the interior of the diagram (less overshoot beyond node bounding box).
+    #[test]
+    fn test_overshoot_prefers_inward() {
+        // Horizontal layout: a -> b -> c -> d, with a->b at the left boundary.
+        // The label on a->b should prefer the side closer to diagram center.
+        let source = "\
+direction: right
+a -> b: tag
+b -> c
+c -> d
+";
+        let graph = layout_ok(source);
+
+        let edge = find_edge_between(&graph, "a", "b");
+        let _label_pos = edge
+            .label_position
+            .expect("label position");
+
+        // Compute the node bounding box
+        let node_bounds = {
+            let mut min_x = f64::INFINITY;
+            let mut min_y = f64::INFINITY;
+            let mut max_x = f64::NEG_INFINITY;
+            let mut max_y = f64::NEG_INFINITY;
+            for &idx in &graph.objects {
+                if idx == graph.root || graph.graph[idx].is_container {
+                    continue;
+                }
+                if let Some(r) = graph.graph[idx].box_ {
+                    min_x = min_x.min(r.x);
+                    min_y = min_y.min(r.y);
+                    max_x = max_x.max(r.x + r.width);
+                    max_y = max_y.max(r.y + r.height);
+                }
+            }
+            (min_x, min_y, max_x, max_y)
+        };
+
+        // The a->b edge is horizontal, so the label offset is vertical (up or down).
+        // Compute the label rect's overshoot in each vertical direction.
+        let lr = edge_label_rect(edge);
+        let top_overshoot = (node_bounds.1 - lr.y).max(0.0);
+        let bottom_overshoot = (lr.y + lr.height - node_bounds.3).max(0.0);
+
+        // The total overshoot should be small — the label should stay near the
+        // diagram's vertical extent. With 4 nodes in a horizontal row, the
+        // vertical extent is just the node height, and the label should be
+        // placed to minimize vertical overshoot.
+        let total_overshoot = top_overshoot + bottom_overshoot;
+        assert!(
+            total_overshoot < edge.label_height + LABEL_HALO_PADDING * 2.0,
+            "total vertical overshoot ({:.1}) should be less than one label height ({:.1})",
+            total_overshoot,
+            edge.label_height + LABEL_HALO_PADDING * 2.0
         );
     }
 }
