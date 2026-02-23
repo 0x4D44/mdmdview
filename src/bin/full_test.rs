@@ -24,24 +24,28 @@
 
 //! Full Test Runner for mdmdview
 //!
-//! Runs all quality checks, tests, Mermaid visual comparisons, and coverage
-//! in a single invocation, then generates a self-contained HTML report.
+//! Runs all quality checks, tests, Mermaid visual comparisons, D2 visual
+//! regression tests, and coverage in a single invocation, then generates
+//! a self-contained HTML report.
 //!
 //! Phases (run sequentially, fast-to-slow):
 //! 1. Code quality checks (cargo fmt --check, cargo clippy)
 //! 2. Unit + D2 tests (cargo test --release --lib --tests --workspace)
 //! 3. Mermaid visual tests (screenshot comparison against reference images)
+//! 3b. D2 visual tests (SVG rasterization comparison against d2 CLI)
 //! 4. Coverage analysis (cargo llvm-cov, optional)
 //!
 //! Usage:
 //!   cargo run --release --bin full_test
 //!
 //! Options:
-//!   --skip-quality    Skip fmt/clippy checks
-//!   --skip-coverage   Skip coverage analysis
-//!   --skip-mermaid    Skip Mermaid visual tests
-//!   --quick           Exclude ignored tests
-//!   --help, -h        Show this help message
+//!   --skip-quality           Skip fmt/clippy checks
+//!   --skip-coverage          Skip coverage analysis
+//!   --skip-mermaid           Skip Mermaid visual tests
+//!   --skip-d2-visual         Skip D2 visual regression tests
+//!   --update-d2-references   Regenerate D2 reference PNGs from d2 CLI
+//!   --quick                  Exclude ignored tests
+//!   --help, -h               Show this help message
 
 use chrono::Local;
 use std::io::Write;
@@ -71,6 +75,12 @@ fn mermaid_wait_ms_for_case(case_name: &str) -> u32 {
     }
 }
 
+// ── D2 visual test constants ────────────────────────────────────────────
+
+const D2_PIXEL_TOLERANCE: u8 = 60;
+const D2_THRESHOLD_PERCENT: f64 = 20.0; // Generous — different renderers
+const D2_THRESHOLD_PIXELS: usize = 80_000;
+
 // ── Data structures ─────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -79,6 +89,8 @@ struct FullTestOptions {
     skip_quality: bool,
     skip_coverage: bool,
     skip_mermaid: bool,
+    skip_d2_visual: bool,
+    update_d2_references: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +158,24 @@ struct MermaidCaseResult {
 struct MermaidResults {
     cases: Vec<MermaidCaseResult>,
     build_ok: bool,
+    duration: Duration,
+}
+
+#[derive(Debug, Clone)]
+struct D2VisualCaseResult {
+    case_name: String,
+    passed: bool,
+    message: String,
+    diff_percent: f64,
+    diff_pixels: usize,
+    max_delta: u8,
+    duration: Duration,
+}
+
+#[derive(Debug)]
+struct D2VisualResults {
+    cases: Vec<D2VisualCaseResult>,
+    d2_cli_available: bool,
     duration: Duration,
 }
 
@@ -266,6 +296,8 @@ fn parse_options(args: &[String]) -> Option<FullTestOptions> {
         skip_quality: args.iter().any(|a| a == "--skip-quality"),
         skip_coverage: args.iter().any(|a| a == "--skip-coverage"),
         skip_mermaid: args.iter().any(|a| a == "--skip-mermaid"),
+        skip_d2_visual: args.iter().any(|a| a == "--skip-d2-visual"),
+        update_d2_references: args.iter().any(|a| a == "--update-d2-references"),
     })
 }
 
@@ -273,22 +305,26 @@ fn print_help() {
     println!("full_test {VERSION}");
     println!();
     println!("Full test runner for mdmdview - runs quality checks, tests, Mermaid");
-    println!("visual comparisons, and coverage, then generates an HTML report.");
+    println!("visual comparisons, D2 visual comparisons, and coverage, then generates");
+    println!("an HTML report.");
     println!();
     println!("USAGE:");
     println!("    cargo run --release --bin full_test [OPTIONS]");
     println!();
     println!("OPTIONS:");
-    println!("    --skip-quality    Skip code quality checks (fmt, clippy)");
-    println!("    --skip-coverage   Skip coverage analysis");
-    println!("    --skip-mermaid    Skip Mermaid visual tests");
-    println!("    --quick           Exclude ignored tests (faster run)");
-    println!("    --help, -h        Show this help message");
+    println!("    --skip-quality           Skip code quality checks (fmt, clippy)");
+    println!("    --skip-coverage          Skip coverage analysis");
+    println!("    --skip-mermaid           Skip Mermaid visual tests");
+    println!("    --skip-d2-visual         Skip D2 visual regression tests");
+    println!("    --update-d2-references   Regenerate D2 reference PNGs from d2 CLI");
+    println!("    --quick                  Exclude ignored tests (faster run)");
+    println!("    --help, -h               Show this help message");
     println!();
     println!("PHASES:");
     println!("    1. Code quality checks (cargo fmt --check, cargo clippy)");
     println!("    2. Unit + D2 tests (cargo test --release --workspace)");
     println!("    3. Mermaid visual tests (screenshot comparison)");
+    println!("    3b. D2 visual tests (SVG rasterization comparison)");
     println!("    4. Coverage analysis (cargo llvm-cov, optional)");
     println!();
     println!("OUTPUT:");
@@ -303,6 +339,9 @@ fn print_help() {
     println!();
     println!("    cargo run --release --bin full_test -- --quick --skip-mermaid");
     println!("        Quick run without Mermaid visual tests");
+    println!();
+    println!("    cargo run --release --bin full_test -- --update-d2-references");
+    println!("        Regenerate D2 reference PNGs from d2 CLI and exit");
 }
 
 fn describe_run_mode(options: &FullTestOptions) -> String {
@@ -319,6 +358,9 @@ fn describe_run_mode(options: &FullTestOptions) -> String {
     }
     if options.skip_mermaid {
         parts.push("Mermaid Skipped");
+    }
+    if options.skip_d2_visual {
+        parts.push("D2 Visual Skipped");
     }
     if options.skip_coverage {
         parts.push("Coverage Skipped");
@@ -939,6 +981,395 @@ fn run_mermaid_visual_tests() -> MermaidResults {
     }
 }
 
+// ── D2 visual tests ─────────────────────────────────────────────────────
+
+/// Check whether the `d2` CLI is installed and runnable.
+fn check_d2_cli() -> bool {
+    Command::new("d2")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Rasterize an SVG string to a PNG file using usvg/resvg.
+/// Uses a shared fontdb to avoid rebuilding system fonts per fixture (~100ms each).
+fn rasterize_svg_to_png(
+    svg: &str,
+    output: &Path,
+    fontdb: &std::sync::Arc<usvg::fontdb::Database>,
+) -> Result<(), String> {
+    let opt = usvg::Options {
+        fontdb: std::sync::Arc::clone(fontdb),
+        ..Default::default()
+    };
+    let tree = usvg::Tree::from_data(svg.as_bytes(), &opt)
+        .map_err(|e| format!("usvg parse failed: {e}"))?;
+
+    let size = tree.size();
+    let w = size.width().ceil() as u32;
+    let h = size.height().ceil() as u32;
+    if w == 0 || h == 0 {
+        return Err(format!("SVG has zero dimensions: {w}x{h}"));
+    }
+
+    let mut pixmap =
+        tiny_skia::Pixmap::new(w, h).ok_or_else(|| format!("Failed to create pixmap {w}x{h}"))?;
+    // Fill with white background so transparent regions don't cause false diffs.
+    pixmap.fill(tiny_skia::Color::WHITE);
+    let mut pmut = pixmap.as_mut();
+    resvg::render(&tree, tiny_skia::Transform::identity(), &mut pmut);
+
+    // Convert to image::RgbaImage and save as PNG.
+    let rgba_data = pixmap.data().to_vec();
+    let img = image::RgbaImage::from_raw(w, h, rgba_data)
+        .ok_or_else(|| "Failed to create RgbaImage from pixmap".to_string())?;
+    img.save(output)
+        .map_err(|e| format!("Failed to save PNG: {e}"))?;
+
+    Ok(())
+}
+
+/// Build a shared fontdb with system fonts loaded (expensive — do once).
+fn build_fontdb() -> std::sync::Arc<usvg::fontdb::Database> {
+    let mut db = usvg::fontdb::Database::new();
+    db.load_system_fonts();
+    std::sync::Arc::new(db)
+}
+
+/// Render a `.d2` fixture through the official `d2` CLI to SVG.
+fn d2_cli_render(d2_file: &Path) -> Result<String, String> {
+    let temp_svg = d2_file.with_extension("cli_out.svg");
+
+    let output = Command::new("d2")
+        .args([
+            "--layout",
+            "dagre",
+            "--theme",
+            "0",
+            "--pad",
+            "20",
+            &d2_file.to_string_lossy(),
+            &temp_svg.to_string_lossy(),
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("d2 CLI exec failed: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = std::fs::remove_file(&temp_svg);
+        return Err(format!("d2 CLI failed: {stderr}"));
+    }
+
+    let svg = std::fs::read_to_string(&temp_svg)
+        .map_err(|e| format!("Failed to read d2 CLI SVG output: {e}"))?;
+    let _ = std::fs::remove_file(&temp_svg);
+
+    Ok(svg)
+}
+
+/// Generate reference PNGs for all D2 fixtures using the d2 CLI.
+/// Returns the number of references successfully generated.
+fn generate_d2_references(
+    fixtures_dir: &Path,
+    reference_dir: &Path,
+    fontdb: &std::sync::Arc<usvg::fontdb::Database>,
+) -> usize {
+    let _ = std::fs::create_dir_all(reference_dir);
+
+    let mut fixtures: Vec<PathBuf> = std::fs::read_dir(fixtures_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("d2"))
+                .collect()
+        })
+        .unwrap_or_default();
+    fixtures.sort();
+
+    let mut count = 0;
+    for fixture in &fixtures {
+        let case_name = fixture
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        print!("  {case_name}...");
+        let _ = std::io::stdout().flush();
+
+        match d2_cli_render(fixture) {
+            Ok(svg) => {
+                let png_path = reference_dir.join(format!("{case_name}.png"));
+                match rasterize_svg_to_png(&svg, &png_path, fontdb) {
+                    Ok(()) => {
+                        println!(" OK");
+                        count += 1;
+                    }
+                    Err(e) => println!(" RASTERIZE FAILED: {e}"),
+                }
+            }
+            Err(e) => println!(" D2 CLI FAILED: {e}"),
+        }
+    }
+
+    count
+}
+
+/// Run a single D2 visual regression test case.
+fn run_d2_visual_case(
+    fixture: &Path,
+    reference_dir: &Path,
+    actual_dir: &Path,
+    fontdb: &std::sync::Arc<usvg::fontdb::Database>,
+) -> D2VisualCaseResult {
+    let start = Instant::now();
+    let case_name = fixture
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    // Check reference PNG exists — skip if missing (d2 CLI may not support this fixture)
+    let reference_path = reference_dir.join(format!("{case_name}.png"));
+    if !reference_path.exists() {
+        return D2VisualCaseResult {
+            case_name,
+            passed: true, // Not a failure — just no reference to compare against
+            message: "skipped_no_reference".to_string(),
+            diff_percent: 0.0,
+            diff_pixels: 0,
+            max_delta: 0,
+            duration: start.elapsed(),
+        };
+    }
+
+    // Read D2 source and render via mdmdview's native D2 renderer
+    let d2_source = match std::fs::read_to_string(fixture) {
+        Ok(s) => s,
+        Err(e) => {
+            return D2VisualCaseResult {
+                case_name,
+                passed: false,
+                message: format!("read_failed: {e}"),
+                diff_percent: 100.0,
+                diff_pixels: 0,
+                max_delta: 0,
+                duration: start.elapsed(),
+            };
+        }
+    };
+
+    let render_options = mdmdview_d2::RenderOptions {
+        dark_mode: false,
+        ..Default::default()
+    };
+    let render_result = match mdmdview_d2::render_d2_to_svg(&d2_source, &render_options) {
+        Ok(r) => r,
+        Err(e) => {
+            return D2VisualCaseResult {
+                case_name,
+                passed: false,
+                message: format!("render_failed: {e}"),
+                diff_percent: 100.0,
+                diff_pixels: 0,
+                max_delta: 0,
+                duration: start.elapsed(),
+            };
+        }
+    };
+
+    // Rasterize mdmdview SVG to PNG
+    let actual_path = actual_dir.join(format!("{case_name}.png"));
+    if let Err(e) = rasterize_svg_to_png(&render_result.svg, &actual_path, fontdb) {
+        return D2VisualCaseResult {
+            case_name,
+            passed: false,
+            message: format!("rasterize_failed: {e}"),
+            diff_percent: 100.0,
+            diff_pixels: 0,
+            max_delta: 0,
+            duration: start.elapsed(),
+        };
+    }
+
+    // Load both PNGs
+    let actual_img = match image::open(&actual_path) {
+        Ok(img) => img.to_rgba8(),
+        Err(e) => {
+            return D2VisualCaseResult {
+                case_name,
+                passed: false,
+                message: format!("actual_load_failed: {e}"),
+                diff_percent: 100.0,
+                diff_pixels: 0,
+                max_delta: 0,
+                duration: start.elapsed(),
+            };
+        }
+    };
+
+    let reference_img = match image::open(&reference_path) {
+        Ok(img) => img.to_rgba8(),
+        Err(e) => {
+            return D2VisualCaseResult {
+                case_name,
+                passed: false,
+                message: format!("reference_load_failed: {e}"),
+                diff_percent: 100.0,
+                diff_pixels: 0,
+                max_delta: 0,
+                duration: start.elapsed(),
+            };
+        }
+    };
+
+    // Pad to common size and diff
+    let (actual_padded, reference_padded) = pad_to_common_size(&actual_img, &reference_img);
+    let total_pixels = actual_padded.width() as usize * actual_padded.height() as usize;
+    let (diff_pixels, max_delta) =
+        diff_images(&actual_padded, &reference_padded, D2_PIXEL_TOLERANCE);
+    let diff_percent = if total_pixels > 0 {
+        diff_pixels as f64 / total_pixels as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    let passed = diff_pixels <= D2_THRESHOLD_PIXELS && diff_percent <= D2_THRESHOLD_PERCENT;
+
+    let message = if passed {
+        "ok".to_string()
+    } else {
+        "diff_exceeds_threshold".to_string()
+    };
+
+    D2VisualCaseResult {
+        case_name,
+        passed,
+        message,
+        diff_percent,
+        diff_pixels,
+        max_delta,
+        duration: start.elapsed(),
+    }
+}
+
+/// Run all D2 visual regression test cases.
+fn run_d2_visual_tests() -> D2VisualResults {
+    let start = Instant::now();
+
+    // Check d2 CLI availability
+    let d2_cli_available = check_d2_cli();
+    if !d2_cli_available {
+        println!("Warning: d2 CLI not found. D2 visual tests will use existing references only.");
+    }
+
+    // Build shared fontdb once (expensive)
+    println!("Building font database...");
+    let fontdb = build_fontdb();
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let fixtures_dir = manifest_dir
+        .join("tests")
+        .join("d2_conformance")
+        .join("fixtures");
+    let reference_dir = manifest_dir
+        .join("tests")
+        .join("d2_visual")
+        .join("reference");
+    let actual_dir = manifest_dir.join("tests").join("d2_visual").join("actual");
+
+    // Auto-generate references if directory is empty or missing
+    let reference_count = std::fs::read_dir(&reference_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().and_then(|ext| ext.to_str()) == Some("png"))
+                .count()
+        })
+        .unwrap_or(0);
+
+    if reference_count == 0 {
+        if d2_cli_available {
+            println!("No reference PNGs found. Auto-generating from d2 CLI...");
+            let generated = generate_d2_references(&fixtures_dir, &reference_dir, &fontdb);
+            println!("Generated {generated} reference PNGs.");
+        } else {
+            println!("No reference PNGs and no d2 CLI — cannot run D2 visual tests.");
+            return D2VisualResults {
+                cases: Vec::new(),
+                d2_cli_available,
+                duration: start.elapsed(),
+            };
+        }
+    }
+
+    // Clean previous actual output
+    let _ = std::fs::remove_dir_all(&actual_dir);
+    let _ = std::fs::create_dir_all(&actual_dir);
+
+    // Discover fixture files
+    let mut fixture_files: Vec<PathBuf> = std::fs::read_dir(&fixtures_dir)
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("d2"))
+                .collect()
+        })
+        .unwrap_or_default();
+    fixture_files.sort();
+
+    println!("Running {} D2 visual test cases...", fixture_files.len());
+
+    let mut cases = Vec::new();
+    for fixture in &fixture_files {
+        let case_name = fixture
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        print!("  {case_name}...");
+        let _ = std::io::stdout().flush();
+
+        let result = run_d2_visual_case(fixture, &reference_dir, &actual_dir, &fontdb);
+
+        if result.message == "skipped_no_reference" {
+            println!(" SKIP (no reference)");
+        } else {
+            println!(
+                " {} ({:.1}% diff, {} px, {:.2}s)",
+                if result.passed { "PASS" } else { "FAIL" },
+                result.diff_percent,
+                result.diff_pixels,
+                result.duration.as_secs_f64()
+            );
+        }
+
+        cases.push(result);
+    }
+
+    let skipped_count = cases
+        .iter()
+        .filter(|c| c.message == "skipped_no_reference")
+        .count();
+    let compared_count = cases.len() - skipped_count;
+    let passed_count = cases.iter().filter(|c| c.passed).count() - skipped_count;
+    let failed_count = compared_count - passed_count;
+    println!(
+        "D2 visual: {passed_count}/{compared_count} passed ({failed_count} failed, {skipped_count} skipped) in {:.2}s",
+        start.elapsed().as_secs_f64()
+    );
+
+    D2VisualResults {
+        cases,
+        d2_cli_available,
+        duration: start.elapsed(),
+    }
+}
+
 // ── Coverage ────────────────────────────────────────────────────────────
 
 fn check_llvm_cov_available() -> bool {
@@ -1082,6 +1513,7 @@ struct RunOutcome {
     quality_results: Vec<QualityResult>,
     test_results: Option<SuiteResults>,
     mermaid_results: Option<MermaidResults>,
+    d2_visual_results: Option<D2VisualResults>,
     coverage_result: Option<CoverageResult>,
 }
 
@@ -1130,6 +1562,15 @@ where
         None
     };
 
+    // Phase 3b: D2 visual tests
+    let d2_visual_results = if !options.skip_d2_visual {
+        println!("\n--- Phase 3b: D2 Visual Tests ---\n");
+        Some(run_d2_visual_tests())
+    } else {
+        println!("\n--- Phase 3b: D2 Visual Tests (SKIPPED) ---\n");
+        None
+    };
+
     // Phase 4: Coverage (slowest, run last)
     let coverage_result = if !options.skip_coverage {
         println!("\n--- Phase 4: Coverage Analysis ---\n");
@@ -1146,7 +1587,12 @@ where
         .as_ref()
         .map(|r| !r.build_ok || r.cases.iter().any(|c| !c.passed))
         .unwrap_or(false);
-    let any_failed = quality_failed || tests_failed || mermaid_failed;
+    // D2 visual failures count, but d2 CLI unavailable does NOT count as failure.
+    let d2_visual_failed = d2_visual_results
+        .as_ref()
+        .map(|r| r.cases.iter().any(|c| !c.passed))
+        .unwrap_or(false);
+    let any_failed = quality_failed || tests_failed || mermaid_failed || d2_visual_failed;
 
     // Generate report
     let run_mode = describe_run_mode(options);
@@ -1156,6 +1602,7 @@ where
         test_results.as_ref(),
         &quality_results,
         mermaid_results.as_ref(),
+        d2_visual_results.as_ref(),
         coverage_result.as_ref(),
         &git_info,
         now,
@@ -1176,6 +1623,7 @@ where
         quality_results,
         test_results,
         mermaid_results,
+        d2_visual_results,
         coverage_result,
     }
 }
@@ -1186,6 +1634,7 @@ fn generate_html_report(
     test_results: Option<&SuiteResults>,
     quality_results: &[QualityResult],
     mermaid_results: Option<&MermaidResults>,
+    d2_visual_results: Option<&D2VisualResults>,
     coverage_result: Option<&CoverageResult>,
     git_info: &str,
     now: chrono::DateTime<Local>,
@@ -1205,6 +1654,10 @@ fn generate_html_report(
         total_skipped += r.skipped;
     }
     if let Some(r) = mermaid_results {
+        total_passed += r.cases.iter().filter(|c| c.passed).count();
+        total_failed += r.cases.iter().filter(|c| !c.passed).count();
+    }
+    if let Some(r) = d2_visual_results {
         total_passed += r.cases.iter().filter(|c| c.passed).count();
         total_failed += r.cases.iter().filter(|c| !c.passed).count();
     }
@@ -1415,6 +1868,35 @@ fn generate_html_report(
         );
     }
 
+    // D2 Visual row
+    if let Some(r) = d2_visual_results {
+        if r.cases.is_empty() && !r.d2_cli_available {
+            html.push_str(
+                "<tr><td>D2 Visual</td><td>SKIPPED</td>\
+                 <td>-</td><td>No d2 CLI and no references</td></tr>\n",
+            );
+        } else {
+            let d_passed = r.cases.iter().filter(|c| c.passed).count();
+            let d_failed = r.cases.len() - d_passed;
+            let status_class = if d_failed == 0 {
+                "status-pass"
+            } else {
+                "status-fail"
+            };
+            let status_text = if d_failed == 0 { "PASS" } else { "FAIL" };
+            html.push_str(&format!(
+                "<tr><td>D2 Visual</td><td class=\"{status_class}\">{status_text}</td>\
+                 <td>{:.2}s</td><td>{d_passed}/{} passed</td></tr>\n",
+                r.duration.as_secs_f64(),
+                r.cases.len(),
+            ));
+        }
+    } else {
+        html.push_str(
+            "<tr><td>D2 Visual</td><td>SKIPPED</td><td>-</td><td>--skip-d2-visual</td></tr>\n",
+        );
+    }
+
     // Coverage row
     if let Some(cov) = coverage_result {
         let line_pct = if cov.lines_total > 0 {
@@ -1578,6 +2060,44 @@ fn generate_html_report(
         }
     }
 
+    // ── D2 visual results ────────────────────────────────────────────
+    if let Some(r) = d2_visual_results {
+        html.push_str("<h2>D2 Visual Tests</h2>\n");
+
+        if r.cases.is_empty() && !r.d2_cli_available {
+            html.push_str(
+                "<p>No d2 CLI found and no reference PNGs available. \
+                 Install <code>d2</code> and run with <code>--update-d2-references</code>.</p>\n",
+            );
+        } else if !r.cases.is_empty() {
+            html.push_str(
+                "<table>\n<tr><th>Case</th><th>Status</th><th>Diff %</th>\
+                 <th>Diff Pixels</th><th>Max Delta</th><th>Duration</th><th>Message</th></tr>\n",
+            );
+            for case in &r.cases {
+                let status_class = if case.passed {
+                    "status-pass"
+                } else {
+                    "status-fail"
+                };
+                let status_text = if case.passed { "PASS" } else { "FAIL" };
+                html.push_str(&format!(
+                    "<tr><td>{}</td><td class=\"{}\">{}</td><td>{:.2}%</td>\
+                     <td>{}</td><td>{}</td><td>{:.2}s</td><td>{}</td></tr>\n",
+                    html_escape(&case.case_name),
+                    status_class,
+                    status_text,
+                    case.diff_percent,
+                    case.diff_pixels,
+                    case.max_delta,
+                    case.duration.as_secs_f64(),
+                    html_escape(&case.message),
+                ));
+            }
+            html.push_str("</table>\n");
+        }
+    }
+
     // ── Coverage table ──────────────────────────────────────────────
     if let Some(cov) = coverage_result {
         html.push_str("<h2>Coverage</h2>\n");
@@ -1637,6 +2157,31 @@ fn main() {
         }
     };
 
+    // Handle --update-d2-references: generate references and exit early.
+    if options.update_d2_references {
+        println!("=== Updating D2 Reference PNGs ===\n");
+        if !check_d2_cli() {
+            eprintln!("Error: d2 CLI not found. Install from https://d2lang.com/");
+            std::process::exit(1);
+        }
+        let fontdb = build_fontdb();
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixtures_dir = manifest_dir
+            .join("tests")
+            .join("d2_conformance")
+            .join("fixtures");
+        let reference_dir = manifest_dir
+            .join("tests")
+            .join("d2_visual")
+            .join("reference");
+        let count = generate_d2_references(&fixtures_dir, &reference_dir, &fontdb);
+        println!(
+            "\nGenerated {count} reference PNGs in {}",
+            reference_dir.display()
+        );
+        return;
+    }
+
     let outcome = run_full_test(
         &options,
         |include_ignored| run_cargo_test(include_ignored),
@@ -1694,6 +2239,8 @@ mod tests {
         assert!(!options.skip_quality);
         assert!(!options.skip_coverage);
         assert!(!options.skip_mermaid);
+        assert!(!options.skip_d2_visual);
+        assert!(!options.update_d2_references);
     }
 
     #[test]
@@ -1704,12 +2251,14 @@ mod tests {
             "--skip-quality".to_string(),
             "--skip-coverage".to_string(),
             "--skip-mermaid".to_string(),
+            "--skip-d2-visual".to_string(),
         ];
         let options = parse_options(&args).unwrap();
         assert!(options.quick);
         assert!(options.skip_quality);
         assert!(options.skip_coverage);
         assert!(options.skip_mermaid);
+        assert!(options.skip_d2_visual);
     }
 
     #[test]
@@ -2069,6 +2618,8 @@ not a test line\n";
             skip_quality: false,
             skip_coverage: false,
             skip_mermaid: false,
+            skip_d2_visual: false,
+            update_d2_references: false,
         };
         let mode = describe_run_mode(&options);
         assert!(mode.contains("Full Suite"));
@@ -2082,12 +2633,15 @@ not a test line\n";
             skip_quality: true,
             skip_coverage: true,
             skip_mermaid: true,
+            skip_d2_visual: true,
+            update_d2_references: false,
         };
         let mode = describe_run_mode(&options);
         assert!(mode.contains("Quick"));
         assert!(mode.contains("Quality Skipped"));
         assert!(mode.contains("Coverage Skipped"));
         assert!(mode.contains("Mermaid Skipped"));
+        assert!(mode.contains("D2 Visual Skipped"));
     }
 
     // ── Cargo test command tests ────────────────────────────────────
@@ -2118,6 +2672,8 @@ not a test line\n";
             skip_quality: true,
             skip_coverage: true,
             skip_mermaid: true,
+            skip_d2_visual: true,
+            update_d2_references: false,
         };
         let mut calls = Vec::new();
         let runner = |include_ignored: bool| {
@@ -2138,6 +2694,8 @@ not a test line\n";
             skip_quality: true,
             skip_coverage: true,
             skip_mermaid: true,
+            skip_d2_visual: true,
+            update_d2_references: false,
         };
         let runner = |_include_ignored: bool| {
             make_suite(
@@ -2159,6 +2717,8 @@ not a test line\n";
             skip_quality: true,
             skip_coverage: true,
             skip_mermaid: true,
+            skip_d2_visual: true,
+            update_d2_references: false,
         };
         let mut calls = Vec::new();
         let runner = |include_ignored: bool| {
@@ -2188,6 +2748,7 @@ not a test line\n";
         let html = generate_html_report(
             Some(&tests),
             &[],
+            None,
             None,
             None,
             "abc123 (main)",
@@ -2228,6 +2789,7 @@ not a test line\n";
             &quality,
             None,
             None,
+            None,
             "abc (main)",
             Local::now(),
             "",
@@ -2259,6 +2821,7 @@ not a test line\n";
         let html = generate_html_report(
             None,
             &[],
+            None,
             None,
             Some(&coverage),
             "abc (main)",
@@ -2305,6 +2868,7 @@ not a test line\n";
             &[],
             Some(&mermaid),
             None,
+            None,
             "abc (main)",
             Local::now(),
             "",
@@ -2330,6 +2894,7 @@ not a test line\n";
             &[],
             Some(&mermaid),
             None,
+            None,
             "abc (main)",
             Local::now(),
             "",
@@ -2347,6 +2912,7 @@ not a test line\n";
             &[],
             None,
             None,
+            None,
             "abc (main)",
             Local::now(),
             "",
@@ -2354,6 +2920,71 @@ not a test line\n";
         );
 
         assert!(html.contains("prefers-color-scheme: dark"));
+    }
+
+    // ── D2 visual HTML report test ───────────────────────────────────
+
+    #[test]
+    fn test_generate_html_report_with_d2_visual() {
+        let d2_visual = D2VisualResults {
+            cases: vec![
+                D2VisualCaseResult {
+                    case_name: "001-simple-connection".to_string(),
+                    passed: true,
+                    message: "ok".to_string(),
+                    diff_percent: 5.2,
+                    diff_pixels: 800,
+                    max_delta: 45,
+                    duration: Duration::from_millis(200),
+                },
+                D2VisualCaseResult {
+                    case_name: "020-simple-container".to_string(),
+                    passed: false,
+                    message: "diff_exceeds_threshold".to_string(),
+                    diff_percent: 25.0,
+                    diff_pixels: 90000,
+                    max_delta: 180,
+                    duration: Duration::from_millis(300),
+                },
+            ],
+            d2_cli_available: true,
+            duration: Duration::from_secs(5),
+        };
+
+        let html = generate_html_report(
+            None,
+            &[],
+            None,
+            Some(&d2_visual),
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(5),
+        );
+
+        assert!(html.contains("D2 Visual Tests"));
+        assert!(html.contains("001-simple-connection"));
+        assert!(html.contains("020-simple-container"));
+        assert!(html.contains("diff_exceeds_threshold"));
+    }
+
+    // ── D2 option parsing test ──────────────────────────────────────
+
+    #[test]
+    fn test_parse_options_d2_flags() {
+        let args = vec!["full_test".to_string(), "--skip-d2-visual".to_string()];
+        let options = parse_options(&args).unwrap();
+        assert!(options.skip_d2_visual);
+        assert!(!options.update_d2_references);
+
+        let args = vec![
+            "full_test".to_string(),
+            "--update-d2-references".to_string(),
+        ];
+        let options = parse_options(&args).unwrap();
+        assert!(!options.skip_d2_visual);
+        assert!(options.update_d2_references);
     }
 
     // ── Mermaid env vars test ───────────────────────────────────────
