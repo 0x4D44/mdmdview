@@ -13,6 +13,7 @@ tests/mermaid_visual/scratch/
 tests/mermaid_visual/**/scratch/
 tests/mermaid_visual/dump/
 tests/mermaid_visual/debug_dump*/
+tests/d2_visual/actual/
 dump_test/
 __pycache__/
 .pytest_cache/
