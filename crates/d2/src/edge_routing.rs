@@ -2756,4 +2756,94 @@ c -> d
             edge.label_height + LABEL_HALO_PADDING * 2.0
         );
     }
+
+    #[test]
+    fn test_cross_container_edge_avoids_intermediate_nodes() {
+        // Reproduces: edge from Notification Service -> Object Store passes through
+        // the PostgreSQL box inside the Data Layer container.
+        // Uses exact same source as the D2 sample in sample_files.rs,
+        // including {shape: cylinder} for data store nodes.
+        let graph = layout_ok(
+            "direction: right
+
+services: Services {
+  gw: API Gateway
+  auth: Auth Service
+  orders: Order Service
+  notify: Notification Service
+
+  gw -> auth: verify token
+  gw -> orders: route request
+  orders -> notify: order placed
+}
+
+data: Data Layer {
+  pg: PostgreSQL {shape: cylinder}
+  redis: Redis {shape: cylinder}
+  s3: Object Store {shape: cylinder}
+}
+
+lb: Load Balancer
+lb -> services.gw: HTTPS
+services.auth -> data.redis: sessions
+services.orders -> data.pg: CRUD
+services.notify -> data.s3: templates",
+        );
+
+        let pg_rect = graph.graph[find_node_by_label(&graph, "PostgreSQL")]
+            .box_
+            .expect("pg should have a box");
+
+        // The notify -> s3 edge should NOT pass through PostgreSQL's rect
+        let edge_notify_s3 = find_edge_between(&graph, "Notification Service", "Object Store");
+        for i in 0..edge_notify_s3.route.len().saturating_sub(1) {
+            assert!(
+                !ortho_segment_hits_rect(
+                    &edge_notify_s3.route[i],
+                    &edge_notify_s3.route[i + 1],
+                    &pg_rect,
+                    2.0
+                ),
+                "notify->s3 route segment {}-{} at ({:.1},{:.1})->({:.1},{:.1}) \
+                 should not pass through PostgreSQL's rect \
+                 (x={:.1} y={:.1} w={:.1} h={:.1})",
+                i,
+                i + 1,
+                edge_notify_s3.route[i].x,
+                edge_notify_s3.route[i].y,
+                edge_notify_s3.route[i + 1].x,
+                edge_notify_s3.route[i + 1].y,
+                pg_rect.x,
+                pg_rect.y,
+                pg_rect.width,
+                pg_rect.height,
+            );
+        }
+
+        // The auth -> redis edge should NOT pass through PostgreSQL's rect either
+        let edge_auth_redis = find_edge_between(&graph, "Auth Service", "Redis");
+        for i in 0..edge_auth_redis.route.len().saturating_sub(1) {
+            assert!(
+                !ortho_segment_hits_rect(
+                    &edge_auth_redis.route[i],
+                    &edge_auth_redis.route[i + 1],
+                    &pg_rect,
+                    2.0
+                ),
+                "auth->redis route segment {}-{} at ({:.1},{:.1})->({:.1},{:.1}) \
+                 should not pass through PostgreSQL's rect \
+                 (x={:.1} y={:.1} w={:.1} h={:.1})",
+                i,
+                i + 1,
+                edge_auth_redis.route[i].x,
+                edge_auth_redis.route[i].y,
+                edge_auth_redis.route[i + 1].x,
+                edge_auth_redis.route[i + 1].y,
+                pg_rect.x,
+                pg_rect.y,
+                pg_rect.width,
+                pg_rect.height,
+            );
+        }
+    }
 }
