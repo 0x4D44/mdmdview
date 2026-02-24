@@ -23,7 +23,7 @@
 - **🎨 Beautiful Rendering** - Professional formatting with syntax highlighting for 100+ languages
 - **⌨️ Keyboard-First** - Comprehensive shortcuts for power users
 - **🔍 Smart Search** - Unicode-aware search with accent normalization
-- **🖼️ Live Images** - Automatic refresh when linked images change
+- **📷 Live Images** - Automatic refresh when linked images change
 - **📂 Drag & Drop** - Drop files or folders to open instantly
 - **🌐 Cross-Platform** - Works on Windows, Linux, and macOS
 
@@ -45,7 +45,7 @@
 
 - **🔄 Navigation History** - Browser-like back/forward through files and samples (`Alt+←`/`Alt+→`)
 - **🔍 Accent-Aware Search** - Finds matches across case and diacritics (e.g., "istanbul" matches "İstanbul")
-- **🖼️ Live Image Refresh** - Automatically reloads textures when linked images change on disk
+- **📷 Live Image Refresh** - Automatically reloads textures when linked images change on disk
 - **📝 Raw Mode with Edit** - View and edit source markdown (`Ctrl+R` to toggle, `Ctrl+E` to edit)
 - **🔗 Internal Anchors** - In-document navigation via `[link](#anchor)` syntax
 - **📊 Table Support** - Professional grid layout with headers and striped rows
