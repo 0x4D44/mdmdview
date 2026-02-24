@@ -7414,4 +7414,75 @@ The end.
         });
         assert!(app.theme_toggle_requested);
     }
+
+    #[test]
+    fn test_copy_file_without_file() {
+        let mut app = MarkdownViewerApp::new();
+        let error_before = app.error_message.clone();
+        app.copy_file_to_clipboard();
+        // Method is a no-op when no file is loaded (menu item is disabled in UI)
+        assert_eq!(app.error_message, error_before);
+    }
+
+    #[test]
+    fn test_copy_file_nonexistent_path() {
+        let mut app = MarkdownViewerApp::new();
+        app.current_file = Some(PathBuf::from("/nonexistent/test.md"));
+        app.copy_file_to_clipboard();
+        assert_eq!(
+            app.error_message.as_deref(),
+            Some("File no longer exists on disk")
+        );
+    }
+
+    #[test]
+    fn test_open_folder_without_file() {
+        let mut app = MarkdownViewerApp::new();
+        let error_before = app.error_message.clone();
+        app.open_containing_folder();
+        // Method is a no-op when no file is loaded (menu item is disabled in UI)
+        assert_eq!(app.error_message, error_before);
+    }
+
+    #[test]
+    fn test_open_folder_nonexistent_path() {
+        let mut app = MarkdownViewerApp::new();
+        app.current_file = Some(PathBuf::from("/nonexistent/test.md"));
+        app.open_containing_folder();
+        assert_eq!(
+            app.error_message.as_deref(),
+            Some("File no longer exists on disk")
+        );
+    }
+
+    #[test]
+    fn test_copy_file_with_existing_file() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp = NamedTempFile::new()?;
+        std::fs::write(temp.path(), "# Test")?;
+        app.current_file = Some(temp.path().to_path_buf());
+        app.copy_file_to_clipboard();
+        // Should succeed (no error) or fail gracefully (clipboard unavailable in CI)
+        // but must never set "File no longer exists on disk"
+        assert_ne!(
+            app.error_message.as_deref(),
+            Some("File no longer exists on disk")
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore] // Launches Explorer — run manually with: cargo test test_open_folder_with_existing_file -- --ignored
+    fn test_open_folder_with_existing_file() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp = NamedTempFile::new()?;
+        std::fs::write(temp.path(), "# Test")?;
+        app.current_file = Some(temp.path().to_path_buf());
+        app.open_containing_folder();
+        assert_ne!(
+            app.error_message.as_deref(),
+            Some("File no longer exists on disk")
+        );
+        Ok(())
+    }
 }
