@@ -10,8 +10,8 @@
 // - `reveal_in_file_manager`: Opens the native file manager (Explorer, Finder,
 //   or xdg-open) with the specified file selected/highlighted.
 //
-// These functions are used by the application's UI to provide context-menu
-// actions on the currently open file. Each function uses platform-specific
+// These functions are used by the application's File menu to provide
+// shell operations on the currently open file. Each function uses platform-specific
 // implementations gated by `#[cfg(target_os = "...")]` attributes and returns
 // `anyhow::Result` for consistent error handling.
 

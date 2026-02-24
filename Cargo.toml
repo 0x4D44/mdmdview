@@ -6,7 +6,7 @@ edition = "2021"
 
 [package]
 name = "mdmdview"
-version = "1.9.0"
+version = "1.10.0"
 edition.workspace = true
 description = "A markdown viewer for Windows"
 authors = ["0x4D44 <martingdavidson@gmail.com>"]

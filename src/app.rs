@@ -333,6 +333,8 @@ pub struct MarkdownViewerApp {
     title: String,
     /// Error message to display if any
     error_message: Option<String>,
+    /// Transient status message (e.g., "Copied to clipboard") shown briefly in the status bar.
+    status_message: Option<(String, std::time::Instant)>,
     /// Navigation request for keyboard shortcuts
     nav_request: Option<NavigationRequest>,
     /// Scroll area ID for state management
@@ -596,6 +598,7 @@ impl MarkdownViewerApp {
             parsed_elements: Vec::new(),
             title: APP_TITLE_PREFIX.to_string(),
             error_message: None,
+            status_message: None,
             nav_request: None,
             scroll_area_id: egui::Id::new("main_scroll_area"),
             toggle_fullscreen: false,
@@ -1326,7 +1329,10 @@ impl MarkdownViewerApp {
             return;
         }
         match crate::shell_integration::clipboard_copy_file(path) {
-            Ok(()) => {}
+            Ok(()) => {
+                self.status_message =
+                    Some(("Copied to clipboard".into(), std::time::Instant::now()));
+            }
             Err(e) => self.error_message = Some(format!("Failed to copy: {}", e)),
         }
     }
@@ -2243,6 +2249,16 @@ impl MarkdownViewerApp {
                             .color(tc.status_hint)
                             .italics(),
                     );
+                }
+
+                // Transient status message (e.g., "Copied to clipboard")
+                if let Some((ref msg, when)) = self.status_message {
+                    if when.elapsed() < std::time::Duration::from_secs(3) {
+                        ui.separator();
+                        ui.colored_label(egui::Color32::from_rgb(120, 200, 120), msg);
+                    } else {
+                        self.status_message = None;
+                    }
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
