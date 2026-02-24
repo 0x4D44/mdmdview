@@ -1804,7 +1804,7 @@ impl MarkdownViewerApp {
                 enabled,
                 egui::Button::new(Self::menu_text_with_mnemonic(
                     None,
-                    "Open Folder",
+                    "Show in Folder",
                     'l',
                     alt_pressed,
                     menu_text_color,
