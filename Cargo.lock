@@ -1986,6 +1986,7 @@ dependencies = [
  "anyhow",
  "base64",
  "chrono",
+ "clipboard-win",
  "crossbeam-channel",
  "eframe",
  "egui",
