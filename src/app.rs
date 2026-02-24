@@ -1317,6 +1317,32 @@ impl MarkdownViewerApp {
         }
     }
 
+    /// Copy the currently open file to the system clipboard as a file
+    /// (like Explorer's Copy), so it can be pasted into Discord, email, etc.
+    fn copy_file_to_clipboard(&mut self) {
+        let Some(path) = &self.current_file else { return };
+        if !path.exists() {
+            self.error_message = Some("File no longer exists on disk".into());
+            return;
+        }
+        match crate::shell_integration::clipboard_copy_file(path) {
+            Ok(()) => {}
+            Err(e) => self.error_message = Some(format!("Failed to copy: {}", e)),
+        }
+    }
+
+    /// Open the OS file manager with the current file's location.
+    fn open_containing_folder(&mut self) {
+        let Some(path) = &self.current_file else { return };
+        if !path.exists() {
+            self.error_message = Some("File no longer exists on disk".into());
+            return;
+        }
+        if let Err(e) = crate::shell_integration::reveal_in_file_manager(path) {
+            self.error_message = Some(format!("Failed to open folder: {}", e));
+        }
+    }
+
     /// Reload the currently opened file from disk
     pub fn reload_current_file(&mut self) -> Result<()> {
         let Some(path) = self.current_file.clone() else {
@@ -1745,6 +1771,46 @@ impl MarkdownViewerApp {
                 ui.label(RichText::new("F5").color(menu_text_color));
             });
         });
+
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            let enabled = self.current_file.is_some();
+            let button = ui.add_enabled(
+                enabled,
+                egui::Button::new(Self::menu_text_with_mnemonic(
+                    None,
+                    "Copy File",
+                    'y',
+                    alt_pressed,
+                    menu_text_color,
+                )),
+            );
+            if app_action_triggered(button.clicked(), "menu_copy_file") {
+                self.copy_file_to_clipboard();
+                ui.close_menu();
+            }
+        });
+
+        ui.horizontal(|ui| {
+            let enabled = self.current_file.is_some();
+            let button = ui.add_enabled(
+                enabled,
+                egui::Button::new(Self::menu_text_with_mnemonic(
+                    None,
+                    "Open Folder",
+                    'l',
+                    alt_pressed,
+                    menu_text_color,
+                )),
+            );
+            if app_action_triggered(button.clicked(), "menu_open_folder") {
+                self.open_containing_folder();
+                ui.close_menu();
+            }
+        });
+
+        ui.separator();
 
         ui.horizontal(|ui| {
             let clicked = ui
