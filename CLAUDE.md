@@ -147,6 +147,11 @@ The application supports dragging files and folders directly from your file expl
    - Texture caching with LRU eviction
    - Dark mode support via native `PIKCHR_DARK_MODE` flag
 
+9. **Shell Integration** (`src/shell_integration.rs`)
+   - Cross-platform OS file operations for the File menu
+   - `clipboard_copy_file`: Places file on clipboard as CF_HDROP (Windows), osascript (macOS), xclip (Linux)
+   - `reveal_in_file_manager`: Opens native file manager with file selected
+
 ### Key Architecture Decisions
 
 - **Single Binary**: All dependencies, samples, and emoji assets embedded for easy distribution
