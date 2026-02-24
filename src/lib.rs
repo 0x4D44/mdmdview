@@ -10,6 +10,7 @@ pub mod emoji_assets;
 pub mod emoji_catalog;
 pub mod markdown_renderer;
 pub mod sample_files;
+pub mod shell_integration;
 pub mod table_support;
 pub mod theme;
 pub mod window_state;
