@@ -126,3 +126,24 @@ pub fn reveal_in_file_manager(path: &Path) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_clipboard_copy_file_nonexistent_path() {
+        let path = PathBuf::from("/nonexistent/file.md");
+        let result = clipboard_copy_file(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reveal_in_file_manager_nonexistent_path() {
+        let path = PathBuf::from("/nonexistent/file.md");
+        let result = reveal_in_file_manager(&path);
+        assert!(result.is_err());
+    }
+}
