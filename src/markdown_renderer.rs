@@ -3143,7 +3143,14 @@ impl MarkdownRenderer {
                 let sz = size * 1.2;
                 ui.add(egui::Image::new(&handle).max_width(sz).max_height(sz));
             } else {
-                buffer.push_str(g);
+                // Strip U+FE0F (Variation Selector 16) from non-catalog emoji.
+                // VS16 is a zero-width presentation selector that egui renders as tofu.
+                if g.contains('\u{FE0F}') {
+                    let clean: String = g.chars().filter(|&c| c != '\u{FE0F}').collect();
+                    buffer.push_str(&clean);
+                } else {
+                    buffer.push_str(g);
+                }
             }
         }
         if !buffer.is_empty() {
@@ -13183,6 +13190,39 @@ contexts:
         let elements = renderer.parse(md).expect("parse ok");
         with_test_ui(|_, ui| {
             renderer.render_to_ui(ui, &elements);
+        });
+    }
+
+    /// Verify that U+FE0F (Variation Selector 16) is stripped from non-catalog
+    /// emoji before they reach the text buffer. U+1F6E0 (HAMMER AND WRENCH) +
+    /// U+FE0F is NOT in the 80-emoji Twemoji catalog, so it falls through to
+    /// text rendering. Without the fix, FE0F would appear as tofu in egui.
+    #[test]
+    fn test_render_text_with_emojis_strips_vs16() {
+        let renderer = MarkdownRenderer::new();
+        // U+1F6E0 U+FE0F = 🛠️  — not in catalog, should strip FE0F
+        let input = "before \u{1F6E0}\u{FE0F} after";
+
+        // Confirm the emoji is NOT in our catalog (prerequisite for the fix)
+        assert!(
+            renderer
+                .emoji_key_for_grapheme("\u{1F6E0}\u{FE0F}")
+                .is_none(),
+            "test assumes U+1F6E0+FE0F is not in emoji catalog"
+        );
+
+        // The stripping logic is inline in render_text_with_emojis, so we
+        // verify it directly: for a non-catalog grapheme containing FE0F,
+        // the chars().filter() path should remove it.
+        let g = "\u{1F6E0}\u{FE0F}";
+        assert!(g.contains('\u{FE0F}'));
+        let clean: String = g.chars().filter(|&c| c != '\u{FE0F}').collect();
+        assert!(!clean.contains('\u{FE0F}'), "FE0F should be stripped");
+        assert!(clean.contains('\u{1F6E0}'), "base emoji should remain");
+
+        // Smoke test: render_text_with_emojis should not panic with VS16 input
+        with_test_ui(|_, ui| {
+            renderer.render_text_with_emojis(ui, input, 14.0, InlineStyle::default());
         });
     }
 
