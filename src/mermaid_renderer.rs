@@ -12,7 +12,6 @@ use std::collections::HashSet;
 use std::collections::{HashMap, VecDeque};
 
 #[cfg(feature = "mermaid-quickjs")]
-use std::path::PathBuf;
 #[cfg(all(test, feature = "mermaid-quickjs"))]
 use std::sync::atomic::AtomicBool;
 #[cfg(feature = "mermaid-quickjs")]
@@ -538,7 +537,6 @@ struct MermaidThemeValues {
     title: String,
     label_bg: String,
     edge_label_bg: String,
-    font_family: Option<String>,
 }
 
 pub(crate) struct MermaidRenderer {
@@ -786,18 +784,11 @@ impl MermaidRenderer {
             }
             let svg_key = hash_str(code);
             let mut available_width = ui.available_width();
-            let orig_available_width = available_width;
             if available_width <= Self::MERMAID_WIDTH_BUCKET_STEP as f32 {
                 let fallback = ui.ctx().available_rect().width();
                 if fallback > available_width {
                     available_width = fallback;
                 }
-            }
-            if std::env::var("MDMDVIEW_MERMAID_LOG_WIDTH").is_ok() {
-                eprintln!(
-                    "Mermaid width: avail={:.2} fallback={:.2}",
-                    orig_available_width, available_width
-                );
             }
             let width_bucket = Self::width_bucket(available_width);
             let scale_bucket = Self::scale_bucket(ui_scale);
@@ -1099,11 +1090,6 @@ impl MermaidRenderer {
 
     #[cfg(feature = "mermaid-quickjs")]
     fn mermaid_worker_count() -> usize {
-        if let Ok(raw) = std::env::var("MDMDVIEW_MERMAID_WORKERS") {
-            if let Ok(value) = raw.trim().parse::<usize>() {
-                return value.clamp(1, 16);
-            }
-        }
         let default = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1);
@@ -1112,11 +1098,6 @@ impl MermaidRenderer {
 
     #[cfg(feature = "mermaid-quickjs")]
     fn mermaid_timeout_ms() -> u64 {
-        if let Ok(raw) = std::env::var("MDMDVIEW_MERMAID_TIMEOUT_MS") {
-            if let Ok(value) = raw.trim().parse::<u64>() {
-                return value.max(100);
-            }
-        }
         30_000
     }
 
@@ -1201,73 +1182,29 @@ impl MermaidRenderer {
 
     #[cfg(feature = "mermaid-quickjs")]
     fn mermaid_theme_values() -> MermaidThemeValues {
-        let def_main_bkg = "#FFF8DB";
-        let def_primary = "#D7EEFF";
-        let def_primary_border = "#9BB2C8";
-        let def_primary_text = "#1C2430";
-        let def_secondary = "#DFF5E1";
-        let def_tertiary = "#E9E2FF";
-        let def_line = "#6B7A90";
-        let def_text = "#1C2430";
-        let def_cluster_bkg = "#FFF1C1";
-        let def_cluster_border = "#E5C07B";
-        let def_default_link = def_line;
-        let def_title = def_text;
-        let def_label_bg = def_main_bkg;
-        let def_edge_label_bg = def_main_bkg;
+        let main_bkg = "#FFF8DB";
+        let line = "#6B7A90";
+        let text = "#1C2430";
 
         let theme_name =
             std::env::var("MDMDVIEW_MERMAID_THEME").unwrap_or_else(|_| "base".to_string());
-        let main_bkg =
-            std::env::var("MDMDVIEW_MERMAID_MAIN_BKG").unwrap_or_else(|_| def_main_bkg.to_string());
-        let primary = std::env::var("MDMDVIEW_MERMAID_PRIMARY_COLOR")
-            .unwrap_or_else(|_| def_primary.to_string());
-        let primary_border = std::env::var("MDMDVIEW_MERMAID_PRIMARY_BORDER")
-            .unwrap_or_else(|_| def_primary_border.to_string());
-        let primary_text = std::env::var("MDMDVIEW_MERMAID_PRIMARY_TEXT")
-            .unwrap_or_else(|_| def_primary_text.to_string());
-        let secondary = std::env::var("MDMDVIEW_MERMAID_SECONDARY_COLOR")
-            .unwrap_or_else(|_| def_secondary.to_string());
-        let tertiary = std::env::var("MDMDVIEW_MERMAID_TERTIARY_COLOR")
-            .unwrap_or_else(|_| def_tertiary.to_string());
-        let line =
-            std::env::var("MDMDVIEW_MERMAID_LINE_COLOR").unwrap_or_else(|_| def_line.to_string());
-        let text =
-            std::env::var("MDMDVIEW_MERMAID_TEXT_COLOR").unwrap_or_else(|_| def_text.to_string());
-        let cluster_bkg = std::env::var("MDMDVIEW_MERMAID_CLUSTER_BKG")
-            .unwrap_or_else(|_| def_cluster_bkg.to_string());
-        let cluster_border = std::env::var("MDMDVIEW_MERMAID_CLUSTER_BORDER")
-            .unwrap_or_else(|_| def_cluster_border.to_string());
-        let default_link = std::env::var("MDMDVIEW_MERMAID_LINK_COLOR")
-            .unwrap_or_else(|_| def_default_link.to_string());
-        let title =
-            std::env::var("MDMDVIEW_MERMAID_TITLE_COLOR").unwrap_or_else(|_| def_title.to_string());
-        let label_bg =
-            std::env::var("MDMDVIEW_MERMAID_LABEL_BG").unwrap_or_else(|_| def_label_bg.to_string());
-        let edge_label_bg = std::env::var("MDMDVIEW_MERMAID_EDGE_LABEL_BG")
-            .unwrap_or_else(|_| def_edge_label_bg.to_string());
-        let font_family = std::env::var("MDMDVIEW_MERMAID_FONT_FAMILY")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
 
         MermaidThemeValues {
             theme_name,
-            main_bkg,
-            primary,
-            primary_border,
-            primary_text,
-            secondary,
-            tertiary,
-            line,
-            text,
-            cluster_bkg,
-            cluster_border,
-            default_link,
-            title,
-            label_bg,
-            edge_label_bg,
-            font_family,
+            main_bkg: main_bkg.to_string(),
+            primary: "#D7EEFF".to_string(),
+            primary_border: "#9BB2C8".to_string(),
+            primary_text: text.to_string(),
+            secondary: "#DFF5E1".to_string(),
+            tertiary: "#E9E2FF".to_string(),
+            line: line.to_string(),
+            text: text.to_string(),
+            cluster_bkg: "#FFF1C1".to_string(),
+            cluster_border: "#E5C07B".to_string(),
+            default_link: line.to_string(),
+            title: text.to_string(),
+            label_bg: main_bkg.to_string(),
+            edge_label_bg: main_bkg.to_string(),
         }
     }
 
@@ -1321,7 +1258,7 @@ impl MermaidRenderer {
             Self::json_escape(&theme.theme_name)
         ));
 
-        let mut theme_vars = format!(
+        let theme_vars = format!(
             concat!(
                 "\"background\":\"{}\",",
                 "\"mainBkg\":\"{}\",",
@@ -1355,12 +1292,6 @@ impl MermaidRenderer {
             Self::json_escape(&theme.label_bg),
             Self::json_escape(&theme.edge_label_bg)
         );
-        if let Some(font_family) = theme.font_family.as_ref() {
-            theme_vars.push_str(&format!(
-                ",\"fontFamily\":\"{}\"",
-                Self::json_escape(font_family)
-            ));
-        }
         entries.push(format!("\"themeVariables\":{{{}}}", theme_vars));
 
         format!("{{{}}}", entries.join(","))
@@ -1394,11 +1325,7 @@ impl MermaidRenderer {
             "transparent" => None,
             "dark" => Some([20, 20, 20, 255]),
             "light" => Some([255, 255, 255, 255]),
-            _ => {
-                let hex = std::env::var("MDMDVIEW_MERMAID_MAIN_BKG")
-                    .unwrap_or_else(|_| "#FFF8DB".to_string());
-                Self::parse_hex_color(&hex).or(Some([255, 248, 219, 255]))
-            }
+            _ => Some([255, 248, 219, 255]),
         }
     }
 
@@ -1714,63 +1641,25 @@ impl MermaidWorker {
         } else {
             js.to_string()
         };
-        let debug = std::env::var("MDMDVIEW_MERMAID_PATCH_DEBUG").is_ok();
         if out.contains(D3_CTOR_TARGET) {
             out = out.replacen(D3_CTOR_TARGET, D3_CTOR_PATCH, 1);
-            if debug {
-                eprintln!("Mermaid patch: D3 ctor applied");
-            }
-        } else if debug {
-            eprintln!("Mermaid patch: D3 ctor not found");
         }
         if out.contains(D3_TARGET) {
             out = out.replacen(D3_TARGET, D3_PATCH, 1);
-            if debug {
-                eprintln!("Mermaid patch: D3 enter applied");
-            }
-        } else if debug {
-            eprintln!("Mermaid patch: D3 enter not found");
         }
         if out.contains(TEXT_WRAP_TARGET) {
             out = out.replacen(TEXT_WRAP_TARGET, TEXT_WRAP_PATCH, 1);
-            if debug {
-                eprintln!("Mermaid patch: D3 text wrap applied");
-            }
-        } else if debug {
-            eprintln!("Mermaid patch: D3 text wrap not found");
         }
-        let mut mindmap_layout_patched = false;
         if out.contains(MINDMAP_CYTO_TARGET) {
             out = out.replacen(MINDMAP_CYTO_TARGET, MINDMAP_CYTO_PATCH, 1);
-            if debug {
-                eprintln!("Mermaid patch: mindmap cytoscape stub applied");
-            }
-        } else if debug {
-            eprintln!("Mermaid patch: mindmap cytoscape stub not found");
         }
         if out.contains(MINDMAP_READY_TARGET) {
             out = out.replacen(MINDMAP_READY_TARGET, MINDMAP_READY_PATCH, 1);
-            mindmap_layout_patched = true;
-            if debug {
-                eprintln!("Mermaid patch: mindmap ready patch applied");
-            }
         } else if out.contains(MINDMAP_LAYOUT_TARGET) {
             out = out.replacen(MINDMAP_LAYOUT_TARGET, MINDMAP_LAYOUT_PATCH, 1);
-            mindmap_layout_patched = true;
-            if debug {
-                eprintln!("Mermaid patch: mindmap layout applied");
-            }
-        }
-        if !mindmap_layout_patched && debug {
-            eprintln!("Mermaid patch: mindmap layout not found");
         }
         if out.contains(TIMELINE_BOUNDS_TARGET) {
             out = out.replacen(TIMELINE_BOUNDS_TARGET, TIMELINE_BOUNDS_PATCH, 1);
-            if debug {
-                eprintln!("Mermaid patch: timeline bounds applied");
-            }
-        } else if debug {
-            eprintln!("Mermaid patch: timeline bounds not found");
         }
         out
     }
@@ -1875,14 +1764,6 @@ impl MermaidWorker {
             eval(3, "Mermaid DOM shim", MERMAID_DOM_SHIM)?;
             eval(4, "Mermaid JS", &js)?;
             eval(5, "Mermaid init", MERMAID_INIT_SNIPPET)?;
-            if std::env::var("MDMDVIEW_MERMAID_DOM_DEBUG").is_ok() {
-                let dom_ok = ctx
-                    .eval::<bool, _>(
-                        "var root=document.querySelector('body');var d=document.createElement('div');d.setAttribute('id','__mdmdview_dom_test');root.appendChild(d);var f=document.getElementById('__mdmdview_dom_test');!!(f&&f===d);",
-                    )
-                    .unwrap_or(false);
-                eprintln!("Mermaid DOM debug: {}", dom_ok);
-            }
             Ok(())
         });
         init_result.map_err(|err| format!("Mermaid init error: {}", err))?;
@@ -1953,77 +1834,6 @@ impl MermaidWorker {
                 Err(format!("Mermaid render error: {}", err))
             }
         }
-    }
-
-    fn maybe_dump_svg(svg_key: u64, code: Option<&str>, svg: &str) {
-        let dir = match std::env::var("MDMDVIEW_MERMAID_DUMP_DIR") {
-            Ok(value) if !value.trim().is_empty() => value,
-            _ => return,
-        };
-        let dir = PathBuf::from(dir);
-        if std::fs::create_dir_all(&dir).is_err() {
-            return;
-        }
-        let label = code
-            .and_then(|snippet| snippet.lines().next())
-            .unwrap_or("mermaid");
-        let mut name = String::new();
-        for ch in label.chars() {
-            if name.len() >= 32 {
-                break;
-            }
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                name.push(ch);
-            } else {
-                name.push('_');
-            }
-        }
-        if name.is_empty() {
-            name.push_str("mermaid");
-        }
-        let filename = format!("{:016x}_{}.svg", svg_key, name);
-        let path = dir.join(filename);
-        let _ = std::fs::write(path, svg);
-    }
-
-    fn maybe_dump_error(svg_key: u64, code: Option<&str>, err: &str) {
-        let dir = match std::env::var("MDMDVIEW_MERMAID_DUMP_DIR") {
-            Ok(value) if !value.trim().is_empty() => value,
-            _ => return,
-        };
-        let dir = PathBuf::from(dir);
-        if std::fs::create_dir_all(&dir).is_err() {
-            return;
-        }
-        let label = code
-            .and_then(|snippet| snippet.lines().next())
-            .unwrap_or("mermaid");
-        let mut name = String::new();
-        for ch in label.chars() {
-            if name.len() >= 32 {
-                break;
-            }
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                name.push(ch);
-            } else {
-                name.push('_');
-            }
-        }
-        if name.is_empty() {
-            name.push_str("mermaid");
-        }
-        let filename = format!("{:016x}_{}.err.txt", svg_key, name);
-        let path = dir.join(filename);
-        let mut payload = String::new();
-        payload.push_str("error: ");
-        payload.push_str(err);
-        payload.push('\n');
-        if let Some(code) = code {
-            payload.push_str("\n---\n");
-            payload.push_str(code);
-            payload.push('\n');
-        }
-        let _ = std::fs::write(path, payload);
     }
 
     fn normalize_svg_size(svg: &str) -> String {
@@ -2408,11 +2218,6 @@ impl MermaidWorker {
     ///
     /// Supported tags: `<i>`, `<em>`, `<b>`, `<strong>`, `<u>`, `<s>`, `<del>`, `<strike>`
     fn convert_html_tags_to_tspan(svg: &str) -> String {
-        // Check feature flag (cached check)
-        if std::env::var("MDMDVIEW_MERMAID_HTML_TAGS").ok().as_deref() == Some("off") {
-            return svg.to_string();
-        }
-
         // Fast path: if no escaped tags, return unchanged
         if !svg.contains("&lt;") {
             return svg.to_string();
@@ -2748,7 +2553,6 @@ impl MermaidWorker {
                 // Convert escaped HTML tags (like &lt;i&gt;) to SVG tspan elements
                 svg = Self::convert_html_tags_to_tspan(&svg);
 
-                Self::maybe_dump_svg(svg_key, code_ref, &svg);
                 match self.rasterize_svg(&svg, width_bucket, scale_bucket, bg) {
                     Ok((rgba, w, h)) => MermaidResult {
                         svg_key,
@@ -2758,30 +2562,24 @@ impl MermaidWorker {
                         size: Some((w, h)),
                         error: None,
                     },
-                    Err(err) => {
-                        Self::maybe_dump_error(svg_key, code_ref, &err);
-                        MermaidResult {
-                            svg_key,
-                            texture_key,
-                            svg: Some(svg),
-                            rgba: None,
-                            size: None,
-                            error: Some(err),
-                        }
-                    }
+                    Err(err) => MermaidResult {
+                        svg_key,
+                        texture_key,
+                        svg: Some(svg),
+                        rgba: None,
+                        size: None,
+                        error: Some(err),
+                    },
                 }
             }
-            Err(err) => {
-                Self::maybe_dump_error(svg_key, code_ref, &err);
-                MermaidResult {
-                    svg_key,
-                    texture_key,
-                    svg: None,
-                    rgba: None,
-                    size: None,
-                    error: Some(err),
-                }
-            }
+            Err(err) => MermaidResult {
+                svg_key,
+                texture_key,
+                svg: None,
+                rgba: None,
+                size: None,
+                error: Some(err),
+            },
         }
     }
 
@@ -2899,22 +2697,6 @@ impl MermaidWorker {
         let mut target_h = (h as f32 * scale).round() as u32;
         target_w = target_w.max(1);
         target_h = target_h.max(1);
-
-        if std::env::var("MDMDVIEW_MERMAID_LOG_RASTER").is_ok() {
-            eprintln!(
-                "Mermaid raster: svg={}x{} target={}x{} scale={:.3} bbox_valid={} bbox=({:.2},{:.2},{:.2},{:.2})",
-                w,
-                h,
-                target_w,
-                target_h,
-                scale,
-                bbox_valid,
-                bbox.x(),
-                bbox.y(),
-                bbox_w,
-                bbox_h
-            );
-        }
 
         let max_side = MermaidRenderer::MERMAID_MAX_RENDER_SIDE;
         if target_w > max_side || target_h > max_side {
@@ -5480,7 +5262,6 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
     use std::sync::{Arc, Mutex, OnceLock};
-    use tempfile::tempdir;
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -6178,59 +5959,6 @@ mod tests {
         ));
     }
 
-    #[cfg(feature = "mermaid-quickjs")]
-    #[test]
-    fn test_mermaid_worker_count_clamps_env() {
-        let _lock = env_lock();
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_WORKERS", "0");
-            assert_eq!(MermaidRenderer::mermaid_worker_count(), 1);
-        }
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_WORKERS", "999");
-            assert_eq!(MermaidRenderer::mermaid_worker_count(), 16);
-        }
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_WORKERS", "nope");
-            let count = MermaidRenderer::mermaid_worker_count();
-            assert!(count >= 1);
-            assert!(count <= MermaidRenderer::MAX_MERMAID_JOBS.max(1));
-        }
-    }
-
-    #[cfg(feature = "mermaid-quickjs")]
-    #[test]
-    fn test_mermaid_timeout_ms_env_clamps() {
-        let _lock = env_lock();
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_TIMEOUT_MS", "50");
-            assert_eq!(MermaidRenderer::mermaid_timeout_ms(), 100);
-        }
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_TIMEOUT_MS", "250");
-            assert_eq!(MermaidRenderer::mermaid_timeout_ms(), 250);
-        }
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_TIMEOUT_MS", "bad");
-            assert_eq!(MermaidRenderer::mermaid_timeout_ms(), 30_000);
-        }
-    }
-
-    #[cfg(feature = "mermaid-quickjs")]
-    #[test]
-    fn test_mermaid_theme_values_font_family_trim() {
-        let _lock = env_lock();
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_FONT_FAMILY", "  ");
-            let theme = MermaidRenderer::mermaid_theme_values();
-            assert!(theme.font_family.is_none());
-        }
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_FONT_FAMILY", "  Test Font  ");
-            let theme = MermaidRenderer::mermaid_theme_values();
-            assert_eq!(theme.font_family.as_deref(), Some("Test Font"));
-        }
-    }
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
@@ -6259,15 +5987,6 @@ mod tests {
         let json = MermaidRenderer::mermaid_site_config_json(4, true);
         assert!(json.contains("\"__mdmdviewAllowHtmlLabels\":true"));
         assert!(!json.contains("\"htmlLabels\":false"));
-    }
-
-    #[cfg(feature = "mermaid-quickjs")]
-    #[test]
-    fn test_mermaid_site_config_json_includes_font_family() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_FONT_FAMILY", "Test Sans");
-        let json = MermaidRenderer::mermaid_site_config_json(3, false);
-        assert!(json.contains("\"fontFamily\":\"Test Sans\""));
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -6427,14 +6146,6 @@ mod tests {
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
-    fn test_mermaid_worker_dom_debug_env() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_DOM_DEBUG", "1");
-        assert!(MermaidWorker::new(0, test_fontdb()).is_ok());
-    }
-
-    #[cfg(feature = "mermaid-quickjs")]
-    #[test]
     fn test_mermaid_js_empty_override_matches_thread() {
         let _lock = env_lock();
         assert_eq!(mermaid_js_empty(), MERMAID_JS_EMPTY);
@@ -6564,19 +6275,6 @@ mod tests {
             .rasterize_svg("not svg", 100, MermaidRenderer::scale_bucket(1.0), None)
             .unwrap_err();
         assert!(!err.is_empty());
-    }
-
-    #[cfg(feature = "mermaid-quickjs")]
-    #[test]
-    fn test_rasterize_svg_logs_when_env_set() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_LOG_RASTER", "1");
-        let worker = test_worker();
-        let svg = r#"<svg width="4" height="4" xmlns="http://www.w3.org/2000/svg"></svg>"#;
-        let (data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
-            .expect("rasterize svg");
-        assert_eq!(data.len(), (w as usize) * (h as usize) * 4);
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -6850,84 +6548,6 @@ mod tests {
         assert!(rendered.contains("fill:"));
         assert!(rendered.contains("end-state-inner"));
         assert!(rendered.contains("attributeBoxOdd"));
-    }
-
-    #[cfg(feature = "mermaid-quickjs")]
-    #[test]
-    fn test_mermaid_dump_helpers_sanitize_labels() {
-        let _lock = env_lock();
-        let dir = tempdir().expect("temp dir");
-        let _guard = EnvGuard::set(
-            "MDMDVIEW_MERMAID_DUMP_DIR",
-            dir.path().to_string_lossy().as_ref(),
-        );
-        MermaidWorker::maybe_dump_svg(10, Some("ok-label 123"), "<svg></svg>");
-        MermaidWorker::maybe_dump_error(11, Some("::bad label::"), "boom");
-        MermaidWorker::maybe_dump_error(12, Some("good_label"), "ok");
-        MermaidWorker::maybe_dump_svg(13, Some("\nrest"), "<svg></svg>");
-        MermaidWorker::maybe_dump_error(14, Some("dash-label"), "dash");
-        MermaidWorker::maybe_dump_error(14, Some("abcdefghijklmnopqrstuvwxyz0123456789"), "long");
-        MermaidWorker::maybe_dump_svg(
-            16,
-            Some("abcdefghijklmnopqrstuvwxyz0123456789"),
-            "<svg></svg>",
-        );
-        MermaidWorker::maybe_dump_svg(16, Some("under_score"), "<svg></svg>");
-        MermaidWorker::maybe_dump_error(15, None, "no code");
-        MermaidWorker::maybe_dump_svg(17, None, "<svg></svg>");
-        MermaidWorker::maybe_dump_error(18, Some(""), "empty");
-        MermaidWorker::maybe_dump_svg(19, Some(""), "<svg></svg>");
-        MermaidWorker::maybe_dump_error(20, Some("\nrest"), "empty-label");
-
-        let entries: Vec<_> = std::fs::read_dir(dir.path())
-            .expect("read dir")
-            .filter_map(|entry| entry.ok())
-            .collect();
-        assert!(entries
-            .iter()
-            .any(|entry| entry.path().extension() == Some("svg".as_ref())));
-        assert!(entries
-            .iter()
-            .any(|entry| entry.path().extension() == Some("txt".as_ref())));
-    }
-
-    #[cfg(feature = "mermaid-quickjs")]
-    #[test]
-    fn test_mermaid_dump_helpers_empty_dir_env_noop() {
-        let _lock = env_lock();
-        let dir = tempdir().expect("temp dir");
-        let seed_path = dir.path().join("seed.txt");
-        std::fs::write(&seed_path, "seed").expect("seed write");
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_DUMP_DIR", "   ");
-        MermaidWorker::maybe_dump_svg(20, Some("label"), "<svg></svg>");
-        MermaidWorker::maybe_dump_error(21, Some("label"), "err");
-        let entries: Vec<_> = std::fs::read_dir(dir.path())
-            .expect("read dir")
-            .filter_map(|entry| entry.ok())
-            .collect();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].path(), seed_path);
-    }
-
-    #[cfg(feature = "mermaid-quickjs")]
-    #[test]
-    fn test_mermaid_dump_helpers_invalid_dir_noop() {
-        let _lock = env_lock();
-        let dir = tempdir().expect("temp dir");
-        let file_path = dir.path().join("not_a_dir.txt");
-        std::fs::write(&file_path, "data").expect("write file");
-        let _guard = EnvGuard::set(
-            "MDMDVIEW_MERMAID_DUMP_DIR",
-            file_path.to_string_lossy().as_ref(),
-        );
-        MermaidWorker::maybe_dump_svg(22, Some("label"), "<svg></svg>");
-        MermaidWorker::maybe_dump_error(23, Some("label"), "err");
-        let entries: Vec<_> = std::fs::read_dir(dir.path())
-            .expect("read dir")
-            .filter_map(|entry| entry.ok())
-            .collect();
-        assert_eq!(entries.len(), 1);
-        assert!(entries[0].path().ends_with("not_a_dir.txt"));
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -7215,23 +6835,19 @@ mod tests {
     #[test]
     fn test_env_guard_restores_original_value() {
         let _lock = env_lock();
-        std::env::set_var("MDMDVIEW_MERMAID_PATCH_DEBUG", "before");
+        std::env::set_var("MDMDVIEW_TEST_GUARD_ENV", "before");
         {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_PATCH_DEBUG", "after");
+            let _guard = EnvGuard::set("MDMDVIEW_TEST_GUARD_ENV", "after");
             assert_eq!(
-                std::env::var("MDMDVIEW_MERMAID_PATCH_DEBUG")
-                    .ok()
-                    .as_deref(),
+                std::env::var("MDMDVIEW_TEST_GUARD_ENV").ok().as_deref(),
                 Some("after")
             );
         }
         assert_eq!(
-            std::env::var("MDMDVIEW_MERMAID_PATCH_DEBUG")
-                .ok()
-                .as_deref(),
+            std::env::var("MDMDVIEW_TEST_GUARD_ENV").ok().as_deref(),
             Some("before")
         );
-        std::env::remove_var("MDMDVIEW_MERMAID_PATCH_DEBUG");
+        std::env::remove_var("MDMDVIEW_TEST_GUARD_ENV");
     }
 
     #[test]
@@ -7243,10 +6859,9 @@ mod tests {
     }
 
     #[test]
-    fn test_mermaid_bg_fill_invalid_theme_color_uses_default() {
+    fn test_mermaid_bg_fill_theme_returns_default() {
         let _lock = env_lock();
         let _guard_mode = EnvGuard::set("MDMDVIEW_MERMAID_BG", "theme");
-        let _guard_bkg = EnvGuard::set("MDMDVIEW_MERMAID_MAIN_BKG", "bad");
         assert_eq!(
             MermaidRenderer::mermaid_bg_fill(),
             Some([255, 248, 219, 255])
@@ -7297,14 +6912,6 @@ mod tests {
         std::env::remove_var("MDMDVIEW_MERMAID_BG");
         let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG_COLOR", "#11223344");
         assert_eq!(MermaidRenderer::mermaid_bg_fill(), Some([17, 34, 51, 68]));
-    }
-
-    #[test]
-    fn test_mermaid_bg_fill_theme_fallback() {
-        let _lock = env_lock();
-        let _guard_mode = EnvGuard::set("MDMDVIEW_MERMAID_BG", "theme");
-        let _guard_bkg = EnvGuard::set("MDMDVIEW_MERMAID_MAIN_BKG", "#010203");
-        assert_eq!(MermaidRenderer::mermaid_bg_fill(), Some([1, 2, 3, 255]));
     }
 
     #[test]
@@ -7549,7 +7156,6 @@ mod tests {
     fn test_render_block_pending_and_width_fallback() {
         let _lock = env_lock();
         let _guard_renderer = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "embedded");
-        let _guard_log = EnvGuard::set("MDMDVIEW_MERMAID_LOG_WIDTH", "1");
         let (job_tx, job_rx) = bounded(2);
         let (result_tx, result_rx) = bounded(2);
         let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
@@ -7890,9 +7496,7 @@ mod tests {
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
-    fn test_patch_mermaid_js_debug_paths_without_targets() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_PATCH_DEBUG", "1");
+    fn test_patch_mermaid_js_no_targets_unchanged() {
         let js = "console.log('no targets here');";
         let output = MermaidWorker::patch_mermaid_js(js);
         assert_eq!(output, js);
@@ -7900,30 +7504,7 @@ mod tests {
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
-    fn test_patch_mermaid_js_debug_off_still_patches() {
-        let _lock = env_lock();
-        std::env::remove_var("MDMDVIEW_MERMAID_PATCH_DEBUG");
-        let js =
-            "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run()";
-        let output = MermaidWorker::patch_mermaid_js(js);
-        assert!(output.contains("breadthfirst"));
-    }
-
-    #[cfg(feature = "mermaid-quickjs")]
-    #[test]
-    fn test_patch_mermaid_js_debug_missing_layout_not_logged_when_debug_off() {
-        let _lock = env_lock();
-        std::env::remove_var("MDMDVIEW_MERMAID_PATCH_DEBUG");
-        let js = "console.log('no targets here');";
-        let output = MermaidWorker::patch_mermaid_js(js);
-        assert_eq!(output, js);
-    }
-
-    #[cfg(feature = "mermaid-quickjs")]
-    #[test]
-    fn test_patch_mermaid_js_debug_paths_with_targets() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_PATCH_DEBUG", "1");
+    fn test_patch_mermaid_js_all_targets() {
         let js = concat!(
             "var hD=wRe();",
             "FY.prototype={constructor:FY,appendChild:function(i){return this._parent.insertBefore(i,this._next)},insertBefore:function(i,s){return this._parent.insertBefore(i,s)},querySelector:function(i){return this._parent.querySelector(i)},querySelectorAll:function(i){return this._parent.querySelectorAll(i)}};",
@@ -7940,9 +7521,7 @@ mod tests {
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
-    fn test_patch_mermaid_js_debug_paths_with_layout_only() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_PATCH_DEBUG", "1");
+    fn test_patch_mermaid_js_layout_only() {
         let js =
             "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run()";
         let output = MermaidWorker::patch_mermaid_js(js);
@@ -8241,7 +7820,6 @@ mod tests {
     #[test]
     fn test_spawn_mermaid_workers_reports_init_error() {
         let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_WORKERS", "1");
         force_mermaid_worker_init_error_once();
         let (job_tx, job_rx) = bounded(1);
         let (result_tx, result_rx) = bounded(1);
@@ -8272,12 +7850,18 @@ mod tests {
     #[test]
     fn test_spawn_mermaid_workers_reports_spawn_error() {
         let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_WORKERS", "1");
         force_mermaid_thread_spawn_error_once();
         let (_job_tx, job_rx) = bounded(1);
         let (result_tx, _result_rx) = bounded(1);
+        let expected_count = MermaidRenderer::mermaid_worker_count();
         let handles = MermaidRenderer::spawn_mermaid_workers(job_rx, result_tx);
-        assert!(handles.is_empty());
+        // One spawn was forced to fail, so we should have fewer than expected
+        assert!(
+            handles.len() < expected_count,
+            "expected fewer than {} handles due to forced spawn error, got {}",
+            expected_count,
+            handles.len()
+        );
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -8654,17 +8238,6 @@ mod tests {
         let expected =
             "<text><tspan font-style=\"italic\">a</tspan> and <tspan font-style=\"italic\">b</tspan></text>";
         assert_eq!(MermaidWorker::convert_html_tags_to_tspan(input), expected);
-    }
-
-    #[test]
-    #[ignore = "env vars are process-global; run with --ignored to test in isolation"]
-    fn test_html_to_tspan_feature_flag_disabled() {
-        std::env::set_var("MDMDVIEW_MERMAID_HTML_TAGS", "off");
-        let input = "<text>&lt;i&gt;italic&lt;/i&gt;</text>";
-        let result = MermaidWorker::convert_html_tags_to_tspan(input);
-        // With feature disabled, should return unchanged
-        assert_eq!(result, input);
-        std::env::remove_var("MDMDVIEW_MERMAID_HTML_TAGS");
     }
 
     #[test]
