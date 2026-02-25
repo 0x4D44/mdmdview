@@ -23,7 +23,7 @@ use std::sync::{
 #[cfg(feature = "mermaid-quickjs")]
 use std::thread::JoinHandle;
 #[cfg(feature = "mermaid-quickjs")]
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "mermaid-quickjs")]
 mod mermaid_embed {
@@ -522,6 +522,24 @@ enum MermaidEnqueueError {
     Disconnected,
 }
 
+/// Per-diagram debounce state for resize-aware rendering.
+/// Tracks the last-enqueued width bucket and the time when the width bucket last changed.
+#[cfg(feature = "mermaid-quickjs")]
+struct WidthDebounce {
+    /// The width bucket for which a render was last successfully enqueued.
+    last_enqueued_bucket: u32,
+    /// The width bucket observed on the most recent frame.
+    /// Used to detect continuing resize (trailing-edge timer reset).
+    last_seen_bucket: u32,
+    /// When the width bucket last changed (i.e., last_seen_bucket was updated).
+    /// None if the current bucket matches last_enqueued_bucket (no resize in progress).
+    bucket_changed_at: Option<Instant>,
+}
+
+/// How long to wait after the last width bucket change before
+/// enqueueing a re-render. Prevents flooding workers during resize.
+#[cfg(feature = "mermaid-quickjs")]
+const MERMAID_RESIZE_DEBOUNCE_MS: u64 = 150;
 
 pub(crate) struct MermaidRenderer {
     #[cfg(feature = "mermaid-quickjs")]
@@ -547,6 +565,20 @@ pub(crate) struct MermaidRenderer {
     /// they exit cleanly and release memory (font database, QuickJS runtime).
     #[cfg(feature = "mermaid-quickjs")]
     worker_handles: Vec<JoinHandle<()>>,
+    /// Per-diagram debounce state for resize-aware rendering.
+    /// Key: svg_key (u64). Tracks the last-enqueued width bucket
+    /// and the time when the width bucket last changed.
+    #[cfg(feature = "mermaid-quickjs")]
+    mermaid_width_debounce: RefCell<HashMap<u64, WidthDebounce>>,
+    /// Maps svg_key → the texture_key of the most recently stored texture.
+    /// Used during resize debounce to find a stale-but-displayable texture.
+    #[cfg(feature = "mermaid-quickjs")]
+    mermaid_latest_texture: RefCell<HashMap<u64, String>>,
+    /// The width bucket that was most recently *requested* for each svg_key.
+    /// Updated every frame in render_block before poll_mermaid_results.
+    /// Used by poll_mermaid_results to detect stale results.
+    #[cfg(feature = "mermaid-quickjs")]
+    mermaid_wanted_bucket: RefCell<HashMap<u64, u32>>,
 }
 
 impl MermaidRenderer {
@@ -619,6 +651,12 @@ impl MermaidRenderer {
             mermaid_result_rx,
             #[cfg(feature = "mermaid-quickjs")]
             worker_handles,
+            #[cfg(feature = "mermaid-quickjs")]
+            mermaid_width_debounce: RefCell::new(HashMap::new()),
+            #[cfg(feature = "mermaid-quickjs")]
+            mermaid_latest_texture: RefCell::new(HashMap::new()),
+            #[cfg(feature = "mermaid-quickjs")]
+            mermaid_wanted_bucket: RefCell::new(HashMap::new()),
         }
     }
 
@@ -630,6 +668,9 @@ impl MermaidRenderer {
         // mermaid_svg_cache intentionally retained for fast rebuild
         // mermaid_errors intentionally retained to prevent retry storms
         // mermaid_texture_errors intentionally retained
+        self.mermaid_width_debounce.borrow_mut().clear();
+        self.mermaid_latest_texture.borrow_mut().clear();
+        self.mermaid_wanted_bucket.borrow_mut().clear();
     }
 
     /// Clear all Mermaid caches (textures, SVGs, errors). Used when the theme changes.
@@ -640,6 +681,9 @@ impl MermaidRenderer {
         self.mermaid_errors.borrow_mut().clear();
         self.mermaid_texture_errors.borrow_mut().clear();
         self.mermaid_pending.borrow_mut().clear();
+        self.mermaid_width_debounce.borrow_mut().clear();
+        self.mermaid_latest_texture.borrow_mut().clear();
+        self.mermaid_wanted_bucket.borrow_mut().clear();
     }
 
     pub(crate) fn has_pending(&self) -> bool {
@@ -752,6 +796,11 @@ impl MermaidRenderer {
             let bg = theme.bg_fill();
             let texture_key = Self::texture_key(svg_key, width_bucket, scale_bucket, bg);
 
+            // Track what width we currently want for staleness detection
+            self.mermaid_wanted_bucket
+                .borrow_mut()
+                .insert(svg_key, width_bucket);
+
             if self.poll_mermaid_results(ui.ctx()) {
                 ui.ctx().request_repaint();
             }
@@ -805,6 +854,116 @@ impl MermaidRenderer {
                     });
                 return true;
             }
+            // Debounce gate: suppress enqueue during resize, show stale texture
+            let debounce_entry = self
+                .mermaid_width_debounce
+                .borrow()
+                .get(&svg_key)
+                .map(|d| (d.last_enqueued_bucket, d.last_seen_bucket, d.bucket_changed_at));
+            if let Some((last_enqueued_bucket, last_seen_bucket, bucket_changed_at)) =
+                debounce_entry
+            {
+                if width_bucket != last_enqueued_bucket {
+                    // Resize in progress — apply trailing-edge debounce
+                    if width_bucket != last_seen_bucket {
+                        // Width changed since last frame — reset timer
+                        self.mermaid_width_debounce.borrow_mut().insert(
+                            svg_key,
+                            WidthDebounce {
+                                last_enqueued_bucket,
+                                last_seen_bucket: width_bucket,
+                                bucket_changed_at: Some(Instant::now()),
+                            },
+                        );
+                    }
+                    // Re-read the (possibly updated) timer
+                    let changed_at = self
+                        .mermaid_width_debounce
+                        .borrow()
+                        .get(&svg_key)
+                        .and_then(|d| d.bucket_changed_at)
+                        .unwrap_or_else(|| {
+                            // bucket_changed_at was None but bucket != last_enqueued;
+                            // shouldn't happen but treat as "just changed"
+                            let now = Instant::now();
+                            self.mermaid_width_debounce.borrow_mut().insert(
+                                svg_key,
+                                WidthDebounce {
+                                    last_enqueued_bucket,
+                                    last_seen_bucket: width_bucket,
+                                    bucket_changed_at: Some(now),
+                                },
+                            );
+                            now
+                        });
+                    let elapsed = changed_at.elapsed();
+                    let debounce_dur =
+                        std::time::Duration::from_millis(MERMAID_RESIZE_DEBOUNCE_MS);
+                    if elapsed < debounce_dur {
+                        // Still in cooldown — show stale texture or placeholder
+                        let stale_key = self
+                            .mermaid_latest_texture
+                            .borrow()
+                            .get(&svg_key)
+                            .cloned();
+                        if let Some(ref stale_key) =
+                            stale_key.as_ref().and_then(|k| {
+                                self.mermaid_textures.borrow_mut().get(k).map(|entry| {
+                                    (entry.texture.clone(), entry.size)
+                                })
+                            })
+                        {
+                            let (tex, sz) = stale_key;
+                            let (tw, th) = (sz[0] as f32, sz[1] as f32);
+                            let available_w = ui.available_width().max(1.0);
+                            let scale = if tw > available_w {
+                                (available_w / tw).clamp(0.01, 4.0)
+                            } else {
+                                1.0
+                            };
+                            let size = egui::vec2((tw * scale).round(), (th * scale).round());
+                            ui.add(egui::Image::new(tex).fit_to_exact_size(size));
+                        } else {
+                            // No stale texture available — show placeholder
+                            self.mermaid_frame_pending.set(true);
+                            egui::Frame::none()
+                                .fill(ThemeColors::current(ui.visuals().dark_mode).box_bg)
+                                .stroke(Stroke::new(
+                                    1.0,
+                                    ThemeColors::current(ui.visuals().dark_mode).box_border,
+                                ))
+                                .inner_margin(8.0)
+                                .show(ui, |ui| {
+                                    ui.set_min_height(Self::MERMAID_PLACEHOLDER_MIN_HEIGHT);
+                                    ui.label(
+                                        RichText::new("Rendering diagram locally...")
+                                            .color(Color32::from_rgb(160, 200, 240)),
+                                    );
+                                });
+                        }
+                        let remaining = debounce_dur - elapsed;
+                        ui.ctx().request_repaint_after(remaining);
+                        return true;
+                    }
+                    // Debounce expired — fall through to enqueue
+                } else {
+                    // width_bucket == last_enqueued_bucket: texture was evicted from LRU
+                    // Clear timer since we're back at the enqueued width
+                    if bucket_changed_at.is_some() {
+                        self.mermaid_width_debounce.borrow_mut().insert(
+                            svg_key,
+                            WidthDebounce {
+                                last_enqueued_bucket,
+                                last_seen_bucket: width_bucket,
+                                bucket_changed_at: None,
+                            },
+                        );
+                    }
+                    // Fall through to enqueue to rebuild evicted texture
+                }
+            }
+            // If no debounce entry: first render — fall through to enqueue
+
             let svg = self.mermaid_svg_cache.borrow_mut().get(&svg_key);
             let pending = self.mermaid_pending.borrow().contains(&texture_key);
             let mut waiting_for_slot = false;
@@ -831,9 +990,19 @@ impl MermaidRenderer {
                         self.mermaid_pending
                             .borrow_mut()
                             .insert(texture_key.clone());
+                        // Create/update debounce entry on successful enqueue
+                        self.mermaid_width_debounce.borrow_mut().insert(
+                            svg_key,
+                            WidthDebounce {
+                                last_enqueued_bucket: width_bucket,
+                                last_seen_bucket: width_bucket,
+                                bucket_changed_at: None,
+                            },
+                        );
                         ui.ctx().request_repaint();
                     }
                     Err(MermaidEnqueueError::QueueFull) => {
+                        // Do NOT create/update debounce entry on QueueFull
                         waiting_for_slot = true;
                         ui.ctx().request_repaint();
                     }
@@ -974,21 +1143,45 @@ impl MermaidRenderer {
                 size,
                 error,
             } = result;
+
+            // Job is complete regardless of staleness — remove from pending set
             let has_svg = svg.is_some();
             self.mermaid_pending.borrow_mut().remove(&texture_key);
 
+            // Always cache the SVG — it's content-addressed and width-independent
             if let Some(svg) = svg {
                 self.mermaid_svg_cache.borrow_mut().insert(svg_key, svg);
                 self.mermaid_errors.borrow_mut().remove(&svg_key);
             }
 
+            // Always cache errors — they're content-dependent, not width-dependent.
+            // A QuickJS failure or rasterization error will recur at any width.
+            // Caching prevents infinite re-render loops for broken diagrams.
+            if let Some(err) = error {
+                if !has_svg {
+                    self.mermaid_errors.borrow_mut().insert(svg_key, err);
+                } else {
+                    self.mermaid_texture_errors
+                        .borrow_mut()
+                        .insert(texture_key.clone(), err);
+                }
+            }
+
+            // Check if this result's width bucket is still wanted.
+            // Only skip the GPU upload — SVG and errors are already cached above.
+            if self.is_stale_result(&texture_key, svg_key) {
+                changed = true;
+                continue;
+            }
+
+            // Upload texture to GPU (existing logic)
             if let Some(rgba) = rgba {
                 if let Some((w, h)) = size {
                     let img =
                         egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
                     let tex =
                         ctx.load_texture(texture_key.clone(), img, egui::TextureOptions::LINEAR);
-                    self.store_mermaid_texture(&texture_key, tex.clone(), [w, h]);
+                    self.store_mermaid_texture(&texture_key, tex.clone(), [w, h], svg_key);
                     self.mermaid_texture_errors
                         .borrow_mut()
                         .remove(&texture_key);
@@ -997,16 +1190,6 @@ impl MermaidRenderer {
                         texture_key.clone(),
                         "Mermaid rasterization failed (missing size)".to_string(),
                     );
-                }
-            }
-
-            if let Some(err) = error {
-                if !has_svg {
-                    self.mermaid_errors.borrow_mut().insert(svg_key, err);
-                } else {
-                    self.mermaid_texture_errors
-                        .borrow_mut()
-                        .insert(texture_key, err);
                 }
             }
 
@@ -1113,10 +1296,40 @@ impl MermaidRenderer {
     }
 
     #[cfg(feature = "mermaid-quickjs")]
-    fn store_mermaid_texture(&self, key: &str, texture: egui::TextureHandle, size: [u32; 2]) {
+    fn store_mermaid_texture(
+        &self,
+        key: &str,
+        texture: egui::TextureHandle,
+        size: [u32; 2],
+        svg_key: u64,
+    ) {
         self.mermaid_textures
             .borrow_mut()
             .insert(key.to_string(), MermaidTextureEntry { texture, size });
+        self.mermaid_latest_texture
+            .borrow_mut()
+            .insert(svg_key, key.to_string());
+    }
+
+    /// Parse the width bucket from a texture key string.
+    /// Format: "mermaid:{hex}:w{bucket}:s{scale}:bg{hex}"
+    #[cfg(feature = "mermaid-quickjs")]
+    fn parse_width_from_texture_key(key: &str) -> Option<u32> {
+        let w_start = key.find(":w")? + 2;
+        let w_end = key[w_start..].find(':')? + w_start;
+        key[w_start..w_end].parse().ok()
+    }
+
+    /// Returns true if the result's width bucket no longer matches
+    /// what the UI currently wants for this diagram.
+    #[cfg(feature = "mermaid-quickjs")]
+    fn is_stale_result(&self, texture_key: &str, svg_key: u64) -> bool {
+        let result_bucket = Self::parse_width_from_texture_key(texture_key);
+        let wanted_bucket = self.mermaid_wanted_bucket.borrow().get(&svg_key).copied();
+        match (result_bucket, wanted_bucket) {
+            (Some(rb), Some(wb)) => rb != wb,
+            _ => false, // Can't determine staleness, process normally
+        }
     }
 
     #[cfg(any(test, feature = "mermaid-quickjs"))]
@@ -5165,6 +5378,9 @@ mod tests {
             mermaid_job_tx: job_tx,
             mermaid_result_rx: result_rx,
             worker_handles: Vec::new(),
+            mermaid_width_debounce: RefCell::new(HashMap::new()),
+            mermaid_latest_texture: RefCell::new(HashMap::new()),
+            mermaid_wanted_bucket: RefCell::new(HashMap::new()),
         }
     }
 
@@ -8081,5 +8297,517 @@ mod tests {
 
         // Assert SVG cache is NOT EMPTY (still has entries)
         assert_eq!(renderer.mermaid_svg_cache.borrow().len(), 1);
+    }
+
+    // ---- Resize debounce tests ----
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_parse_width_from_texture_key() {
+        let key = MermaidRenderer::texture_key(0xABCD, 320, 100, [0, 0, 0, 255]);
+        assert_eq!(MermaidRenderer::parse_width_from_texture_key(&key), Some(320));
+
+        let key2 = MermaidRenderer::texture_key(0x1234, 1024, 200, [255, 255, 255, 255]);
+        assert_eq!(MermaidRenderer::parse_width_from_texture_key(&key2), Some(1024));
+
+        // Malformed keys
+        assert_eq!(MermaidRenderer::parse_width_from_texture_key("no-w-here"), None);
+        assert_eq!(MermaidRenderer::parse_width_from_texture_key("mermaid:abc:wNOT_A_NUM:s100:bg00000000"), None);
+        assert_eq!(MermaidRenderer::parse_width_from_texture_key(":w32"), None); // no trailing ':'
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_latest_texture_index_updated_on_store() {
+        let (_result_tx, result_rx) = bounded(1);
+        let renderer = test_renderer_with_channels(None, result_rx);
+        let ctx = egui::Context::default();
+        let input = test_raw_input(800.0, 600.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let image = egui::ColorImage::new([2, 2], Color32::WHITE);
+                let tex = ui
+                    .ctx()
+                    .load_texture("test-latest", image, egui::TextureOptions::default());
+
+                let svg_key: u64 = 42;
+                renderer.store_mermaid_texture("key_v1", tex.clone(), [2, 2], svg_key);
+                assert_eq!(
+                    renderer.mermaid_latest_texture.borrow().get(&svg_key),
+                    Some(&"key_v1".to_string())
+                );
+
+                renderer.store_mermaid_texture("key_v2", tex.clone(), [4, 4], svg_key);
+                assert_eq!(
+                    renderer.mermaid_latest_texture.borrow().get(&svg_key),
+                    Some(&"key_v2".to_string())
+                );
+            });
+        });
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_stale_result_skips_gpu_upload() {
+        let (result_tx, result_rx) = bounded(10);
+        let renderer = test_renderer_with_channels(None, result_rx);
+        let ctx = egui::Context::default();
+
+        let svg_key: u64 = 100;
+        let texture_key_old = MermaidRenderer::texture_key(svg_key, 320, 100, [0, 0, 0, 255]);
+        let _texture_key_new = MermaidRenderer::texture_key(svg_key, 640, 100, [0, 0, 0, 255]);
+
+        // Set wanted bucket to 640 (different from result's 320)
+        renderer
+            .mermaid_wanted_bucket
+            .borrow_mut()
+            .insert(svg_key, 640);
+
+        renderer
+            .mermaid_pending
+            .borrow_mut()
+            .insert(texture_key_old.clone());
+
+        result_tx
+            .send(MermaidResult {
+                svg_key,
+                texture_key: texture_key_old.clone(),
+                svg: Some("<svg>test</svg>".to_string()),
+                rgba: Some(vec![255, 255, 255, 255]),
+                size: Some((1, 1)),
+                error: None,
+            })
+            .expect("send");
+
+        renderer.poll_mermaid_results(&ctx);
+
+        // SVG should be cached (always cached regardless of staleness)
+        assert!(renderer.mermaid_svg_cache.borrow_mut().get(&svg_key).is_some());
+
+        // Texture should NOT be uploaded (stale result)
+        assert!(renderer.mermaid_textures.borrow_mut().get(&texture_key_old).is_none());
+
+        // Pending should be cleared
+        assert!(!renderer.mermaid_pending.borrow().contains(&texture_key_old));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_stale_result_caches_svg() {
+        let (result_tx, result_rx) = bounded(10);
+        let renderer = test_renderer_with_channels(None, result_rx);
+        let ctx = egui::Context::default();
+
+        let svg_key: u64 = 200;
+        let texture_key = MermaidRenderer::texture_key(svg_key, 320, 100, [0, 0, 0, 255]);
+
+        // Wanted bucket differs from result
+        renderer
+            .mermaid_wanted_bucket
+            .borrow_mut()
+            .insert(svg_key, 512);
+
+        renderer
+            .mermaid_pending
+            .borrow_mut()
+            .insert(texture_key.clone());
+
+        result_tx
+            .send(MermaidResult {
+                svg_key,
+                texture_key: texture_key.clone(),
+                svg: Some("<svg>stale-but-cached</svg>".to_string()),
+                rgba: None,
+                size: None,
+                error: None,
+            })
+            .expect("send");
+
+        renderer.poll_mermaid_results(&ctx);
+
+        // SVG cached even for stale result
+        let cached_svg = renderer.mermaid_svg_cache.borrow_mut().get(&svg_key);
+        assert_eq!(cached_svg, Some("<svg>stale-but-cached</svg>".to_string()));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_stale_result_caches_error() {
+        let (result_tx, result_rx) = bounded(10);
+        let renderer = test_renderer_with_channels(None, result_rx);
+        let ctx = egui::Context::default();
+
+        let svg_key: u64 = 300;
+        let texture_key = MermaidRenderer::texture_key(svg_key, 320, 100, [0, 0, 0, 255]);
+
+        // Wanted bucket differs
+        renderer
+            .mermaid_wanted_bucket
+            .borrow_mut()
+            .insert(svg_key, 640);
+
+        renderer
+            .mermaid_pending
+            .borrow_mut()
+            .insert(texture_key.clone());
+
+        // Send a result with error but no SVG (QuickJS failure)
+        result_tx
+            .send(MermaidResult {
+                svg_key,
+                texture_key: texture_key.clone(),
+                svg: None,
+                rgba: None,
+                size: None,
+                error: Some("QuickJS crashed".to_string()),
+            })
+            .expect("send");
+
+        renderer.poll_mermaid_results(&ctx);
+
+        // Error should be cached even for stale result (prevents infinite re-render)
+        assert!(renderer.mermaid_errors.borrow_mut().get(&svg_key).is_some());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_first_render_no_debounce_delay() {
+        let (job_tx, job_rx) = bounded(4);
+        let (_result_tx, result_rx) = bounded(4);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+
+        let theme = MermaidTheme::Default;
+        let code = "graph TD; First-->Render;";
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(400.0, 300.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+
+        // Job should be enqueued immediately (no debounce on first render)
+        assert_eq!(job_rx.len(), 1);
+
+        // Debounce entry should exist after successful enqueue
+        let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
+        assert!(renderer.mermaid_width_debounce.borrow().contains_key(&svg_key));
+
+        drop(job_rx);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_first_render_queue_full_no_debounce_entry() {
+        let (job_tx, job_rx) = bounded(1);
+        let (_result_tx, result_rx) = bounded(1);
+        let renderer = test_renderer_with_channels(Some(job_tx.clone()), result_rx);
+
+        let theme = MermaidTheme::Default;
+
+        // Fill the queue first
+        let filler = MermaidRequest {
+            svg_key: 1,
+            texture_key: "filler".to_string(),
+            code: Some("graph TD; Fill-->Queue;".to_string()),
+            svg: None,
+            width_bucket: 32,
+            scale_bucket: MermaidRenderer::scale_bucket(1.0),
+            viewport_width: 120,
+            viewport_height: 120,
+            bg: theme.bg_fill(),
+            theme,
+        };
+        job_tx.send(filler).expect("fill queue");
+
+        let code = "graph TD; New-->Diagram;";
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(400.0, 300.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+
+        // No debounce entry should be created on QueueFull
+        let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
+        assert!(!renderer.mermaid_width_debounce.borrow().contains_key(&svg_key));
+
+        drop(job_rx);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_debounce_suppresses_enqueue_during_resize() {
+        let (job_tx, job_rx) = bounded(16);
+        let (_result_tx, result_rx) = bounded(16);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+
+        let theme = MermaidTheme::Default;
+        let code = "graph TD; A-->B;";
+        let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
+
+        // First render at width 400 — should enqueue immediately
+        let ctx = egui::Context::default();
+        let input = test_raw_input(400.0, 300.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+        assert_eq!(job_rx.len(), 1);
+
+        // Simulate width change to 600 (different bucket) within debounce window
+        let input2 = test_raw_input(600.0, 300.0);
+        let _ = ctx.run(input2, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+
+        // Should NOT have enqueued a second job (debounce active)
+        assert_eq!(job_rx.len(), 1);
+
+        // Debounce entry should still point to the first enqueued width.
+        // The second render at 600px was suppressed by debounce.
+        let debounce = renderer.mermaid_width_debounce.borrow();
+        let entry = debounce.get(&svg_key).expect("debounce entry should exist");
+        // last_seen_bucket should have moved to the new width
+        assert_ne!(entry.last_seen_bucket, entry.last_enqueued_bucket);
+
+        drop(job_rx);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_debounce_fires_after_cooldown() {
+        let (job_tx, job_rx) = bounded(16);
+        let (_result_tx, result_rx) = bounded(16);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+
+        let theme = MermaidTheme::Default;
+        let code = "graph TD; C-->D;";
+        let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
+
+        // First render at width 400
+        let ctx = egui::Context::default();
+        let input = test_raw_input(400.0, 300.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+        assert_eq!(job_rx.len(), 1);
+
+        // Simulate width change to 600 — triggers debounce
+        let input2 = test_raw_input(600.0, 300.0);
+        let _ = ctx.run(input2, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+        assert_eq!(job_rx.len(), 1); // Still just 1 (debounced)
+
+        // Force the debounce timer to appear expired by backdating bucket_changed_at
+        {
+            let mut debounce = renderer.mermaid_width_debounce.borrow_mut();
+            let entry = debounce.get_mut(&svg_key).unwrap();
+            entry.bucket_changed_at =
+                Some(Instant::now() - std::time::Duration::from_millis(MERMAID_RESIZE_DEBOUNCE_MS + 50));
+        }
+
+        // Re-render at width 600 — debounce should have expired, enqueue fires
+        let input3 = test_raw_input(600.0, 300.0);
+        let _ = ctx.run(input3, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+        assert_eq!(job_rx.len(), 2); // Now 2 — debounce expired
+
+        drop(job_rx);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_debounce_resets_on_continued_resize() {
+        let (job_tx, job_rx) = bounded(16);
+        let (_result_tx, result_rx) = bounded(16);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+
+        let theme = MermaidTheme::Default;
+        let code = "graph TD; E-->F;";
+        let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
+
+        // First render at width 400
+        let ctx = egui::Context::default();
+        let input = test_raw_input(400.0, 300.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+        assert_eq!(job_rx.len(), 1);
+
+        // Width change A→B
+        let input2 = test_raw_input(500.0, 300.0);
+        let _ = ctx.run(input2, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+        let changed_at_b = renderer
+            .mermaid_width_debounce
+            .borrow()
+            .get(&svg_key)
+            .unwrap()
+            .bucket_changed_at
+            .unwrap();
+
+        // Width change B→C — timer should reset
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let input3 = test_raw_input(700.0, 300.0);
+        let _ = ctx.run(input3, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+        let changed_at_c = renderer
+            .mermaid_width_debounce
+            .borrow()
+            .get(&svg_key)
+            .unwrap()
+            .bucket_changed_at
+            .unwrap();
+
+        // Timer was reset on B→C transition
+        assert!(changed_at_c > changed_at_b);
+
+        // Still only 1 job enqueued (all debounced)
+        assert_eq!(job_rx.len(), 1);
+
+        drop(job_rx);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_debounce_trailing_edge_timer_reset() {
+        let (job_tx, job_rx) = bounded(16);
+        let (_result_tx, result_rx) = bounded(16);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+
+        let theme = MermaidTheme::Default;
+        let code = "graph TD; G-->H;";
+        let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
+
+        // First render at width 400
+        let ctx = egui::Context::default();
+        let input = test_raw_input(400.0, 300.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+
+        // Width change to 500
+        let input2 = test_raw_input(500.0, 300.0);
+        let _ = ctx.run(input2, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+
+        // Backdate timer so it's almost expired but not quite
+        {
+            let mut debounce = renderer.mermaid_width_debounce.borrow_mut();
+            let entry = debounce.get_mut(&svg_key).unwrap();
+            entry.bucket_changed_at =
+                Some(Instant::now() - std::time::Duration::from_millis(MERMAID_RESIZE_DEBOUNCE_MS - 20));
+        }
+
+        // Width change to 600 — should reset the timer (trailing edge)
+        let input3 = test_raw_input(600.0, 300.0);
+        let _ = ctx.run(input3, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+
+        // Timer should have been freshly reset (close to now)
+        let changed_at = renderer
+            .mermaid_width_debounce
+            .borrow()
+            .get(&svg_key)
+            .unwrap()
+            .bucket_changed_at
+            .unwrap();
+        assert!(changed_at.elapsed().as_millis() < 50);
+
+        // Still only 1 enqueue (original)
+        assert_eq!(job_rx.len(), 1);
+
+        drop(job_rx);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_theme_change_clears_debounce_state() {
+        let (_result_tx, result_rx) = bounded(1);
+        let renderer = test_renderer_with_channels(None, result_rx);
+
+        // Populate debounce maps
+        renderer.mermaid_width_debounce.borrow_mut().insert(
+            1,
+            WidthDebounce {
+                last_enqueued_bucket: 320,
+                last_seen_bucket: 320,
+                bucket_changed_at: None,
+            },
+        );
+        renderer
+            .mermaid_latest_texture
+            .borrow_mut()
+            .insert(1, "some_key".to_string());
+        renderer.mermaid_wanted_bucket.borrow_mut().insert(1, 320);
+
+        assert_eq!(renderer.mermaid_width_debounce.borrow().len(), 1);
+        assert_eq!(renderer.mermaid_latest_texture.borrow().len(), 1);
+        assert_eq!(renderer.mermaid_wanted_bucket.borrow().len(), 1);
+
+        renderer.clear_mermaid_cache();
+
+        assert_eq!(renderer.mermaid_width_debounce.borrow().len(), 0);
+        assert_eq!(renderer.mermaid_latest_texture.borrow().len(), 0);
+        assert_eq!(renderer.mermaid_wanted_bucket.borrow().len(), 0);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_release_gpu_textures_clears_debounce_state() {
+        let (_result_tx, result_rx) = bounded(1);
+        let renderer = test_renderer_with_channels(None, result_rx);
+
+        // Populate debounce maps
+        renderer.mermaid_width_debounce.borrow_mut().insert(
+            2,
+            WidthDebounce {
+                last_enqueued_bucket: 256,
+                last_seen_bucket: 512,
+                bucket_changed_at: Some(Instant::now()),
+            },
+        );
+        renderer
+            .mermaid_latest_texture
+            .borrow_mut()
+            .insert(2, "tex_key".to_string());
+        renderer.mermaid_wanted_bucket.borrow_mut().insert(2, 512);
+
+        renderer.release_gpu_textures();
+
+        assert_eq!(renderer.mermaid_width_debounce.borrow().len(), 0);
+        assert_eq!(renderer.mermaid_latest_texture.borrow().len(), 0);
+        assert_eq!(renderer.mermaid_wanted_bucket.borrow().len(), 0);
     }
 }
