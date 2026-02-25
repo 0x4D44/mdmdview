@@ -135,10 +135,6 @@ fn parse_hex_color32(value: &str) -> Option<egui::Color32> {
     Some(egui::Color32::from_rgb(r, g, b))
 }
 
-fn screenshot_background_color() -> egui::Color32 {
-    egui::Color32::from_rgb(255, 248, 219)
-}
-
 fn parse_value<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, String> {
     value
         .parse::<T>()
@@ -314,17 +310,10 @@ fn main() -> Result<(), eframe::Error> {
         native_options,
         Box::new(move |cc| {
             if let Some(theme) = resolved_theme {
-                let mut visuals = match theme {
+                let visuals = match theme {
                     ThemeChoice::Light => egui::Visuals::light(),
                     ThemeChoice::Dark => egui::Visuals::dark(),
                 };
-                if screenshot_enabled {
-                    let bg = screenshot_background_color();
-                    visuals.panel_fill = bg;
-                    visuals.window_fill = bg;
-                    visuals.extreme_bg_color = bg;
-                    visuals.faint_bg_color = bg;
-                }
                 cc.egui_ctx.set_visuals(visuals);
             }
 
@@ -794,12 +783,6 @@ mod tests {
         assert!(parse_value::<u64>("--timeout", "-1").is_err());
         assert_eq!(parse_value::<f32>("--zoom", "1.5").expect("f32"), 1.5);
         assert!(parse_value::<f32>("--zoom", "abc").is_err());
-    }
-
-    #[test]
-    fn test_screenshot_background_color() {
-        let color = screenshot_background_color();
-        assert_eq!(color, egui::Color32::from_rgb(255, 248, 219));
     }
 
     #[test]

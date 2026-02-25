@@ -1,5 +1,6 @@
 #[cfg(any(test, feature = "mermaid-quickjs"))]
 use crate::lru_cache::{hash_str, LruCache};
+use crate::window_state::MermaidTheme;
 use crate::ThemeColors;
 #[cfg(feature = "mermaid-quickjs")]
 use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
@@ -375,6 +376,12 @@ impl SvgCache {
         self.order.push_back(*key);
     }
 
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.current_bytes = 0;
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.entries.len()
@@ -494,7 +501,8 @@ struct MermaidRequest {
     scale_bucket: u32,
     viewport_width: u32,
     viewport_height: u32,
-    bg: Option<[u8; 4]>,
+    bg: [u8; 4],
+    theme: MermaidTheme,
 }
 
 #[cfg(feature = "mermaid-quickjs")]
@@ -514,30 +522,6 @@ enum MermaidEnqueueError {
     Disconnected,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MermaidRenderPreference {
-    Embedded,
-    Off,
-}
-
-#[cfg(feature = "mermaid-quickjs")]
-struct MermaidThemeValues {
-    theme_name: String,
-    main_bkg: String,
-    primary: String,
-    primary_border: String,
-    primary_text: String,
-    secondary: String,
-    tertiary: String,
-    line: String,
-    text: String,
-    cluster_bkg: String,
-    cluster_border: String,
-    default_link: String,
-    title: String,
-    label_bg: String,
-    edge_label_bg: String,
-}
 
 pub(crate) struct MermaidRenderer {
     #[cfg(feature = "mermaid-quickjs")]
@@ -648,27 +632,14 @@ impl MermaidRenderer {
         // mermaid_texture_errors intentionally retained
     }
 
-    fn default_mermaid_preference() -> MermaidRenderPreference {
-        #[cfg(feature = "mermaid-quickjs")]
-        {
-            MermaidRenderPreference::Embedded
-        }
-        #[cfg(not(feature = "mermaid-quickjs"))]
-        {
-            MermaidRenderPreference::Off
-        }
-    }
-
-    fn mermaid_renderer_preference() -> (MermaidRenderPreference, bool) {
-        if let Ok(raw) = std::env::var("MDMDVIEW_MERMAID_RENDERER") {
-            let normalized = raw.trim().to_ascii_lowercase();
-            return match normalized.as_str() {
-                "off" => (MermaidRenderPreference::Off, true),
-                "embedded" => (MermaidRenderPreference::Embedded, true),
-                _ => (Self::default_mermaid_preference(), false),
-            };
-        }
-        (Self::default_mermaid_preference(), false)
+    /// Clear all Mermaid caches (textures, SVGs, errors). Used when the theme changes.
+    #[cfg(feature = "mermaid-quickjs")]
+    pub(crate) fn clear_mermaid_cache(&self) {
+        self.mermaid_textures.borrow_mut().clear();
+        self.mermaid_svg_cache.borrow_mut().clear();
+        self.mermaid_errors.borrow_mut().clear();
+        self.mermaid_texture_errors.borrow_mut().clear();
+        self.mermaid_pending.borrow_mut().clear();
     }
 
     pub(crate) fn has_pending(&self) -> bool {
@@ -693,50 +664,24 @@ impl MermaidRenderer {
         code: &str,
         ui_scale: f32,
         code_font_size: f32,
+        theme: MermaidTheme,
     ) -> bool {
-        let (preference, _explicit) = Self::mermaid_renderer_preference();
-
         #[cfg(not(feature = "mermaid-quickjs"))]
         {
             let _ = code;
             let _ = ui_scale;
-        }
-
-        if preference == MermaidRenderPreference::Off {
+            let _ = theme;
             egui::Frame::none()
                 .fill(ThemeColors::current(ui.visuals().dark_mode).box_bg)
-                .stroke(Stroke::new(1.0, ThemeColors::current(ui.visuals().dark_mode).box_border))
+                .stroke(Stroke::new(
+                    1.0,
+                    ThemeColors::current(ui.visuals().dark_mode).box_border,
+                ))
                 .inner_margin(8.0)
                 .show(ui, |ui| {
                     ui.label(
                         RichText::new(
-                            "Mermaid rendering is disabled. Set MDMDVIEW_MERMAID_RENDERER=embedded to enable.",
-                        )
-                        .color(ThemeColors::current(ui.visuals().dark_mode).box_title)
-                        .family(egui::FontFamily::Monospace)
-                        .size(code_font_size),
-                    );
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(code)
-                            .family(egui::FontFamily::Monospace)
-                            .size(code_font_size)
-                            .color(ThemeColors::current(ui.visuals().dark_mode).box_body),
-                    );
-                });
-            return true;
-        }
-
-        #[cfg(not(feature = "mermaid-quickjs"))]
-        if _explicit && preference == MermaidRenderPreference::Embedded {
-            egui::Frame::none()
-                .fill(ThemeColors::current(ui.visuals().dark_mode).box_bg)
-                .stroke(Stroke::new(1.0, ThemeColors::current(ui.visuals().dark_mode).box_border))
-                .inner_margin(8.0)
-                .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(
-                            "Mermaid rendering via embedded JS is unavailable (feature not enabled).",
+                            "Mermaid rendering requires the mermaid-embedded feature. Build with default features to enable.",
                         )
                         .color(ThemeColors::current(ui.visuals().dark_mode).box_title)
                         .family(egui::FontFamily::Monospace)
@@ -782,7 +727,7 @@ impl MermaidRenderer {
                     });
                 return true;
             }
-            let svg_key = hash_str(code);
+            let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
             let mut available_width = ui.available_width();
             if available_width <= Self::MERMAID_WIDTH_BUCKET_STEP as f32 {
                 let fallback = ui.ctx().available_rect().width();
@@ -804,7 +749,7 @@ impl MermaidRenderer {
                     viewport_height = viewport_height.min(700);
                 }
             }
-            let bg = Self::mermaid_bg_fill();
+            let bg = theme.bg_fill();
             let texture_key = Self::texture_key(svg_key, width_bucket, scale_bucket, bg);
 
             if self.poll_mermaid_results(ui.ctx()) {
@@ -879,6 +824,7 @@ impl MermaidRenderer {
                     viewport_width,
                     viewport_height,
                     bg,
+                    theme,
                 };
                 match self.enqueue_mermaid_job(request) {
                     Ok(()) => {
@@ -1002,20 +948,13 @@ impl MermaidRenderer {
     }
 
     #[cfg(any(test, feature = "mermaid-quickjs"))]
-    fn mermaid_bg_key(bg: Option<[u8; 4]>) -> String {
-        match bg {
-            Some([r, g, b, a]) => format!("{:02x}{:02x}{:02x}{:02x}", r, g, b, a),
-            None => "none".to_string(),
-        }
+    fn mermaid_bg_key(bg: [u8; 4]) -> String {
+        let [r, g, b, a] = bg;
+        format!("{:02x}{:02x}{:02x}{:02x}", r, g, b, a)
     }
 
     #[cfg(any(test, feature = "mermaid-quickjs"))]
-    fn texture_key(
-        svg_key: u64,
-        width_bucket: u32,
-        scale_bucket: u32,
-        bg: Option<[u8; 4]>,
-    ) -> String {
+    fn texture_key(svg_key: u64, width_bucket: u32, scale_bucket: u32, bg: [u8; 4]) -> String {
         let bg_key = Self::mermaid_bg_key(bg);
         format!(
             "mermaid:{:016x}:w{}:s{}:bg{}",
@@ -1180,34 +1119,6 @@ impl MermaidRenderer {
             .insert(key.to_string(), MermaidTextureEntry { texture, size });
     }
 
-    #[cfg(feature = "mermaid-quickjs")]
-    fn mermaid_theme_values() -> MermaidThemeValues {
-        let main_bkg = "#FFF8DB";
-        let line = "#6B7A90";
-        let text = "#1C2430";
-
-        let theme_name =
-            std::env::var("MDMDVIEW_MERMAID_THEME").unwrap_or_else(|_| "base".to_string());
-
-        MermaidThemeValues {
-            theme_name,
-            main_bkg: main_bkg.to_string(),
-            primary: "#D7EEFF".to_string(),
-            primary_border: "#9BB2C8".to_string(),
-            primary_text: text.to_string(),
-            secondary: "#DFF5E1".to_string(),
-            tertiary: "#E9E2FF".to_string(),
-            line: line.to_string(),
-            text: text.to_string(),
-            cluster_bkg: "#FFF1C1".to_string(),
-            cluster_border: "#E5C07B".to_string(),
-            default_link: line.to_string(),
-            title: text.to_string(),
-            label_bg: main_bkg.to_string(),
-            edge_label_bg: main_bkg.to_string(),
-        }
-    }
-
     #[cfg(any(test, feature = "mermaid-quickjs"))]
     fn should_allow_html_labels(_code: &str) -> bool {
         // Always return false because usvg cannot render foreignObject elements.
@@ -1217,29 +1128,17 @@ impl MermaidRenderer {
         false
     }
 
-    #[cfg(any(test, feature = "mermaid-quickjs"))]
-    fn mermaid_security_level() -> String {
-        if let Ok(raw) = std::env::var("MDMDVIEW_MERMAID_SECURITY") {
-            let normalized = raw.trim().to_ascii_lowercase();
-            if normalized == "loose" {
-                return "loose".to_string();
-            }
-        }
-        "strict".to_string()
-    }
-
     #[cfg(feature = "mermaid-quickjs")]
-    fn mermaid_site_config_json(svg_key: u64, allow_html_labels: bool) -> String {
-        let theme = Self::mermaid_theme_values();
-        let security = Self::mermaid_security_level();
+    fn mermaid_site_config_json(
+        svg_key: u64,
+        allow_html_labels: bool,
+        theme: MermaidTheme,
+    ) -> String {
         let seed = format!("m{:016x}", svg_key);
         let mut entries = Vec::new();
 
         entries.push("\"startOnLoad\":false".to_string());
-        entries.push(format!(
-            "\"securityLevel\":\"{}\"",
-            Self::json_escape(&security)
-        ));
+        entries.push("\"securityLevel\":\"strict\"".to_string());
         entries.push("\"deterministicIds\":true".to_string());
         entries.push(format!(
             "\"deterministicIDSeed\":\"{}\"",
@@ -1249,50 +1148,14 @@ impl MermaidRenderer {
         if allow_html_labels {
             entries.push("\"__mdmdviewAllowHtmlLabels\":true".to_string());
         }
-        if security == "strict" && !allow_html_labels {
+        if !allow_html_labels {
             entries.push("\"htmlLabels\":false".to_string());
             entries.push("\"flowchart\":{\"htmlLabels\":false}".to_string());
         }
         entries.push(format!(
             "\"theme\":\"{}\"",
-            Self::json_escape(&theme.theme_name)
+            Self::json_escape(theme.theme_name())
         ));
-
-        let theme_vars = format!(
-            concat!(
-                "\"background\":\"{}\",",
-                "\"mainBkg\":\"{}\",",
-                "\"textColor\":\"{}\",",
-                "\"titleColor\":\"{}\",",
-                "\"primaryColor\":\"{}\",",
-                "\"primaryBorderColor\":\"{}\",",
-                "\"primaryTextColor\":\"{}\",",
-                "\"secondaryColor\":\"{}\",",
-                "\"tertiaryColor\":\"{}\",",
-                "\"lineColor\":\"{}\",",
-                "\"defaultLinkColor\":\"{}\",",
-                "\"clusterBkg\":\"{}\",",
-                "\"clusterBorder\":\"{}\",",
-                "\"labelBackground\":\"{}\",",
-                "\"edgeLabelBackground\":\"{}\""
-            ),
-            Self::json_escape(&theme.main_bkg),
-            Self::json_escape(&theme.main_bkg),
-            Self::json_escape(&theme.text),
-            Self::json_escape(&theme.title),
-            Self::json_escape(&theme.primary),
-            Self::json_escape(&theme.primary_border),
-            Self::json_escape(&theme.primary_text),
-            Self::json_escape(&theme.secondary),
-            Self::json_escape(&theme.tertiary),
-            Self::json_escape(&theme.line),
-            Self::json_escape(&theme.default_link),
-            Self::json_escape(&theme.cluster_bkg),
-            Self::json_escape(&theme.cluster_border),
-            Self::json_escape(&theme.label_bg),
-            Self::json_escape(&theme.edge_label_bg)
-        );
-        entries.push(format!("\"themeVariables\":{{{}}}", theme_vars));
 
         format!("{{{}}}", entries.join(","))
     }
@@ -1313,23 +1176,7 @@ impl MermaidRenderer {
         out
     }
 
-    #[cfg(any(test, feature = "mermaid-quickjs"))]
-    fn mermaid_bg_fill() -> Option<[u8; 4]> {
-        if let Ok(hex) = std::env::var("MDMDVIEW_MERMAID_BG_COLOR") {
-            if let Some(rgba) = Self::parse_hex_color(&hex) {
-                return Some(rgba);
-            }
-        }
-        let mode = std::env::var("MDMDVIEW_MERMAID_BG").unwrap_or_else(|_| "theme".to_string());
-        match mode.as_str() {
-            "transparent" => None,
-            "dark" => Some([20, 20, 20, 255]),
-            "light" => Some([255, 255, 255, 255]),
-            _ => Some([255, 248, 219, 255]),
-        }
-    }
-
-    #[cfg(any(test, feature = "mermaid-quickjs"))]
+    #[cfg(test)]
     fn parse_hex_color(s: &str) -> Option<[u8; 4]> {
         let t = s.trim();
         let hex = t.strip_prefix('#').unwrap_or(t);
@@ -1787,6 +1634,7 @@ impl MermaidWorker {
         code: &str,
         viewport_width: u32,
         viewport_height: u32,
+        theme: MermaidTheme,
     ) -> Result<String, String> {
         use rquickjs::{promise::MaybePromise, Function};
         let timeout_ms = MermaidRenderer::mermaid_timeout_ms();
@@ -1798,7 +1646,8 @@ impl MermaidWorker {
                 .map_err(|err| MermaidWorker::format_js_error(&ctx, err))?;
             let id = format!("m{:016x}", key);
             let allow_html_labels = MermaidRenderer::should_allow_html_labels(code);
-            let site_config = MermaidRenderer::mermaid_site_config_json(key, allow_html_labels);
+            let site_config =
+                MermaidRenderer::mermaid_site_config_json(key, allow_html_labels, theme);
             let maybe: MaybePromise = call_mermaid_render(
                 &func,
                 (
@@ -2523,12 +2372,15 @@ impl MermaidWorker {
             viewport_width,
             viewport_height,
             bg,
+            theme,
         } = job;
         let code_ref = code.as_deref();
         let svg_result = match svg {
             Some(svg) => Ok(svg),
             None => match code_ref {
-                Some(code) => self.render_svg(svg_key, code, viewport_width, viewport_height),
+                Some(code) => {
+                    self.render_svg(svg_key, code, viewport_width, viewport_height, theme)
+                }
                 None => Err("Mermaid render request missing code".to_string()),
             },
         };
@@ -2539,8 +2391,9 @@ impl MermaidWorker {
                 if let Some(updated) = Self::flatten_svg_switches(&svg) {
                     svg = updated;
                 }
-                let theme = MermaidRenderer::mermaid_theme_values();
-                if let Some(updated) = Self::fix_journey_section_text(&svg, &theme.text) {
+                if let Some(updated) =
+                    Self::fix_journey_section_text(&svg, theme.journey_text_fill())
+                {
                     svg = updated;
                 }
                 if let Some(updated) = Self::fix_state_end_circles(&svg) {
@@ -2616,7 +2469,7 @@ impl MermaidWorker {
         svg: &str,
         width_bucket: u32,
         scale_bucket: u32,
-        bg: Option<[u8; 4]>,
+        bg: [u8; 4],
     ) -> Result<(Vec<u8>, u32, u32), String> {
         let opt = usvg::Options {
             resources_dir: None,
@@ -2709,7 +2562,8 @@ impl MermaidWorker {
 
         let mut pixmap = pixmap_new_for_test(target_w, target_h)
             .ok_or_else(|| "Pixmap alloc failed".to_string())?;
-        if let Some([r, g, b, a]) = bg {
+        {
+            let [r, g, b, a] = bg;
             let color = tiny_skia::Color::from_rgba8(r, g, b, a);
             pixmap.fill(color);
         }
@@ -5859,8 +5713,8 @@ mod tests {
         let width_bucket = 320;
         let scale_a = MermaidRenderer::scale_bucket(1.0);
         let scale_b = MermaidRenderer::scale_bucket(1.2);
-        let bg_a = Some([255, 0, 0, 255]);
-        let bg_b = Some([0, 0, 0, 255]);
+        let bg_a = [255, 0, 0, 255];
+        let bg_b = [0, 0, 0, 255];
 
         let key_a = MermaidRenderer::texture_key(svg_key, width_bucket, scale_a, bg_a);
         let key_b = MermaidRenderer::texture_key(svg_key, width_bucket, scale_b, bg_a);
@@ -5893,55 +5747,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mermaid_renderer_preference_env() {
-        let _lock = env_lock();
-        std::env::remove_var("MDMDVIEW_MERMAID_RENDERER");
-        let (default_pref, explicit) = MermaidRenderer::mermaid_renderer_preference();
-        assert!(!explicit);
-        #[cfg(feature = "mermaid-quickjs")]
-        assert_eq!(default_pref, MermaidRenderPreference::Embedded);
-        #[cfg(not(feature = "mermaid-quickjs"))]
-        assert_eq!(default_pref, MermaidRenderPreference::Off);
-
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "embedded");
-            let (pref, explicit) = MermaidRenderer::mermaid_renderer_preference();
-            assert!(explicit);
-            assert_eq!(pref, MermaidRenderPreference::Embedded);
-        }
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "off");
-            let (pref, explicit) = MermaidRenderer::mermaid_renderer_preference();
-            assert!(explicit);
-            assert_eq!(pref, MermaidRenderPreference::Off);
-        }
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "bogus");
-            let (pref, explicit) = MermaidRenderer::mermaid_renderer_preference();
-            assert!(!explicit);
-            #[cfg(feature = "mermaid-quickjs")]
-            assert_eq!(pref, MermaidRenderPreference::Embedded);
-            #[cfg(not(feature = "mermaid-quickjs"))]
-            assert_eq!(pref, MermaidRenderPreference::Off);
-        }
-    }
-
-    #[test]
-    fn test_mermaid_security_level_default_and_env() {
-        let _lock = env_lock();
-        std::env::remove_var("MDMDVIEW_MERMAID_SECURITY");
-        assert_eq!(MermaidRenderer::mermaid_security_level(), "strict");
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_SECURITY", "loose");
-            assert_eq!(MermaidRenderer::mermaid_security_level(), "loose");
-        }
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_SECURITY", "strict");
-            assert_eq!(MermaidRenderer::mermaid_security_level(), "strict");
-        }
-    }
-
-    #[test]
     fn test_should_allow_html_labels_always_false_for_usvg() {
         // HTML labels are disabled because usvg cannot render foreignObject.
         // All inputs should return false to force SVG text elements.
@@ -5963,30 +5768,40 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_mermaid_site_config_json_includes_security_flags() {
-        let _lock = env_lock();
-        {
-            std::env::remove_var("MDMDVIEW_MERMAID_SECURITY");
-            let json = MermaidRenderer::mermaid_site_config_json(1, false);
-            assert!(json.contains("\"securityLevel\":\"strict\""));
-            assert!(json.contains("\"htmlLabels\":false"));
-            assert!(json.contains("\"flowchart\":{\"htmlLabels\":false}"));
-        }
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_SECURITY", "loose");
-            let json = MermaidRenderer::mermaid_site_config_json(2, false);
-            assert!(json.contains("\"securityLevel\":\"loose\""));
-            assert!(!json.contains("\"flowchart\":{\"htmlLabels\":false}"));
-        }
+        let json = MermaidRenderer::mermaid_site_config_json(1, false, MermaidTheme::Default);
+        assert!(json.contains("\"securityLevel\":\"strict\""));
+        assert!(json.contains("\"htmlLabels\":false"));
+        assert!(json.contains("\"flowchart\":{\"htmlLabels\":false}"));
+        assert!(json.contains("\"theme\":\"default\""));
+        assert!(!json.contains("themeVariables"));
     }
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_mermaid_site_config_json_allows_safe_html_labels() {
-        let _lock = env_lock();
-        std::env::remove_var("MDMDVIEW_MERMAID_SECURITY");
-        let json = MermaidRenderer::mermaid_site_config_json(4, true);
+        let json = MermaidRenderer::mermaid_site_config_json(4, true, MermaidTheme::Default);
         assert!(json.contains("\"__mdmdviewAllowHtmlLabels\":true"));
         assert!(!json.contains("\"htmlLabels\":false"));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_site_config_json_per_theme() {
+        for (theme, name) in [
+            (MermaidTheme::Dark, "dark"),
+            (MermaidTheme::Default, "default"),
+            (MermaidTheme::Forest, "forest"),
+            (MermaidTheme::Neutral, "neutral"),
+        ] {
+            let json = MermaidRenderer::mermaid_site_config_json(1, false, theme);
+            assert!(
+                json.contains(&format!("\"theme\":\"{}\"", name)),
+                "expected theme '{}' in json: {}",
+                name,
+                json
+            );
+            assert!(!json.contains("themeVariables"), "themeVariables should be absent");
+        }
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -6032,19 +5847,19 @@ mod tests {
         let viewport_height = 900;
 
         let flow_svg = worker
-            .render_svg(hash_str(flow), flow, viewport_width, viewport_height)
+            .render_svg(hash_str(flow), flow, viewport_width, viewport_height, MermaidTheme::Default)
             .expect("flowchart render");
         let seq_svg = worker
-            .render_svg(hash_str(seq), seq, viewport_width, viewport_height)
+            .render_svg(hash_str(seq), seq, viewport_width, viewport_height, MermaidTheme::Default)
             .expect("sequence render");
         let class_svg = worker
-            .render_svg(hash_str(class), class, viewport_width, viewport_height)
+            .render_svg(hash_str(class), class, viewport_width, viewport_height, MermaidTheme::Default)
             .expect("class render");
         let er_svg = worker
-            .render_svg(hash_str(er), er, viewport_width, viewport_height)
+            .render_svg(hash_str(er), er, viewport_width, viewport_height, MermaidTheme::Default)
             .expect("er render");
         let gantt_svg = worker
-            .render_svg(hash_str(gantt), gantt, viewport_width, viewport_height)
+            .render_svg(hash_str(gantt), gantt, viewport_width, viewport_height, MermaidTheme::Default)
             .expect("gantt render");
 
         assert!(flow_svg.contains("<svg"));
@@ -6056,7 +5871,7 @@ mod tests {
         let width_bucket = MermaidRenderer::width_bucket(600.0);
         let scale_bucket = MermaidRenderer::scale_bucket(1.0);
         let (rgba, w, h) = worker
-            .rasterize_svg(&flow_svg, width_bucket, scale_bucket, None)
+            .rasterize_svg(&flow_svg, width_bucket, scale_bucket, MermaidTheme::Default.bg_fill())
             .expect("rasterize svg");
         assert!(!rgba.is_empty());
         assert_eq!(rgba.len(), (w as usize) * (h as usize) * 4);
@@ -6078,7 +5893,7 @@ mod tests {
         let viewport_height = 900;
 
         let svg = worker
-            .render_svg(hash_str(diagram), diagram, viewport_width, viewport_height)
+            .render_svg(hash_str(diagram), diagram, viewport_width, viewport_height, MermaidTheme::Default)
             .expect("diagram with html tags render");
 
         assert!(svg.contains("<svg"));
@@ -6109,7 +5924,7 @@ mod tests {
         let viewport_height = 900;
 
         let svg = worker
-            .render_svg(hash_str(diagram), diagram, viewport_width, viewport_height)
+            .render_svg(hash_str(diagram), diagram, viewport_width, viewport_height, MermaidTheme::Default)
             .expect("subgraph diagram render");
 
         assert!(svg.contains("<svg"));
@@ -6133,7 +5948,7 @@ mod tests {
         let viewport_height = 900;
 
         let svg = worker
-            .render_svg(hash_str(diagram), diagram, viewport_width, viewport_height)
+            .render_svg(hash_str(diagram), diagram, viewport_width, viewport_height, MermaidTheme::Default)
             .expect("ampersand in labels render");
 
         assert!(svg.contains("<svg"));
@@ -6257,7 +6072,8 @@ mod tests {
             scale_bucket: MermaidRenderer::scale_bucket(1.0),
             viewport_width: 100,
             viewport_height: 100,
-            bg: None,
+            bg: MermaidTheme::Default.bg_fill(),
+            theme: MermaidTheme::Default,
         };
 
         let result = worker.process_job(job);
@@ -6272,7 +6088,7 @@ mod tests {
         let worker = test_worker();
 
         let err = worker
-            .rasterize_svg("not svg", 100, MermaidRenderer::scale_bucket(1.0), None)
+            .rasterize_svg("not svg", 100, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
             .unwrap_err();
         assert!(!err.is_empty());
     }
@@ -6283,7 +6099,7 @@ mod tests {
         let worker = test_worker();
         let svg = r#"<svg width="100" height="100" viewBox="0 0 0 0" xmlns="http://www.w3.org/2000/svg"></svg>"#;
         let (data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
+            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
             .expect("rasterize svg");
         assert_eq!(data.len(), (w as usize) * (h as usize) * 4);
     }
@@ -6294,7 +6110,7 @@ mod tests {
         let worker = test_worker();
         let svg = r#"<svg width="10" height="10" viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><rect width="1000" height="1000" fill="red"/></svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
+            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
             .expect("rasterize svg");
         assert_eq!((w, h), (10, 10));
     }
@@ -6305,7 +6121,7 @@ mod tests {
         let worker = test_worker();
         let svg = r#"<svg width="100" height="50" xmlns="http://www.w3.org/2000/svg"><rect x="-60" y="0" width="200" height="50" fill="red"/></svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
+            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
             .expect("rasterize svg");
         assert!(w > 100);
         assert!(h >= 50);
@@ -6317,7 +6133,7 @@ mod tests {
         let worker = test_worker();
         let svg = r#"<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="0" width="100" height="200" fill="red"/></svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
+            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
             .expect("rasterize svg");
         assert!(w >= 108);
         assert!(h >= 200);
@@ -6329,7 +6145,7 @@ mod tests {
         let worker = test_worker();
         let svg = r#"<svg width="4100" height="10" xmlns="http://www.w3.org/2000/svg"><rect width="4100" height="10" fill="red"/></svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
+            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
             .expect("rasterize svg");
         assert!(w <= MermaidRenderer::MERMAID_MAX_RENDER_SIDE);
         assert!(h > 0);
@@ -6341,7 +6157,7 @@ mod tests {
         let worker = test_worker();
         let svg = r#"<svg width="10" height="10000" xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10000" fill="red"/></svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
+            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
             .expect("rasterize svg");
         assert!(w > 0);
         assert!(h <= MermaidRenderer::MERMAID_MAX_RENDER_SIDE);
@@ -6353,7 +6169,7 @@ mod tests {
         let worker = test_worker();
         let svg = r#"<svg width="10" height="10" viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><rect width="0.1" height="0.1" fill="red"/></svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
+            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
             .expect("rasterize svg");
         assert_eq!((w, h), (10, 10));
     }
@@ -6366,7 +6182,7 @@ mod tests {
         force_raw_tree_parse_fail_for_test();
         let svg = r#"<svg width="10" height="10" viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><rect width="20" height="20" fill="red"/></svg>"#;
         let (data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
+            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
             .expect("rasterize svg");
         assert_eq!(data.len(), (w as usize) * (h as usize) * 4);
         assert!(w > 0);
@@ -6424,7 +6240,8 @@ mod tests {
             scale_bucket: MermaidRenderer::scale_bucket(1.0),
             viewport_width: 100,
             viewport_height: 100,
-            bg: None,
+            bg: MermaidTheme::Default.bg_fill(),
+            theme: MermaidTheme::Default,
         };
 
         let result = worker.process_job(job);
@@ -6442,7 +6259,7 @@ mod tests {
 <rect x="-50" y="-50" width="200" height="200" fill="red"/>
 </svg>"#;
         let (data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
+            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
             .expect("rasterize svg");
         assert_eq!((w, h), (208, 208));
         assert_eq!(data.len(), (w as usize) * (h as usize) * 4);
@@ -6457,7 +6274,7 @@ mod tests {
  <rect width="0.1" height="0.1" fill="red"/>
  </svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
+            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
             .expect("rasterize svg");
         assert_eq!((w, h), (10, 12));
     }
@@ -6471,7 +6288,7 @@ mod tests {
  <rect x="10" y="10" width="20" height="20" fill="red"/>
  </svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
+            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
             .expect("rasterize svg");
         assert_eq!((w, h), (100, 100));
     }
@@ -6485,7 +6302,7 @@ mod tests {
 <rect width="10000" height="10000" fill="blue"/>
 </svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), None)
+            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
             .expect("rasterize svg");
         assert!(w <= MermaidRenderer::MERMAID_MAX_RENDER_SIDE);
         assert!(h <= MermaidRenderer::MERMAID_MAX_RENDER_SIDE);
@@ -6497,7 +6314,7 @@ mod tests {
         let worker = test_worker();
 
         let svg = r#"<svg width="4" height="4" xmlns="http://www.w3.org/2000/svg"></svg>"#;
-        let bg = Some([10, 20, 30, 200]);
+        let bg = [10, 20, 30, 200];
         let (data, w, h) = worker
             .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), bg)
             .expect("rasterize svg");
@@ -6539,7 +6356,8 @@ mod tests {
             scale_bucket: MermaidRenderer::scale_bucket(1.0),
             viewport_width: 120,
             viewport_height: 120,
-            bg: None,
+            bg: MermaidTheme::Default.bg_fill(),
+            theme: MermaidTheme::Default,
         };
 
         let result = worker.process_job(job);
@@ -6797,8 +6615,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_hex_color_and_mermaid_bg_fill() {
-        let _lock = env_lock();
+    fn test_parse_hex_color() {
         assert_eq!(
             MermaidRenderer::parse_hex_color("#ff00ff"),
             Some([255, 0, 255, 255])
@@ -6815,21 +6632,6 @@ mod tests {
         assert!(MermaidRenderer::parse_hex_color("00GG0000").is_none());
         assert!(MermaidRenderer::parse_hex_color("0000GG00").is_none());
         assert!(MermaidRenderer::parse_hex_color("000000GG").is_none());
-
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG_COLOR", "#010203");
-            assert_eq!(MermaidRenderer::mermaid_bg_fill(), Some([1, 2, 3, 255]));
-        }
-
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG", "transparent");
-            assert_eq!(MermaidRenderer::mermaid_bg_fill(), None);
-        }
-
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG", "dark");
-            assert_eq!(MermaidRenderer::mermaid_bg_fill(), Some([20, 20, 20, 255]));
-        }
     }
 
     #[test]
@@ -6851,29 +6653,11 @@ mod tests {
     }
 
     #[test]
-    fn test_mermaid_bg_fill_invalid_color_falls_back() {
-        let _lock = env_lock();
-        let _guard_color = EnvGuard::set("MDMDVIEW_MERMAID_BG_COLOR", "bad");
-        let _guard_mode = EnvGuard::set("MDMDVIEW_MERMAID_BG", "dark");
-        assert_eq!(MermaidRenderer::mermaid_bg_fill(), Some([20, 20, 20, 255]));
-    }
-
-    #[test]
-    fn test_mermaid_bg_fill_theme_returns_default() {
-        let _lock = env_lock();
-        let _guard_mode = EnvGuard::set("MDMDVIEW_MERMAID_BG", "theme");
-        assert_eq!(
-            MermaidRenderer::mermaid_bg_fill(),
-            Some([255, 248, 219, 255])
-        );
-    }
-
-    #[test]
     fn test_mermaid_bg_key_and_scale_bucket() {
-        assert_eq!(MermaidRenderer::mermaid_bg_key(None), "none");
+        assert_eq!(MermaidRenderer::mermaid_bg_key([1, 2, 3, 4]), "01020304");
         assert_eq!(
-            MermaidRenderer::mermaid_bg_key(Some([1, 2, 3, 4])),
-            "01020304"
+            MermaidRenderer::mermaid_bg_key([255, 255, 255, 255]),
+            "ffffffff"
         );
 
         let factor = MermaidRenderer::MERMAID_SCALE_BUCKET_FACTOR;
@@ -6897,65 +6681,24 @@ mod tests {
     }
 
     #[test]
-    fn test_mermaid_bg_fill_light_mode() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG", "light");
-        assert_eq!(
-            MermaidRenderer::mermaid_bg_fill(),
-            Some([255, 255, 255, 255])
-        );
-    }
-
-    #[test]
-    fn test_mermaid_bg_fill_color_override() {
-        let _lock = env_lock();
-        std::env::remove_var("MDMDVIEW_MERMAID_BG");
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_BG_COLOR", "#11223344");
-        assert_eq!(MermaidRenderer::mermaid_bg_fill(), Some([17, 34, 51, 68]));
-    }
-
-    #[test]
-    fn test_render_block_off_and_embedded_without_feature() {
-        let _lock = env_lock();
-        std::env::remove_var("MDMDVIEW_MERMAID_RENDERER");
+    fn test_render_block_basic() {
         let renderer = MermaidRenderer::new();
         let ctx = egui::Context::default();
         let input = test_raw_input(800.0, 600.0);
 
         let mut rendered = true;
-        let _ = ctx.run(input.clone(), |ctx| {
+        let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                rendered = renderer.render_block(ui, "graph TD; A-->B;", 1.0, 14.0);
+                rendered =
+                    renderer.render_block(ui, "graph TD; A-->B;", 1.0, 14.0, MermaidTheme::Default);
             });
         });
         assert!(rendered);
-
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "off");
-        let renderer = MermaidRenderer::new();
-        let mut rendered_off = true;
-        let _ = ctx.run(input.clone(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                rendered_off = renderer.render_block(ui, "graph TD; A-->B;", 1.0, 14.0);
-            });
-        });
-        assert!(rendered_off);
-
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "embedded");
-        let renderer = MermaidRenderer::new();
-        let mut rendered_embedded = true;
-        let _ = ctx.run(input, |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| {
-                rendered_embedded = renderer.render_block(ui, "graph TD; A-->B;", 1.0, 14.0);
-            });
-        });
-        assert!(rendered_embedded);
     }
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_render_block_embedded_missing_js_fallback() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "embedded");
         let _empty = MermaidJsEmptyGuard::set(true);
         let (_tx, rx) = bounded(1);
         let renderer = test_renderer_with_channels(None, rx);
@@ -6965,7 +6708,8 @@ mod tests {
         let mut rendered = true;
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                rendered = renderer.render_block(ui, "graph TD; A-->B;", 1.0, 14.0);
+                rendered =
+                    renderer.render_block(ui, "graph TD; A-->B;", 1.0, 14.0, MermaidTheme::Default);
             });
         });
         assert!(rendered);
@@ -6974,8 +6718,6 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_render_block_width_fallback_for_small_ui() {
-        let _lock = env_lock();
-        std::env::remove_var("MDMDVIEW_MERMAID_RENDERER");
         let renderer = MermaidRenderer::new();
         let ctx = egui::Context::default();
         let input = test_raw_input(800.0, 600.0);
@@ -6987,7 +6729,9 @@ mod tests {
                     egui::vec2(20.0, 200.0),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
-                        rendered = renderer.render_block(ui, "%% comment", 1.0, 14.0);
+                        rendered = renderer.render_block(
+                            ui, "%% comment", 1.0, 14.0, MermaidTheme::Default,
+                        );
                     },
                 );
             });
@@ -6998,8 +6742,6 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_render_block_width_fallback_equal_screen() {
-        let _lock = env_lock();
-        std::env::remove_var("MDMDVIEW_MERMAID_RENDERER");
         let renderer = MermaidRenderer::new();
         let ctx = egui::Context::default();
         let input = test_raw_input(20.0, 200.0);
@@ -7011,7 +6753,9 @@ mod tests {
                     egui::vec2(20.0, 200.0),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
-                        rendered = renderer.render_block(ui, "%% comment", 1.0, 14.0);
+                        rendered = renderer.render_block(
+                            ui, "%% comment", 1.0, 14.0, MermaidTheme::Default,
+                        );
                     },
                 );
             });
@@ -7022,12 +6766,11 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_render_block_uses_cached_texture_scales() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "embedded");
         let (_result_tx, result_rx) = bounded(1);
         let renderer = test_renderer_with_channels(None, result_rx);
         let ctx = egui::Context::default();
         let input = test_raw_input(240.0, 160.0);
+        let theme = MermaidTheme::Default;
         let code = "graph TD; A-->B;";
         let mut rendered_large = false;
         let mut rendered_small = false;
@@ -7038,11 +6781,11 @@ mod tests {
                 let texture =
                     ui.ctx()
                         .load_texture("mermaid-test", image, egui::TextureOptions::default());
-                let svg_key = hash_str(code);
+                let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
                 let make_key = |ui: &egui::Ui| {
                     let width_bucket = MermaidRenderer::width_bucket(ui.available_width());
                     let scale_bucket = MermaidRenderer::scale_bucket(1.0);
-                    let bg = MermaidRenderer::mermaid_bg_fill();
+                    let bg = theme.bg_fill();
                     MermaidRenderer::texture_key(svg_key, width_bucket, scale_bucket, bg)
                 };
 
@@ -7054,7 +6797,7 @@ mod tests {
                         size: [400, 200],
                     },
                 );
-                rendered_large = renderer.render_block(ui, code, 1.0, 14.0);
+                rendered_large = renderer.render_block(ui, code, 1.0, 14.0, theme);
 
                 let texture_key = make_key(ui);
                 renderer.mermaid_textures.borrow_mut().insert(
@@ -7064,7 +6807,7 @@ mod tests {
                         size: [20, 10],
                     },
                 );
-                rendered_small = renderer.render_block(ui, code, 1.0, 14.0);
+                rendered_small = renderer.render_block(ui, code, 1.0, 14.0, theme);
             });
         });
 
@@ -7075,12 +6818,11 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_render_block_reports_cached_error() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "embedded");
         let (_result_tx, result_rx) = bounded(1);
         let renderer = test_renderer_with_channels(None, result_rx);
+        let theme = MermaidTheme::Default;
         let code = "graph TD; A-->B;";
-        let svg_key = hash_str(code);
+        let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
         renderer
             .mermaid_errors
             .borrow_mut()
@@ -7090,7 +6832,7 @@ mod tests {
         let mut rendered = false;
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                rendered = renderer.render_block(ui, code, 1.0, 14.0);
+                rendered = renderer.render_block(ui, code, 1.0, 14.0, theme);
             });
         });
         assert!(rendered);
@@ -7099,8 +6841,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_render_block_queue_full_sets_waiting() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "embedded");
+        let theme = MermaidTheme::Default;
         let (job_tx, job_rx) = bounded(1);
         let (_result_tx, result_rx) = bounded(1);
         let renderer = test_renderer_with_channels(Some(job_tx.clone()), result_rx);
@@ -7113,7 +6854,8 @@ mod tests {
             scale_bucket: MermaidRenderer::scale_bucket(1.0),
             viewport_width: 120,
             viewport_height: 120,
-            bg: MermaidRenderer::mermaid_bg_fill(),
+            bg: theme.bg_fill(),
+            theme,
         };
         job_tx.send(request).expect("fill queue");
 
@@ -7122,7 +6864,7 @@ mod tests {
         let mut rendered = false;
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                rendered = renderer.render_block(ui, "graph TD; A-->B;", 1.0, 14.0);
+                rendered = renderer.render_block(ui, "graph TD; A-->B;", 1.0, 14.0, theme);
             });
         });
         assert!(rendered);
@@ -7133,8 +6875,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_render_block_disconnected_queue_sets_error() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "embedded");
+        let theme = MermaidTheme::Default;
         let (_result_tx, result_rx) = bounded(1);
         let renderer = test_renderer_with_channels(None, result_rx);
         let ctx = egui::Context::default();
@@ -7143,19 +6884,18 @@ mod tests {
         let mut rendered = false;
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                rendered = renderer.render_block(ui, code, 1.0, 14.0);
+                rendered = renderer.render_block(ui, code, 1.0, 14.0, theme);
             });
         });
         assert!(rendered);
-        let svg_key = hash_str(code);
+        let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
         assert!(renderer.mermaid_errors.borrow_mut().get(&svg_key).is_some());
     }
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_render_block_pending_and_width_fallback() {
-        let _lock = env_lock();
-        let _guard_renderer = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "embedded");
+        let theme = MermaidTheme::Default;
         let (job_tx, job_rx) = bounded(2);
         let (result_tx, result_rx) = bounded(2);
         let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
@@ -7179,8 +6919,8 @@ mod tests {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(10.0, 80.0));
                 ui.allocate_ui_at_rect(rect, |ui| {
-                    rendered_first = renderer.render_block(ui, code, 1.0, 14.0);
-                    rendered_second = renderer.render_block(ui, code, 1.0, 14.0);
+                    rendered_first = renderer.render_block(ui, code, 1.0, 14.0, theme);
+                    rendered_second = renderer.render_block(ui, code, 1.0, 14.0, theme);
                 });
             });
         });
@@ -7778,7 +7518,8 @@ mod tests {
             scale_bucket: 100,
             viewport_width: 120,
             viewport_height: 120,
-            bg: None,
+            bg: MermaidTheme::Default.bg_fill(),
+            theme: MermaidTheme::Default,
         };
         assert_eq!(
             renderer.enqueue_mermaid_job(request),
@@ -7789,13 +7530,12 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_render_block_enqueues_cached_svg() {
-        let _lock = env_lock();
-        let _guard = EnvGuard::set("MDMDVIEW_MERMAID_RENDERER", "embedded");
+        let theme = MermaidTheme::Default;
         let (job_tx, job_rx) = bounded(1);
         let (_result_tx, result_rx) = bounded(1);
         let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
         let code = "graph TD; A-->B;";
-        let svg_key = hash_str(code);
+        let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
         renderer
             .mermaid_svg_cache
             .borrow_mut()
@@ -7805,7 +7545,7 @@ mod tests {
         let mut rendered = false;
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                rendered = renderer.render_block(ui, code, 1.0, 14.0);
+                rendered = renderer.render_block(ui, code, 1.0, 14.0, theme);
             });
         });
         assert!(rendered);
@@ -7833,7 +7573,8 @@ mod tests {
             scale_bucket: 100,
             viewport_width: 120,
             viewport_height: 120,
-            bg: None,
+            bg: MermaidTheme::Default.bg_fill(),
+            theme: MermaidTheme::Default,
         };
         job_tx.send(request).expect("send");
         let result = result_rx
@@ -7952,7 +7693,7 @@ mod tests {
         let mut worker = test_worker();
         force_mermaid_render_eval_error_once();
         let err = worker
-            .render_svg(1, "graph TD; A-->B;", 480, 320)
+            .render_svg(1, "graph TD; A-->B;", 480, 320, MermaidTheme::Default)
             .unwrap_err();
         assert!(!err.is_empty());
     }
@@ -7963,7 +7704,7 @@ mod tests {
         let mut worker = test_worker();
         force_mermaid_render_call_error_once();
         let err = worker
-            .render_svg(2, "graph TD; A-->B;", 480, 320)
+            .render_svg(2, "graph TD; A-->B;", 480, 320, MermaidTheme::Default)
             .unwrap_err();
         assert!(!err.is_empty());
     }
@@ -7986,7 +7727,7 @@ mod tests {
                 "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><rect width=\"10\" height=\"10\"/></svg>",
                 0,
                 100,
-                None,
+                MermaidTheme::Default.bg_fill(),
             )
             .unwrap_err();
         assert!(err.contains("Pixmap alloc failed"));

@@ -274,7 +274,7 @@ mdmdview supports all CommonMark elements with professional formatting:
   - Native Unicode emoji rendering
 - **Mermaid Diagrams** - Flowcharts, sequence diagrams, gantt charts, etc.
   - Embedded renderer is built by default (disable with `--no-default-features`)
-  - Select renderer via `MDMDVIEW_MERMAID_RENDERER` (`embedded`, `off`)
+  - Theme selection via View menu: Auto, Dark, Default, Forest, Neutral
 
 ### Special Features
 - **Line break preservation** - Single newlines respected (perfect for poetry/lyrics)
@@ -285,22 +285,25 @@ mdmdview supports all CommonMark elements with professional formatting:
 
 ## 🔧 Configuration
 
+### Mermaid Theme
+
+Select the Mermaid diagram theme via **View > Mermaid Theme**:
+- **Auto** (default) - resolves to Dark or Default based on the app's dark/light mode
+- **Dark** - Mermaid's dark theme
+- **Default** - Mermaid's light theme
+- **Forest** - Mermaid's green/forest theme
+- **Neutral** - Mermaid's neutral/grayscale theme
+
+The theme setting persists across sessions.
+
 ### Environment Variables
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `MDMDVIEW_MERMAID_RENDERER` | Mermaid renderer (`embedded`, `off`) | `embedded` (or `off` with `--no-default-features`) |
-| `MDMDVIEW_MERMAID_SECURITY` | Embedded Mermaid security level (`strict`, `loose`) | `strict` |
-| `MDMDVIEW_MERMAID_THEME` | Mermaid theme name | `base` |
-| `MDMDVIEW_MERMAID_BG` | Mermaid background (`theme`, `light`, `dark`, `transparent`) | `theme` |
-| `MDMDVIEW_MERMAID_BG_COLOR` | Override Mermaid background color (hex) | empty |
 | `RUST_LOG` | Logging level (`error`, `warn`, `info`, `debug`, `trace`) | `warn` |
 
 **Example:**
 ```bash
-# Use embedded Mermaid renderer (default)
-MDMDVIEW_MERMAID_RENDERER=embedded mdmdview document.md
-
 # Enable debug logging
 RUST_LOG=debug mdmdview document.md
 ```
@@ -581,7 +584,6 @@ mdmdview uses `String::from_utf8_lossy` for legacy encodings:
 
 **Embedded mode:**
 - Ensure you did not build with `--no-default-features`
-- Optionally set `MDMDVIEW_MERMAID_RENDERER=embedded`
 - Ensure `assets/vendor/mermaid.min.js` exists before building
 - Check that diagram syntax is valid
 
@@ -618,7 +620,7 @@ Try breaking large documents into smaller files.
 **QuickJS mode** (offline):
 - JavaScript sandboxed in QuickJS runtime
 - No network access during rendering
-- Default security level is strict; set `MDMDVIEW_MERMAID_SECURITY=loose` to relax
+- Security level is hardcoded to strict
 - Strict mode still allows inline Mermaid label tags: `<i>`, `<b>`, `<em>`, `<strong>`, `<br>`
 - Recommended for sensitive/confidential content
 

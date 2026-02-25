@@ -204,7 +204,6 @@ def run_mdmdview_capture(
         cmd.extend(["--test-fonts", test_fonts])
 
     env = dict(os.environ)
-    env["MDMDVIEW_MERMAID_RENDERER"] = "embedded"
     subprocess.run(cmd, check=True, env=env)
 
 

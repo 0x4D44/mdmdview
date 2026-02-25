@@ -4,7 +4,7 @@
 /// for the markdown viewer application built with egui.
 use crate::{
     apply_dark_mode_visuals, load_app_settings, save_app_settings, AppSettings, MarkdownElement,
-    MarkdownRenderer, SampleFile, ThemeColors, WindowState, SAMPLE_FILES,
+    MarkdownRenderer, MermaidTheme, SampleFile, ThemeColors, WindowState, SAMPLE_FILES,
 };
 use anyhow::{bail, Result};
 use crossbeam_channel::{unbounded, Receiver, Sender};
@@ -635,6 +635,11 @@ impl MarkdownViewerApp {
         // Apply loaded settings to renderer
         app.renderer
             .set_allow_remote_images(app.settings.allow_remote_images);
+        app.renderer.set_mermaid_theme(
+            app.settings
+                .mermaid_theme
+                .resolve(app.settings.dark_mode),
+        );
         // Load welcome content by default
         app.load_welcome_from_samples(SAMPLE_FILES, false);
 
@@ -1977,6 +1982,27 @@ impl MarkdownViewerApp {
             }
         });
 
+        #[cfg(feature = "mermaid-quickjs")]
+        ui.menu_button("Mermaid Theme", |ui| {
+            let current = self.settings.mermaid_theme;
+            for variant in MermaidTheme::ALL {
+                let selected = current == variant;
+                if ui
+                    .add(egui::SelectableLabel::new(selected, variant.label()))
+                    .clicked()
+                {
+                    self.settings.mermaid_theme = variant;
+                    let resolved = variant.resolve(self.settings.dark_mode);
+                    self.renderer.set_mermaid_theme(resolved);
+                    self.renderer.clear_mermaid_cache();
+                    if let Err(e) = save_app_settings(&self.settings) {
+                        eprintln!("Failed to save app settings: {e}");
+                    }
+                    ui.close_menu();
+                }
+            }
+        });
+
         ui.separator();
 
         ui.horizontal(|ui| {
@@ -2194,6 +2220,14 @@ impl MarkdownViewerApp {
         self.settings.dark_mode = !self.settings.dark_mode;
         apply_dark_mode_visuals(ctx, self.settings.dark_mode);
         self.renderer.set_dark_mode(self.settings.dark_mode);
+        // Update mermaid theme resolution (Auto resolves differently for dark/light)
+        let resolved = self
+            .settings
+            .mermaid_theme
+            .resolve(self.settings.dark_mode);
+        self.renderer.set_mermaid_theme(resolved);
+        #[cfg(feature = "mermaid-quickjs")]
+        self.renderer.clear_mermaid_cache();
         if !self.current_content.is_empty() {
             match self.renderer.parse(&self.current_content) {
                 Ok(elements) => self.parsed_elements = elements,
