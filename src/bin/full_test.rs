@@ -57,7 +57,6 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ── Mermaid visual test constants ───────────────────────────────────────
 
-const MERMAID_BG: &str = "#FFF8DB";
 const MERMAID_THRESHOLD_PERCENT: f64 = 12.0;
 const MERMAID_THRESHOLD_PIXELS: usize = 45_000;
 const MERMAID_PIXEL_TOLERANCE: u8 = 60;
@@ -635,15 +634,6 @@ fn build_mdmdview_binary() -> bool {
     }
 }
 
-/// Environment variables for Mermaid screenshot mode, matching mermaid_visual_check.py config.
-fn mermaid_env_vars() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("MDMDVIEW_MERMAID_RENDERER", "embedded"),
-        ("MDMDVIEW_MERMAID_BG_COLOR", MERMAID_BG),
-        ("MDMDVIEW_MERMAID_THEME", "base"),
-    ]
-}
-
 /// Pad two images to the same dimensions, centering the smaller one on a white background.
 fn pad_to_common_size(
     a: &image::RgbaImage,
@@ -750,12 +740,9 @@ fn run_mermaid_case(
         "--settle-frames",
         &MERMAID_SETTLE_FRAMES.to_string(),
         "--content-only",
+        "--theme",
+        "light",
     ]);
-
-    // Set Mermaid environment variables
-    for (key, value) in mermaid_env_vars() {
-        cmd.env(key, value);
-    }
 
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -2971,25 +2958,6 @@ not a test line\n";
         let options = parse_options(&args).unwrap();
         assert!(!options.skip_d2_visual);
         assert!(options.update_d2_references);
-    }
-
-    // ── Mermaid env vars test ───────────────────────────────────────
-
-    #[test]
-    fn test_mermaid_env_vars_contains_expected_keys() {
-        let vars = mermaid_env_vars();
-        let keys: Vec<&str> = vars.iter().map(|(k, _)| *k).collect();
-
-        assert!(keys.contains(&"MDMDVIEW_MERMAID_RENDERER"));
-        assert!(keys.contains(&"MDMDVIEW_MERMAID_BG_COLOR"));
-        assert!(keys.contains(&"MDMDVIEW_MERMAID_THEME"));
-    }
-
-    #[test]
-    fn test_mermaid_env_vars_renderer_is_embedded() {
-        let vars = mermaid_env_vars();
-        let renderer = vars.iter().find(|(k, _)| *k == "MDMDVIEW_MERMAID_RENDERER");
-        assert_eq!(renderer.unwrap().1, "embedded");
     }
 
     // ── Mermaid wait time per-case test ─────────────────────────────

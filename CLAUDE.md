@@ -225,6 +225,9 @@ Embedded QuickJS rendering (offline):
 - JavaScript embedded during build via `build.rs`
 - Uses `rquickjs` crate for JS execution
 - No network dependency
+- Theme selectable via View > Mermaid Theme menu (Auto/Dark/Default/Forest/Neutral)
+- Auto theme resolves to Dark or Default based on app dark/light mode
+- Security level hardcoded to strict
 
 Diagram textures are cached and scale with zoom.
 
@@ -329,11 +332,6 @@ See **[tests.md](tests.md)** for the comprehensive testing guide covering all te
   - Adds `pikchr` crate dependency (C library compiled at build time)
 
 ### Environment Variables
-- `MDMDVIEW_MERMAID_RENDERER`: Mermaid renderer (`embedded`, `off`)
-- `MDMDVIEW_MERMAID_SECURITY`: Mermaid security level (`strict`, `loose`)
-- `MDMDVIEW_MERMAID_THEME`: Mermaid theme name (default: `base`)
-- `MDMDVIEW_MERMAID_BG`: Mermaid background (`theme`, `light`, `dark`, `transparent`)
-- `MDMDVIEW_MERMAID_BG_COLOR`: Override Mermaid background color (hex)
 - `RUST_LOG`: Control logging level in debug builds (via `env_logger`)
 
 ## Platform-Specific Features

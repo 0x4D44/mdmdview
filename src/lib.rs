@@ -63,5 +63,5 @@ pub use sample_files::{SampleFile, SAMPLE_FILES};
 pub use theme::{apply_dark_mode_visuals, ThemeColors};
 pub use window_state::{
     load_app_settings, load_window_state, sanitize_window_state, save_app_settings,
-    save_window_state, AppSettings, WindowState,
+    save_window_state, AppSettings, MermaidTheme, WindowState,
 };

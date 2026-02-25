@@ -411,7 +411,7 @@ A small WEBP sample is bundled for testing.
 ## Mermaid Diagram (embedded)
 
 Mermaid code blocks are rendered as diagrams by default.
-Build with `--no-default-features` or set `MDMDVIEW_MERMAID_RENDERER=off` to show the source instead.
+Build with `--no-default-features` to show the source instead.
 
 ```mermaid
 graph TD;

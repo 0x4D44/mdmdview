@@ -3,6 +3,7 @@ use crate::d2_renderer;
 use crate::image_decode;
 use crate::lru_cache::hash_str;
 use crate::mermaid_renderer::MermaidRenderer;
+use crate::window_state::MermaidTheme;
 #[cfg(feature = "pikchr")]
 use crate::pikchr_renderer;
 use crate::table_support::{
@@ -595,6 +596,8 @@ pub struct MarkdownRenderer {
     // Base directory used to resolve relative image paths
     base_dir: RefCell<Option<PathBuf>>,
     mermaid: MermaidRenderer,
+    /// Current resolved Mermaid theme (Auto resolved at set time).
+    mermaid_theme: Cell<MermaidTheme>,
     #[cfg(feature = "pikchr")]
     pikchr: pikchr_renderer::PikchrRenderer,
     #[cfg(feature = "d2")]
@@ -972,6 +975,7 @@ impl MarkdownRenderer {
             highlight_phrase: RefCell::new(None),
             base_dir: RefCell::new(None),
             mermaid,
+            mermaid_theme: Cell::new(MermaidTheme::Auto),
             #[cfg(feature = "pikchr")]
             pikchr: pikchr_renderer::PikchrRenderer::new(),
             #[cfg(feature = "d2")]
@@ -987,6 +991,17 @@ impl MarkdownRenderer {
     /// Switch between dark and light theme for syntect highlighting.
     pub fn set_dark_mode(&mut self, dark: bool) {
         self.dark_mode = dark;
+    }
+
+    /// Set the resolved Mermaid theme (should be pre-resolved, not Auto).
+    pub fn set_mermaid_theme(&self, theme: MermaidTheme) {
+        self.mermaid_theme.set(theme);
+    }
+
+    /// Clear all Mermaid diagram caches. Call when the Mermaid theme changes.
+    #[cfg(feature = "mermaid-quickjs")]
+    pub fn clear_mermaid_cache(&self) {
+        self.mermaid.clear_mermaid_cache();
     }
 
     /// Set whether remote images (http/https URLs) should be loaded
@@ -4037,8 +4052,13 @@ impl MarkdownRenderer {
 
     /// Try to render a Mermaid diagram. Returns true if handled (rendered or placeholder drawn).
     fn render_mermaid_block(&self, ui: &mut egui::Ui, code: &str) -> bool {
-        self.mermaid
-            .render_block(ui, code, self.ui_scale(), self.font_sizes.code)
+        self.mermaid.render_block(
+            ui,
+            code,
+            self.ui_scale(),
+            self.font_sizes.code,
+            self.mermaid_theme.get(),
+        )
     }
 
     #[cfg(feature = "pikchr")]
@@ -9091,7 +9111,7 @@ fn main() {}
             renderer.mermaid.begin_frame();
             renderer
                 .mermaid
-                .render_block(ui, "graph TD; A-->B;", 1.0, 14.0);
+                .render_block(ui, "graph TD; A-->B;", 1.0, 14.0, MermaidTheme::Default);
         });
         assert!(renderer.has_pending_renders());
     }
@@ -12258,7 +12278,7 @@ contexts:
     #[test]
     fn test_render_code_block_mermaid_and_context_menu() {
         let renderer = MarkdownRenderer::new();
-        let _guard = EnvVarGuard::set("MDMDVIEW_MERMAID_RENDERER", "off");
+        renderer.set_mermaid_theme(MermaidTheme::Default);
         with_test_ui(|_, ui| {
             renderer.render_code_block(ui, Some("mermaid"), "graph TD; A-->B;", None);
         });

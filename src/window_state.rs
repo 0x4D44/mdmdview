@@ -9,11 +9,116 @@ pub struct WindowState {
     pub maximized: bool,
 }
 
+/// Mermaid diagram theme selection.
+/// Auto resolves to Dark or Default based on the app's dark/light mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MermaidTheme {
+    Auto,
+    Dark,
+    Default,
+    Forest,
+    Neutral,
+}
+
+impl MermaidTheme {
+    /// Resolve Auto to a concrete theme based on the app's dark mode setting.
+    /// Non-Auto variants pass through unchanged.
+    pub fn resolve(self, dark_mode: bool) -> Self {
+        match self {
+            Self::Auto => {
+                if dark_mode {
+                    Self::Dark
+                } else {
+                    Self::Default
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Returns the Mermaid theme name string. Panics on Auto (must resolve first).
+    pub fn theme_name(self) -> &'static str {
+        match self {
+            Self::Auto => panic!("MermaidTheme::Auto must be resolved before calling theme_name"),
+            Self::Dark => "dark",
+            Self::Default => "default",
+            Self::Forest => "forest",
+            Self::Neutral => "neutral",
+        }
+    }
+
+    /// Returns the background fill RGBA for the diagram.
+    /// Dark gets near-black, all light themes get white. Panics on Auto.
+    pub fn bg_fill(self) -> [u8; 4] {
+        match self {
+            Self::Auto => panic!("MermaidTheme::Auto must be resolved before calling bg_fill"),
+            Self::Dark => [20, 20, 20, 255],
+            Self::Default | Self::Forest | Self::Neutral => [255, 255, 255, 255],
+        }
+    }
+
+    /// Returns the journey section text fill color.
+    /// Dark gets light gray, others get dark gray. Panics on Auto.
+    pub fn journey_text_fill(self) -> &'static str {
+        match self {
+            Self::Auto => {
+                panic!("MermaidTheme::Auto must be resolved before calling journey_text_fill")
+            }
+            Self::Dark => "#ccc",
+            Self::Default | Self::Forest | Self::Neutral => "#333",
+        }
+    }
+
+    /// Serialize to a settings string for persistence.
+    pub fn as_setting(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Dark => "dark",
+            Self::Default => "default",
+            Self::Forest => "forest",
+            Self::Neutral => "neutral",
+        }
+    }
+
+    /// Parse from a settings string. Unknown values default to Auto.
+    pub fn from_setting(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Self::Auto,
+            "dark" => Self::Dark,
+            "default" => Self::Default,
+            "forest" => Self::Forest,
+            "neutral" => Self::Neutral,
+            _ => Self::Auto,
+        }
+    }
+
+    /// All concrete variants in menu display order.
+    pub const ALL: [MermaidTheme; 5] = [
+        Self::Auto,
+        Self::Dark,
+        Self::Default,
+        Self::Forest,
+        Self::Neutral,
+    ];
+
+    /// Display label for UI menus.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Dark => "Dark",
+            Self::Default => "Default",
+            Self::Forest => "Forest",
+            Self::Neutral => "Neutral",
+        }
+    }
+}
+
 /// Application settings that persist across sessions
 #[derive(Debug, Clone, Copy)]
 pub struct AppSettings {
     pub allow_remote_images: bool,
     pub dark_mode: bool,
+    pub mermaid_theme: MermaidTheme,
 }
 
 impl Default for AppSettings {
@@ -21,6 +126,7 @@ impl Default for AppSettings {
         Self {
             allow_remote_images: false,
             dark_mode: detect_os_dark_mode(),
+            mermaid_theme: MermaidTheme::Auto,
         }
     }
 }
@@ -250,6 +356,9 @@ pub fn load_app_settings() -> AppSettings {
                 "dark_mode" => {
                     settings.dark_mode = matches!(value.trim(), "1" | "true");
                 }
+                "mermaid_theme" => {
+                    settings.mermaid_theme = MermaidTheme::from_setting(value.trim());
+                }
                 _ => {}
             }
         }
@@ -271,6 +380,7 @@ pub fn save_app_settings(settings: &AppSettings) -> std::io::Result<()> {
             settings.allow_remote_images as u8
         )?;
         writeln!(f, "dark_mode={}", settings.dark_mode as u8)?;
+        writeln!(f, "mermaid_theme={}", settings.mermaid_theme.as_setting())?;
     }
     Ok(())
 }
@@ -286,9 +396,14 @@ fn load_app_settings_registry() -> Option<AppSettings> {
         .get_value::<u32, _>("DarkMode")
         .map(|v| v != 0)
         .unwrap_or_else(|_| detect_os_dark_mode());
+    let mermaid_theme = key
+        .get_value::<String, _>("MermaidTheme")
+        .map(|s| MermaidTheme::from_setting(&s))
+        .unwrap_or(MermaidTheme::Auto);
     Some(AppSettings {
         allow_remote_images: allow_remote != 0,
         dark_mode,
+        mermaid_theme,
     })
 }
 
@@ -301,6 +416,7 @@ fn save_app_settings_registry(settings: &AppSettings) -> std::io::Result<()> {
         hkcu.create_subkey_with_flags("Software\\MarkdownView", KEY_READ | KEY_WRITE)?;
     key.set_value("AllowRemoteImages", &(settings.allow_remote_images as u32))?;
     key.set_value("DarkMode", &(settings.dark_mode as u32))?;
+    key.set_value("MermaidTheme", &settings.mermaid_theme.as_setting())?;
     Ok(())
 }
 
@@ -921,6 +1037,7 @@ mod tests {
         let settings = AppSettings {
             allow_remote_images: true,
             dark_mode: true,
+            mermaid_theme: MermaidTheme::Auto,
         };
         save_app_settings(&settings).expect("save");
 
@@ -942,6 +1059,7 @@ mod tests {
         let settings = AppSettings {
             allow_remote_images: false,
             dark_mode: true,
+            mermaid_theme: MermaidTheme::Auto,
         };
         save_app_settings(&settings).expect("save");
 
@@ -959,6 +1077,7 @@ mod tests {
         let settings = AppSettings {
             allow_remote_images: true,
             dark_mode: true,
+            mermaid_theme: MermaidTheme::Auto,
         };
         save_app_settings(&settings).expect("save");
 
@@ -988,6 +1107,7 @@ mod tests {
         let settings = AppSettings {
             allow_remote_images: true,
             dark_mode: true,
+            mermaid_theme: MermaidTheme::Auto,
         };
         // Should succeed but do nothing
         save_app_settings(&settings).expect("save ok");
@@ -1116,6 +1236,7 @@ mod tests {
         let settings = AppSettings {
             allow_remote_images: false,
             dark_mode: true,
+            mermaid_theme: MermaidTheme::Auto,
         };
         save_app_settings(&settings).expect("save");
         let loaded = load_app_settings();
@@ -1131,6 +1252,7 @@ mod tests {
         let settings = AppSettings {
             allow_remote_images: false,
             dark_mode: false,
+            mermaid_theme: MermaidTheme::Auto,
         };
         save_app_settings(&settings).expect("save");
         let loaded = load_app_settings();
@@ -1183,5 +1305,110 @@ mod tests {
 
         let loaded = load_app_settings();
         assert!(!loaded.dark_mode);
+    }
+
+    // ========== MermaidTheme Tests ==========
+
+    #[test]
+    fn test_mermaid_theme_resolve_auto_dark() {
+        assert_eq!(MermaidTheme::Auto.resolve(true), MermaidTheme::Dark);
+    }
+
+    #[test]
+    fn test_mermaid_theme_resolve_auto_light() {
+        assert_eq!(MermaidTheme::Auto.resolve(false), MermaidTheme::Default);
+    }
+
+    #[test]
+    fn test_mermaid_theme_resolve_explicit_passthrough() {
+        assert_eq!(MermaidTheme::Dark.resolve(false), MermaidTheme::Dark);
+        assert_eq!(MermaidTheme::Default.resolve(true), MermaidTheme::Default);
+        assert_eq!(MermaidTheme::Forest.resolve(true), MermaidTheme::Forest);
+        assert_eq!(MermaidTheme::Neutral.resolve(false), MermaidTheme::Neutral);
+    }
+
+    #[test]
+    fn test_mermaid_theme_name() {
+        assert_eq!(MermaidTheme::Dark.theme_name(), "dark");
+        assert_eq!(MermaidTheme::Default.theme_name(), "default");
+        assert_eq!(MermaidTheme::Forest.theme_name(), "forest");
+        assert_eq!(MermaidTheme::Neutral.theme_name(), "neutral");
+    }
+
+    #[test]
+    fn test_mermaid_theme_bg_fill() {
+        assert_eq!(MermaidTheme::Dark.bg_fill(), [20, 20, 20, 255]);
+        assert_eq!(MermaidTheme::Default.bg_fill(), [255, 255, 255, 255]);
+        assert_eq!(MermaidTheme::Forest.bg_fill(), [255, 255, 255, 255]);
+        assert_eq!(MermaidTheme::Neutral.bg_fill(), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn test_mermaid_theme_journey_text_fill() {
+        assert_eq!(MermaidTheme::Dark.journey_text_fill(), "#ccc");
+        assert_eq!(MermaidTheme::Default.journey_text_fill(), "#333");
+        assert_eq!(MermaidTheme::Forest.journey_text_fill(), "#333");
+        assert_eq!(MermaidTheme::Neutral.journey_text_fill(), "#333");
+    }
+
+    #[test]
+    fn test_mermaid_theme_settings_roundtrip() {
+        for theme in MermaidTheme::ALL {
+            let s = theme.as_setting();
+            let parsed = MermaidTheme::from_setting(s);
+            assert_eq!(parsed, theme, "roundtrip failed for {s}");
+        }
+    }
+
+    #[test]
+    fn test_mermaid_theme_from_setting_unknown_defaults_to_auto() {
+        assert_eq!(MermaidTheme::from_setting("bogus"), MermaidTheme::Auto);
+        assert_eq!(MermaidTheme::from_setting(""), MermaidTheme::Auto);
+    }
+
+    #[test]
+    fn test_mermaid_theme_from_setting_case_insensitive() {
+        assert_eq!(MermaidTheme::from_setting("DARK"), MermaidTheme::Dark);
+        assert_eq!(MermaidTheme::from_setting("Forest"), MermaidTheme::Forest);
+        assert_eq!(MermaidTheme::from_setting(" neutral "), MermaidTheme::Neutral);
+    }
+
+    #[test]
+    fn test_mermaid_theme_label() {
+        assert_eq!(MermaidTheme::Auto.label(), "Auto");
+        assert_eq!(MermaidTheme::Dark.label(), "Dark");
+        assert_eq!(MermaidTheme::Default.label(), "Default");
+        assert_eq!(MermaidTheme::Forest.label(), "Forest");
+        assert_eq!(MermaidTheme::Neutral.label(), "Neutral");
+    }
+
+    #[test]
+    fn test_settings_persistence_mermaid_theme() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, _config_dir) = set_config_env(temp.path());
+
+        let settings = AppSettings {
+            allow_remote_images: false,
+            dark_mode: true,
+            mermaid_theme: MermaidTheme::Forest,
+        };
+        save_app_settings(&settings).expect("save");
+        let loaded = load_app_settings();
+        assert_eq!(loaded.mermaid_theme, MermaidTheme::Forest);
+    }
+
+    #[test]
+    fn test_settings_missing_mermaid_theme_defaults_to_auto() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let (_guard, config_dir) = set_config_env(temp.path());
+
+        fs::create_dir_all(&config_dir).expect("create config dir");
+        let settings_path = config_dir.join("settings.txt");
+        fs::write(&settings_path, "dark_mode=1\n").expect("write");
+
+        let loaded = load_app_settings();
+        assert_eq!(loaded.mermaid_theme, MermaidTheme::Auto);
     }
 }
