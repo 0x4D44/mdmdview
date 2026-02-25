@@ -331,6 +331,7 @@ See **[tests.md](tests.md)** for the comprehensive testing guide covering all te
 ### Environment Variables
 - `MDMDVIEW_MERMAID_RENDERER`: Mermaid renderer (`embedded`, `off`)
 - `MDMDVIEW_MERMAID_SECURITY`: Mermaid security level (`strict`, `loose`)
+- `MDMDVIEW_MERMAID_THEME`: Mermaid theme name (default: `base`)
 - `MDMDVIEW_MERMAID_BG`: Mermaid background (`theme`, `light`, `dark`, `transparent`)
 - `MDMDVIEW_MERMAID_BG_COLOR`: Override Mermaid background color (hex)
 - `RUST_LOG`: Control logging level in debug builds (via `env_logger`)

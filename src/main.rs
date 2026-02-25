@@ -123,6 +123,7 @@ fn parse_theme(value: &str) -> Result<ThemeChoice, String> {
     }
 }
 
+#[cfg(test)]
 fn parse_hex_color32(value: &str) -> Option<egui::Color32> {
     let hex = value.trim().trim_start_matches('#');
     if hex.len() != 6 {
@@ -135,10 +136,7 @@ fn parse_hex_color32(value: &str) -> Option<egui::Color32> {
 }
 
 fn screenshot_background_color() -> egui::Color32 {
-    std::env::var("MDMDVIEW_MERMAID_MAIN_BKG")
-        .ok()
-        .and_then(|hex| parse_hex_color32(&hex))
-        .unwrap_or(egui::Color32::from_rgb(255, 248, 219))
+    egui::Color32::from_rgb(255, 248, 219)
 }
 
 fn parse_value<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, String> {
@@ -532,17 +530,6 @@ mod tests {
     }
 
     impl EnvGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let lock = env_lock();
-            let original = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self {
-                key,
-                original,
-                _lock: lock,
-            }
-        }
-
         fn unset(key: &'static str) -> Self {
             let lock = env_lock();
             let original = std::env::var(key).ok();
@@ -810,22 +797,7 @@ mod tests {
     }
 
     #[test]
-    fn test_screenshot_background_color_env() {
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_MAIN_BKG", "#112233");
-            let color = screenshot_background_color();
-            assert_eq!(color, egui::Color32::from_rgb(17, 34, 51));
-        }
-        {
-            let _guard = EnvGuard::set("MDMDVIEW_MERMAID_MAIN_BKG", "bad");
-            let color = screenshot_background_color();
-            assert_eq!(color, egui::Color32::from_rgb(255, 248, 219));
-        }
-    }
-
-    #[test]
-    fn test_screenshot_background_color_default_when_unset() {
-        let _guard = EnvGuard::unset("MDMDVIEW_MERMAID_MAIN_BKG");
+    fn test_screenshot_background_color() {
         let color = screenshot_background_color();
         assert_eq!(color, egui::Color32::from_rgb(255, 248, 219));
     }
@@ -852,7 +824,7 @@ mod tests {
 
     #[test]
     fn test_env_guard_drop_removes_unset_key() {
-        let key = "MDMDVIEW_MERMAID_MAIN_BKG";
+        let key = "MDMDVIEW_TEST_GUARD_UNSET";
         std::env::remove_var(key);
         {
             let _guard = EnvGuard::unset(key);

@@ -4664,17 +4664,6 @@ impl MarkdownRenderer {
                         !content_fits,
                     );
                     if height_change {
-                        if std::env::var("MDMDVIEW_DEBUG_SCROLL").is_ok() {
-                            use std::io::Write;
-                            if let Ok(mut f) = std::fs::OpenOptions::new()
-                                .create(true)
-                                .append(true)
-                                .open(r"c:\tmp\scroll-debug.log")
-                            {
-                                let _ =
-                                    writeln!(f, "[REPAINT] table={} triggering repaint", table_id);
-                            }
-                        }
                         ui.ctx().request_repaint();
                     }
                 });

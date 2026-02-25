@@ -20,11 +20,10 @@ use std::cell::RefCell;
 #[cfg(test)]
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::io::{ErrorKind, Write};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
@@ -37,11 +36,6 @@ const ASYNC_LOAD_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024;
 /// Maximum number of entries in the navigation history
 const MAX_HISTORY_SIZE: usize = 100;
 
-/// Cached result of MDMDVIEW_DEBUG_REPAINT environment variable check
-#[cfg(not(test))]
-static DEBUG_REPAINT: OnceLock<bool> = OnceLock::new();
-/// Log file for debug repaint output (writes to repaint_debug.log in current dir)
-static DEBUG_LOG_FILE: OnceLock<std::sync::Mutex<Option<std::fs::File>>> = OnceLock::new();
 
 #[cfg(test)]
 thread_local! {
@@ -56,10 +50,6 @@ thread_local! {
 
 #[cfg(test)]
 static FORCE_THREAD_SPAWN_ERROR: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
-static FORCE_DEBUG_REPAINT: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
-static FORCE_DEBUG_SCROLL: AtomicBool = AtomicBool::new(false);
 
 #[cfg(test)]
 fn app_action_triggered(triggered: bool, action: &'static str) -> bool {
@@ -2460,42 +2450,6 @@ impl MarkdownViewerApp {
             ctx.request_repaint(); // Ensure full re-render to rebuild textures
         }
 
-        // Debug: log repaint causes and input state when MDMDVIEW_DEBUG_REPAINT is set
-        #[cfg(test)]
-        let debug_repaint_enabled = FORCE_DEBUG_REPAINT.load(Ordering::Relaxed);
-        #[cfg(not(test))]
-        let debug_repaint_enabled =
-            *DEBUG_REPAINT.get_or_init(|| std::env::var("MDMDVIEW_DEBUG_REPAINT").is_ok());
-        if debug_repaint_enabled {
-            let log_mutex = DEBUG_LOG_FILE.get_or_init(|| {
-                let file = std::fs::File::create("repaint_debug.log").ok();
-                std::sync::Mutex::new(file)
-            });
-            if let Ok(mut guard) = log_mutex.lock() {
-                if let Some(ref mut file) = *guard {
-                    let frame_nr = ctx.frame_nr();
-                    let causes = ctx.repaint_causes();
-                    let (events_count, pointer_delta, scroll_delta) =
-                        ctx.input(|i| (i.events.len(), i.pointer.delta(), i.raw_scroll_delta));
-                    // Always log frame number; include details when there's activity
-                    let msg = if events_count > 0
-                        || pointer_delta != egui::Vec2::ZERO
-                        || scroll_delta != egui::Vec2::ZERO
-                        || !causes.is_empty()
-                    {
-                        format!(
-                            "[FRAME] {} events={} pointer={:?} scroll={:?} causes={:?}\n",
-                            frame_nr, events_count, pointer_delta, scroll_delta, causes
-                        )
-                    } else {
-                        format!("[FRAME] {} (idle)\n", frame_nr)
-                    };
-                    let _ = file.write_all(msg.as_bytes());
-                    let _ = file.flush();
-                }
-            }
-        }
-
         self.handle_screenshot_events(ctx);
         self.poll_file_loads();
         self.poll_readability();
@@ -2798,45 +2752,6 @@ impl MarkdownViewerApp {
                 inner_rect: scroll_output.inner_rect,
                 offset_y: scroll_output.state.offset.y,
             });
-            // Debug scroll logging - writes to file to track content size changes
-            {
-                #[cfg(test)]
-                let enabled = FORCE_DEBUG_SCROLL.load(Ordering::Relaxed);
-                #[cfg(not(test))]
-                let enabled = {
-                    static DEBUG_SCROLL: OnceLock<bool> = OnceLock::new();
-                    *DEBUG_SCROLL.get_or_init(|| {
-                        std::env::var("MDMDVIEW_DEBUG_SCROLL").is_ok()
-                    })
-                };
-                if enabled {
-                    let max_scroll = (scroll_output.content_size.y - scroll_output.inner_rect.height()).max(0.0);
-                    let scroll_pct = if max_scroll > 0.0 {
-                        (scroll_output.state.offset.y / max_scroll * 100.0) as i32
-                    } else {
-                        0
-                    };
-                    #[cfg(test)]
-                    let scroll_log_path = std::env::temp_dir().join("scroll-trace-test.log");
-                    #[cfg(not(test))]
-                    let scroll_log_path = std::path::PathBuf::from(r"c:\tmp\scroll-trace.log");
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&scroll_log_path)
-                    {
-                        let _ = writeln!(
-                            f,
-                            "[SCROLL] content_h={:.0} viewport_h={:.0} offset={:.0} max={:.0} pct={}%",
-                            scroll_output.content_size.y,
-                            scroll_output.inner_rect.height(),
-                            scroll_output.state.offset.y,
-                            max_scroll,
-                            scroll_pct
-                        );
-                    }
-                }
-            }
         });
 
         // Show context menu on right-click in the main panel area.
@@ -7347,53 +7262,6 @@ The end.
         let _ = ctx.run(default_input(), |ctx| {
             app.render_status_bar(ctx);
         });
-    }
-
-    #[test]
-    fn test_debug_repaint_logging_path() {
-        // Enable the debug repaint flag for this test
-        FORCE_DEBUG_REPAINT.store(true, Ordering::Relaxed);
-
-        let mut app = MarkdownViewerApp::new();
-        app.current_content = "Test content.".to_string();
-        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
-            "Test content.".to_string(),
-        )])];
-
-        let ctx = egui::Context::default();
-        // Run two frames - one idle, one with events to cover both branches
-        let _ = ctx.run(default_input(), |ctx| {
-            app.update_impl(ctx);
-        });
-        // Second frame with a key event to trigger the activity branch
-        let mut input = default_input();
-        input
-            .events
-            .push(key_event(egui::Key::A, egui::Modifiers::NONE));
-        let _ = ctx.run(input, |ctx| {
-            app.update_impl(ctx);
-        });
-
-        FORCE_DEBUG_REPAINT.store(false, Ordering::Relaxed);
-    }
-
-    #[test]
-    fn test_debug_scroll_logging_path() {
-        // Enable the debug scroll flag for this test
-        FORCE_DEBUG_SCROLL.store(true, Ordering::Relaxed);
-
-        let mut app = MarkdownViewerApp::new();
-        app.current_content = "Scroll test content.\n".repeat(100);
-        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
-            "Scroll test content.".to_string(),
-        )])];
-
-        let ctx = egui::Context::default();
-        let _ = ctx.run(default_input(), |ctx| {
-            app.update_impl(ctx);
-        });
-
-        FORCE_DEBUG_SCROLL.store(false, Ordering::Relaxed);
     }
 
     #[test]

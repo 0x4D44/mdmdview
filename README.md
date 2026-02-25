@@ -291,11 +291,9 @@ mdmdview supports all CommonMark elements with professional formatting:
 |----------|---------|---------|
 | `MDMDVIEW_MERMAID_RENDERER` | Mermaid renderer (`embedded`, `off`) | `embedded` (or `off` with `--no-default-features`) |
 | `MDMDVIEW_MERMAID_SECURITY` | Embedded Mermaid security level (`strict`, `loose`) | `strict` |
-| `MDMDVIEW_MERMAID_WORKERS` | QuickJS worker count (1-16) | auto |
-| `MDMDVIEW_MERMAID_TIMEOUT_MS` | QuickJS render timeout (ms) | `2000` |
+| `MDMDVIEW_MERMAID_THEME` | Mermaid theme name | `base` |
 | `MDMDVIEW_MERMAID_BG` | Mermaid background (`theme`, `light`, `dark`, `transparent`) | `theme` |
 | `MDMDVIEW_MERMAID_BG_COLOR` | Override Mermaid background color (hex) | empty |
-| `MDMDVIEW_MERMAID_THEME` | Mermaid theme name | `base` |
 | `RUST_LOG` | Logging level (`error`, `warn`, `info`, `debug`, `trace`) | `warn` |
 
 **Example:**

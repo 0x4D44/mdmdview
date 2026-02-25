@@ -641,20 +641,6 @@ fn mermaid_env_vars() -> Vec<(&'static str, &'static str)> {
         ("MDMDVIEW_MERMAID_RENDERER", "embedded"),
         ("MDMDVIEW_MERMAID_BG_COLOR", MERMAID_BG),
         ("MDMDVIEW_MERMAID_THEME", "base"),
-        ("MDMDVIEW_MERMAID_MAIN_BKG", MERMAID_BG),
-        ("MDMDVIEW_MERMAID_PRIMARY_COLOR", "#D7EEFF"),
-        ("MDMDVIEW_MERMAID_PRIMARY_BORDER", "#9BB2C8"),
-        ("MDMDVIEW_MERMAID_PRIMARY_TEXT", "#1C2430"),
-        ("MDMDVIEW_MERMAID_SECONDARY_COLOR", "#DFF5E1"),
-        ("MDMDVIEW_MERMAID_TERTIARY_COLOR", "#E9E2FF"),
-        ("MDMDVIEW_MERMAID_LINE_COLOR", "#6B7A90"),
-        ("MDMDVIEW_MERMAID_TEXT_COLOR", "#1C2430"),
-        ("MDMDVIEW_MERMAID_CLUSTER_BKG", "#FFF1C1"),
-        ("MDMDVIEW_MERMAID_CLUSTER_BORDER", "#E5C07B"),
-        ("MDMDVIEW_MERMAID_LINK_COLOR", "#6B7A90"),
-        ("MDMDVIEW_MERMAID_TITLE_COLOR", "#1C2430"),
-        ("MDMDVIEW_MERMAID_LABEL_BG", MERMAID_BG),
-        ("MDMDVIEW_MERMAID_EDGE_LABEL_BG", MERMAID_BG),
     ]
 }
 
@@ -2997,8 +2983,6 @@ not a test line\n";
         assert!(keys.contains(&"MDMDVIEW_MERMAID_RENDERER"));
         assert!(keys.contains(&"MDMDVIEW_MERMAID_BG_COLOR"));
         assert!(keys.contains(&"MDMDVIEW_MERMAID_THEME"));
-        assert!(keys.contains(&"MDMDVIEW_MERMAID_PRIMARY_COLOR"));
-        assert!(keys.contains(&"MDMDVIEW_MERMAID_LINE_COLOR"));
     }
 
     #[test]
