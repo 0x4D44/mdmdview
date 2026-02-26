@@ -2764,7 +2764,7 @@ impl MarkdownRenderer {
         self.poll_image_results(ui.ctx());
         self.mermaid.begin_frame();
         #[cfg(feature = "pikchr")]
-        self.pikchr.begin_frame();
+        self.pikchr.begin_frame(ui.ctx());
         #[cfg(feature = "d2")]
         self.d2.begin_frame();
         // Clear header rects before rendering a new frame
