@@ -1983,7 +1983,13 @@ impl MarkdownViewerApp {
         });
 
         #[cfg(feature = "mermaid-quickjs")]
-        ui.menu_button("Mermaid Theme", |ui| {
+        ui.menu_button(Self::menu_text_with_mnemonic(
+            None,
+            "Mermaid Theme",
+            'T',
+            alt_pressed,
+            menu_text_color,
+        ), |ui| {
             let current = self.settings.mermaid_theme;
             for variant in MermaidTheme::ALL {
                 let selected = current == variant;
