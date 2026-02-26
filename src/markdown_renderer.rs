@@ -2766,7 +2766,7 @@ impl MarkdownRenderer {
         #[cfg(feature = "pikchr")]
         self.pikchr.begin_frame(ui.ctx());
         #[cfg(feature = "d2")]
-        self.d2.begin_frame();
+        self.d2.begin_frame(ui.ctx());
         // Clear header rects before rendering a new frame
         self.header_rects.borrow_mut().clear();
         // Reset per-frame link counter to ensure link IDs are stable across frames
