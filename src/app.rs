@@ -2522,9 +2522,15 @@ impl MarkdownViewerApp {
             )
         });
 
-        let mut pos_adjusted = false;
-        let mut size_adjusted = false;
-        if !is_fullscreen {
+        // Skip window adjustment and geometry tracking when maximized or fullscreen.
+        // On Windows, a maximized window's outer rect extends beyond the screen edge
+        // (e.g., -8,-8), making the inner rect slightly larger than the computed
+        // available_width. Sending size/position commands to a maximized window
+        // causes the OS to un-maximize it, producing a snap-back effect.
+        // We preserve pre-maximize geometry so un-maximize restores correctly.
+        if !is_fullscreen && !is_maximized {
+            let mut pos_adjusted = false;
+            let mut size_adjusted = false;
             if let Some(adjustment) =
                 Self::compute_window_adjustment(outer_rect, inner_rect, monitor_size)
             {
@@ -2539,16 +2545,16 @@ impl MarkdownViewerApp {
                     self.last_window_size = Some([size.x, size.y]);
                 }
             }
-        }
 
-        if !pos_adjusted {
-            if let Some(outer) = outer_rect {
-                self.last_window_pos = Some([outer.left(), outer.top()]);
+            if !pos_adjusted {
+                if let Some(outer) = outer_rect {
+                    self.last_window_pos = Some([outer.left(), outer.top()]);
+                }
             }
-        }
-        if !size_adjusted && !is_fullscreen {
-            if let Some(inner) = inner_rect {
-                self.last_window_size = Some([inner.width(), inner.height()]);
+            if !size_adjusted {
+                if let Some(inner) = inner_rect {
+                    self.last_window_size = Some([inner.width(), inner.height()]);
+                }
             }
         }
         self.last_window_maximized = is_maximized;
@@ -6970,6 +6976,74 @@ The end.
         run_app_frame(&mut app, &ctx, input);
 
         assert!(app.last_window_size.is_none());
+    }
+
+    #[test]
+    fn test_update_impl_maximized_skips_size_and_pos_tracking() {
+        let mut app = MarkdownViewerApp::new();
+        app.last_window_size = None;
+        app.last_window_pos = None;
+
+        let ctx = egui::Context::default();
+        let mut input = default_input();
+        let vp = input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("root viewport");
+        vp.monitor_size = Some(egui::vec2(1920.0, 1080.0));
+        vp.outer_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(-8.0, -8.0),
+            egui::vec2(1936.0, 1096.0),
+        ));
+        vp.inner_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(1920.0, 1048.0),
+        ));
+        vp.fullscreen = Some(false);
+        vp.maximized = Some(true);
+
+        run_app_frame(&mut app, &ctx, input);
+
+        // Pos and size should NOT be updated when maximized
+        assert!(app.last_window_size.is_none());
+        assert!(app.last_window_pos.is_none());
+        // But maximized flag should be tracked
+        assert!(app.last_window_maximized);
+    }
+
+    #[test]
+    fn test_update_impl_maximized_preserves_pre_maximize_geometry() {
+        let mut app = MarkdownViewerApp::new();
+        // Simulate pre-maximize state: window at (50,50) with size 900x700
+        app.last_window_pos = Some([50.0, 50.0]);
+        app.last_window_size = Some([900.0, 700.0]);
+        app.last_window_maximized = false;
+
+        let ctx = egui::Context::default();
+        let mut input = default_input();
+        let vp = input
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("root viewport");
+        vp.monitor_size = Some(egui::vec2(1920.0, 1080.0));
+        // Maximized window: outer extends beyond screen, inner fills it
+        vp.outer_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(-8.0, -8.0),
+            egui::vec2(1936.0, 1096.0),
+        ));
+        vp.inner_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(1920.0, 1048.0),
+        ));
+        vp.fullscreen = Some(false);
+        vp.maximized = Some(true);
+
+        run_app_frame(&mut app, &ctx, input);
+
+        // Pre-maximize geometry must be preserved, not overwritten with maximized dimensions
+        assert_eq!(app.last_window_pos, Some([50.0, 50.0]));
+        assert_eq!(app.last_window_size, Some([900.0, 700.0]));
+        assert!(app.last_window_maximized);
     }
 
     #[test]
