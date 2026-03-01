@@ -179,26 +179,22 @@ impl CompileContext {
 
             if prop == "width" {
                 let obj = self.resolve_or_create_path(obj_segments, parent)?;
-                if let Some(ref primary) = key.primary {
-                    if let ScalarValue::Number(n) = primary {
-                        let rect = self.graph.graph[obj]
-                            .box_
-                            .get_or_insert(crate::geo::Rect::new(0.0, 0.0, 0.0, 0.0));
-                        rect.width = *n;
-                    }
+                if let Some(ScalarValue::Number(n)) = key.primary.as_ref() {
+                    let rect = self.graph.graph[obj]
+                        .box_
+                        .get_or_insert(crate::geo::Rect::new(0.0, 0.0, 0.0, 0.0));
+                    rect.width = *n;
                 }
                 return Ok(());
             }
 
             if prop == "height" {
                 let obj = self.resolve_or_create_path(obj_segments, parent)?;
-                if let Some(ref primary) = key.primary {
-                    if let ScalarValue::Number(n) = primary {
-                        let rect = self.graph.graph[obj]
-                            .box_
-                            .get_or_insert(crate::geo::Rect::new(0.0, 0.0, 0.0, 0.0));
-                        rect.height = *n;
-                    }
+                if let Some(ScalarValue::Number(n)) = key.primary.as_ref() {
+                    let rect = self.graph.graph[obj]
+                        .box_
+                        .get_or_insert(crate::geo::Rect::new(0.0, 0.0, 0.0, 0.0));
+                    rect.height = *n;
                 }
                 return Ok(());
             }

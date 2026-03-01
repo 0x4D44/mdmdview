@@ -438,8 +438,7 @@ impl PikchrRenderer {
                     if let (Some(rgba), Some(raster_size), Some(display_size)) =
                         (result.rgba, result.raster_size, result.display_size)
                     {
-                        let image =
-                            egui::ColorImage::from_rgba_unmultiplied(raster_size, &rgba);
+                        let image = egui::ColorImage::from_rgba_unmultiplied(raster_size, &rgba);
                         let texture = ctx.load_texture(
                             result.texture_key.clone(),
                             image,
@@ -578,11 +577,13 @@ impl PikchrRenderer {
         // 3b. Debounce gate: suppress rasterization enqueue during resize.
         //     Show the last rendered texture scaled to fit. Only enqueue
         //     once the width stabilizes for RESIZE_DEBOUNCE_MS.
-        let db_entry = self
-            .debounce
-            .borrow()
-            .get(&code_hash)
-            .map(|d| (d.last_rasterized_bucket, d.last_seen_bucket, d.bucket_changed_at));
+        let db_entry = self.debounce.borrow().get(&code_hash).map(|d| {
+            (
+                d.last_rasterized_bucket,
+                d.last_seen_bucket,
+                d.bucket_changed_at,
+            )
+        });
         if let Some((last_rasterized, last_seen, _changed_at)) = db_entry {
             if width_bucket != last_rasterized {
                 // Width changed since last rasterize -- apply trailing-edge debounce
@@ -715,10 +716,10 @@ impl PikchrRenderer {
         let result_bucket = Self::parse_width_from_texture_key(texture_key);
         let wanted = self.wanted_bucket.borrow().get(&code_hash).copied();
         match (result_bucket, wanted) {
-            (Some(rb), Some(wb)) => rb != wb,  // Width mismatch -> stale
-            (Some(_), None) => true,           // No wanted bucket (e.g. after
-                                               // release_gpu_textures) -> stale
-            _ => false,                        // Can't parse -> assume fresh
+            (Some(rb), Some(wb)) => rb != wb, // Width mismatch -> stale
+            (Some(_), None) => true,          // No wanted bucket (e.g. after
+            // release_gpu_textures) -> stale
+            _ => false, // Can't parse -> assume fresh
         }
     }
 
@@ -1411,11 +1412,13 @@ arrow right 200% "Output" above"#;
 
     #[test]
     fn test_supersample_constant_is_reasonable() {
-        assert!(PIKCHR_SUPERSAMPLE >= 1.0, "Supersample must be >= 1.0");
-        assert!(
-            PIKCHR_SUPERSAMPLE <= 4.0,
-            "Supersample > 4.0 would waste memory"
-        );
+        const { assert!(PIKCHR_SUPERSAMPLE >= 1.0, "Supersample must be >= 1.0") };
+        const {
+            assert!(
+                PIKCHR_SUPERSAMPLE <= 4.0,
+                "Supersample > 4.0 would waste memory"
+            )
+        };
     }
 
     // -----------------------------------------------------------------------
@@ -1490,10 +1493,7 @@ arrow right 200% "Output" above"#;
             "Worker should produce display_size"
         );
         assert!(result.error.is_none(), "Worker should not produce an error");
-        assert!(
-            result.svg.is_some(),
-            "Worker should produce SVG on success"
-        );
+        assert!(result.svg.is_some(), "Worker should produce SVG on success");
     }
 
     #[test]

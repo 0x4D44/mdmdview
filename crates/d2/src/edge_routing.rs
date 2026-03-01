@@ -1051,8 +1051,16 @@ fn resolve_label_overlaps(graph: &mut D2Graph, node_rects: &[Rect]) {
                 None => continue,
             };
 
-            let rect_i = label_bounding_rect(pos_i, graph.graph[ei].label_width, graph.graph[ei].label_height);
-            let rect_j = label_bounding_rect(pos_j, graph.graph[ej].label_width, graph.graph[ej].label_height);
+            let rect_i = label_bounding_rect(
+                pos_i,
+                graph.graph[ei].label_width,
+                graph.graph[ei].label_height,
+            );
+            let rect_j = label_bounding_rect(
+                pos_j,
+                graph.graph[ej].label_width,
+                graph.graph[ej].label_height,
+            );
 
             if !rect_i.intersects(&rect_j) {
                 continue;
@@ -2631,9 +2639,7 @@ a -> c
         let graph = layout_ok(source);
 
         let edge = find_edge_between(&graph, "a", "b");
-        let label_pos = edge
-            .label_position
-            .expect("label position should exist");
+        let label_pos = edge.label_position.expect("label position should exist");
 
         // c is to the right of the a->b edge. The label should not overlap c.
         let c_rect = graph.graph[find_node_by_label(&graph, "c")]
@@ -2643,12 +2649,16 @@ a -> c
         assert!(
             !lr.intersects(&c_rect),
             "label rect {:?} should not overlap node c rect {:?}",
-            lr, c_rect
+            lr,
+            c_rect
         );
 
         // Verify the label is offset from the edge line (not zero — "hi" is 2 chars,
         // well below the 72px Fix C threshold)
-        assert!(edge.label_width < 72.0, "label should be below Fix C threshold");
+        assert!(
+            edge.label_width < 72.0,
+            "label should be below Fix C threshold"
+        );
         let line_x = (edge.route[0].x + edge.route.last().unwrap().x) / 2.0;
         let x_offset = (label_pos.x - line_x).abs();
         assert!(
@@ -2714,9 +2724,7 @@ c -> d
         let graph = layout_ok(source);
 
         let edge = find_edge_between(&graph, "a", "b");
-        let _label_pos = edge
-            .label_position
-            .expect("label position");
+        let _label_pos = edge.label_position.expect("label position");
 
         // Compute the node bounding box
         let node_bounds = {

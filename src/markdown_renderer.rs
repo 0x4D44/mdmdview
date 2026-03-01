@@ -3,13 +3,13 @@ use crate::d2_renderer;
 use crate::image_decode;
 use crate::lru_cache::hash_str;
 use crate::mermaid_renderer::MermaidRenderer;
-use crate::window_state::MermaidTheme;
 #[cfg(feature = "pikchr")]
 use crate::pikchr_renderer;
 use crate::table_support::{
     column_spec::spans_to_text, compute_column_stats, derive_column_specs, ColumnPolicy,
     ColumnSpec, ColumnStat, TableColumnContext, TableMetrics, WidthChange,
 };
+use crate::window_state::MermaidTheme;
 use crate::ThemeColors;
 use crate::{emoji_assets, emoji_catalog};
 use anyhow::Result;

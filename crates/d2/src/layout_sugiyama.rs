@@ -239,6 +239,7 @@ fn arrange_in_line(graph: &mut D2Graph, children: &[NodeIndex], direction: Direc
 }
 
 /// Cycle removal via DFS. Returns (forward_edges, back_edges).
+#[allow(clippy::type_complexity)]
 fn remove_cycles(
     children: &[NodeIndex],
     edges: &[(NodeIndex, NodeIndex, EdgeIndex)],
@@ -381,6 +382,7 @@ fn assign_ranks(
 }
 
 /// Crossing reduction using barycenter heuristic.
+#[allow(clippy::needless_range_loop)]
 fn reduce_crossings(
     ranks: &HashMap<usize, Vec<NodeIndex>>,
     edges: &[(NodeIndex, NodeIndex, EdgeIndex)],

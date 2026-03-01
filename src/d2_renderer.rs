@@ -428,8 +428,7 @@ impl D2Renderer {
                     if let (Some(rgba), Some(raster_size), Some(display_size)) =
                         (result.rgba, result.raster_size, result.display_size)
                     {
-                        let image =
-                            egui::ColorImage::from_rgba_unmultiplied(raster_size, &rgba);
+                        let image = egui::ColorImage::from_rgba_unmultiplied(raster_size, &rgba);
                         let texture = ctx.load_texture(
                             result.texture_key.clone(),
                             image,
@@ -568,11 +567,13 @@ impl D2Renderer {
         // 3b. Debounce gate: suppress rasterization enqueue during resize.
         //     Show the last rendered texture scaled to fit. Only enqueue
         //     once the width stabilizes for RESIZE_DEBOUNCE_MS.
-        let db_entry = self
-            .debounce
-            .borrow()
-            .get(&code_hash)
-            .map(|d| (d.last_rasterized_bucket, d.last_seen_bucket, d.bucket_changed_at));
+        let db_entry = self.debounce.borrow().get(&code_hash).map(|d| {
+            (
+                d.last_rasterized_bucket,
+                d.last_seen_bucket,
+                d.bucket_changed_at,
+            )
+        });
         if let Some((last_rasterized, last_seen, _changed_at)) = db_entry {
             if width_bucket != last_rasterized {
                 // Width changed since last rasterize -- apply trailing-edge debounce
@@ -872,11 +873,13 @@ mod tests {
 
     #[test]
     fn test_supersample_constant_is_reasonable() {
-        assert!(D2_SUPERSAMPLE >= 1.0, "Supersample must be >= 1.0");
-        assert!(
-            D2_SUPERSAMPLE <= 4.0,
-            "Supersample > 4.0 would waste memory"
-        );
+        const { assert!(D2_SUPERSAMPLE >= 1.0, "Supersample must be >= 1.0") };
+        const {
+            assert!(
+                D2_SUPERSAMPLE <= 4.0,
+                "Supersample > 4.0 would waste memory"
+            )
+        };
     }
 
     // -----------------------------------------------------------------------
@@ -951,10 +954,7 @@ mod tests {
             "Worker should produce display_size"
         );
         assert!(result.error.is_none(), "Worker should not produce an error");
-        assert!(
-            result.svg.is_some(),
-            "Worker should produce SVG on success"
-        );
+        assert!(result.svg.is_some(), "Worker should produce SVG on success");
     }
 
     #[test]

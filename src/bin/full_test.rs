@@ -32,7 +32,7 @@
 //! 1. Code quality checks (cargo fmt --check, cargo clippy)
 //! 2. Unit + D2 tests (cargo test --release --lib --tests --workspace)
 //! 3. Mermaid visual tests (screenshot comparison against reference images)
-//! 3b. D2 visual tests (SVG rasterization comparison against d2 CLI)
+//!    3b. D2 visual tests (SVG rasterization comparison against d2 CLI)
 //! 4. Coverage analysis (cargo llvm-cov, optional)
 //!
 //! Usage:
@@ -676,7 +676,7 @@ fn diff_images(
             .0
             .iter()
             .zip(r_px.0.iter())
-            .map(|(&av, &rv)| if av >= rv { av - rv } else { rv - av })
+            .map(|(&av, &rv)| av.abs_diff(rv))
             .max()
             .unwrap_or(0);
 
@@ -1603,6 +1603,7 @@ where
 
 // ── HTML report generation ──────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn generate_html_report(
     test_results: Option<&SuiteResults>,
     quality_results: &[QualityResult],
@@ -2155,11 +2156,7 @@ fn main() {
         return;
     }
 
-    let outcome = run_full_test(
-        &options,
-        |include_ignored| run_cargo_test(include_ignored),
-        now,
-    );
+    let outcome = run_full_test(&options, run_cargo_test, now);
 
     write_report(&outcome.report_path, &outcome.html_report).expect("Failed to write HTML report");
     println!("Report saved to: {}", outcome.report_path.display());

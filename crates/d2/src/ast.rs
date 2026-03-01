@@ -66,14 +66,15 @@ pub struct KeyPath {
     pub segments: Vec<StringValue>,
 }
 
-impl KeyPath {
-    /// Join segments into a dotted string.
-    pub fn to_string(&self) -> String {
-        self.segments
+impl std::fmt::Display for KeyPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let dotted = self
+            .segments
             .iter()
             .map(|s| s.value.as_str())
             .collect::<Vec<_>>()
-            .join(".")
+            .join(".");
+        f.write_str(&dotted)
     }
 }
 
