@@ -62,7 +62,7 @@ jobs:
           RUSTFLAGS: -D warnings
 
       - name: Build MSI installer
-        run: cargo wix --no-build
+        run: cargo wix -p mdmdview --no-build
 
       - name: Package artifacts
         shell: pwsh
