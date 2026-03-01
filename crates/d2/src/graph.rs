@@ -189,18 +189,13 @@ pub struct D2Object {
 // ---------------------------------------------------------------------------
 
 /// Edge route type: Bézier curves or orthogonal (rectilinear) segments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RouteType {
     /// Cubic Bézier spline segments (default).
+    #[default]
     Bezier,
     /// Orthogonal (axis-aligned) polyline segments.
     Orthogonal,
-}
-
-impl Default for RouteType {
-    fn default() -> Self {
-        RouteType::Bezier
-    }
 }
 
 /// An edge/connection.
@@ -228,8 +223,9 @@ pub struct D2EdgeData {
 // ---------------------------------------------------------------------------
 
 /// Shape types supported in v1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ShapeType {
+    #[default]
     Rectangle,
     Square,
     Circle,
@@ -251,14 +247,9 @@ pub enum ShapeType {
     Code,
 }
 
-impl Default for ShapeType {
-    fn default() -> Self {
-        ShapeType::Rectangle
-    }
-}
-
 impl ShapeType {
     /// Parse a shape type from a D2 string value.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<ShapeType> {
         match s {
             "rectangle" => Some(ShapeType::Rectangle),
@@ -286,22 +277,18 @@ impl ShapeType {
 }
 
 /// Layout direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Direction {
+    #[default]
     Down,
     Up,
     Right,
     Left,
 }
 
-impl Default for Direction {
-    fn default() -> Self {
-        Direction::Down
-    }
-}
-
 impl Direction {
     /// Parse a direction from a D2 string value.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Direction> {
         match s {
             "down" => Some(Direction::Down),
@@ -319,8 +306,9 @@ impl Direction {
 }
 
 /// Arrowhead types supported in v1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ArrowheadType {
+    #[default]
     Arrow,
     Triangle,
     Diamond,
@@ -334,14 +322,9 @@ pub enum ArrowheadType {
     None,
 }
 
-impl Default for ArrowheadType {
-    fn default() -> Self {
-        ArrowheadType::Arrow
-    }
-}
-
 impl ArrowheadType {
     /// Parse an arrowhead type from a D2 string value.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<ArrowheadType> {
         match s {
             "arrow" => Some(ArrowheadType::Arrow),
@@ -584,7 +567,7 @@ impl Color {
 // ---------------------------------------------------------------------------
 
 /// Visual style properties for shapes and edges.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Style {
     pub fill: Option<Color>,
     pub stroke: Option<Color>,
@@ -602,29 +585,6 @@ pub struct Style {
     pub multiple: bool,
     pub animated: bool,
     pub double_border: bool,
-}
-
-impl Default for Style {
-    fn default() -> Self {
-        Self {
-            fill: None,
-            stroke: None,
-            stroke_width: None,
-            stroke_dash: None,
-            font_size: None,
-            font_color: None,
-            bold: false,
-            italic: false,
-            underline: false,
-            border_radius: None,
-            opacity: None,
-            shadow: false,
-            three_d: false,
-            multiple: false,
-            animated: false,
-            double_border: false,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -9,6 +9,7 @@ use crate::graph::ShapeType;
 
 /// Generate SVG markup for a shape within the given bounding rect.
 /// Returns the SVG element string (no surrounding tags).
+#[allow(clippy::too_many_arguments)]
 pub fn shape_svg(
     shape: ShapeType,
     rect: &Rect,
@@ -512,7 +513,7 @@ fn clip_to_hexagon(rect: &Rect, _from: Point, toward: Point) -> Point {
         let t = (ox * ey - oy * ex) / det;
         let s = (ox * dy - oy * dx) / det;
 
-        if t > 1e-10 && s >= 0.0 && s <= 1.0 && t < best_t {
+        if t > 1e-10 && (0.0..=1.0).contains(&s) && t < best_t {
             best_t = t;
             best_point = Point::new(cx + dx * t, cy + dy * t);
         }

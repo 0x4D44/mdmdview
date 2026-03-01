@@ -265,7 +265,7 @@ fn render_container_fills(
     theme: &Theme,
     svg: &mut String,
     container: NodeIndex,
-    depth: usize,
+    _depth: usize,
 ) {
     // Skip root — it has no visual representation
     if container != graph.root {
@@ -319,7 +319,7 @@ fn render_container_fills(
     let children: Vec<NodeIndex> = graph.graph[container].children.clone();
     for child in children {
         if graph.graph[child].is_container {
-            render_container_fills(graph, theme, svg, child, depth + 1);
+            render_container_fills(graph, theme, svg, child, _depth + 1);
         }
     }
 }
@@ -612,7 +612,7 @@ fn render_labels(graph: &D2Graph, theme: &Theme, options: &RenderOptions, svg: &
             None => continue,
         };
 
-        let font_color = effective_font_color(&obj.style, &theme).to_svg_string();
+        let font_color = effective_font_color(&obj.style, theme).to_svg_string();
         let font_size = obj.style.font_size.unwrap_or(theme.font_size);
         let font_weight = if obj.style.bold { "bold" } else { "normal" };
         let font_style = if obj.style.italic { "italic" } else { "normal" };
@@ -715,7 +715,7 @@ fn render_labels(graph: &D2Graph, theme: &Theme, options: &RenderOptions, svg: &
             None => continue,
         };
 
-        let font_color = effective_font_color(&obj.style, &theme).to_svg_string();
+        let font_color = effective_font_color(&obj.style, theme).to_svg_string();
         let font_size = obj.style.font_size.unwrap_or(theme.font_size);
         let font_weight = if obj.style.bold { "bold" } else { "normal" };
         let font_style = if obj.style.italic { "italic" } else { "normal" };
@@ -1051,7 +1051,9 @@ mod tests {
 
     fn extract_svg_attr_f64(tag: &str, attr: &str) -> f64 {
         let needle = format!("{attr}=\"");
-        let pos = tag.find(&needle).unwrap_or_else(|| panic!("missing {attr}"));
+        let pos = tag
+            .find(&needle)
+            .unwrap_or_else(|| panic!("missing {attr}"));
         let start = pos + needle.len();
         let end = tag[start..].find('"').unwrap() + start;
         tag[start..end].parse().unwrap()

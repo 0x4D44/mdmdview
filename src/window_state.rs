@@ -1370,7 +1370,10 @@ mod tests {
     fn test_mermaid_theme_from_setting_case_insensitive() {
         assert_eq!(MermaidTheme::from_setting("DARK"), MermaidTheme::Dark);
         assert_eq!(MermaidTheme::from_setting("Forest"), MermaidTheme::Forest);
-        assert_eq!(MermaidTheme::from_setting(" neutral "), MermaidTheme::Neutral);
+        assert_eq!(
+            MermaidTheme::from_setting(" neutral "),
+            MermaidTheme::Neutral
+        );
     }
 
     #[test]

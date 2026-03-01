@@ -855,11 +855,13 @@ impl MermaidRenderer {
                 return true;
             }
             // Debounce gate: suppress enqueue during resize, show stale texture
-            let debounce_entry = self
-                .mermaid_width_debounce
-                .borrow()
-                .get(&svg_key)
-                .map(|d| (d.last_enqueued_bucket, d.last_seen_bucket, d.bucket_changed_at));
+            let debounce_entry = self.mermaid_width_debounce.borrow().get(&svg_key).map(|d| {
+                (
+                    d.last_enqueued_bucket,
+                    d.last_seen_bucket,
+                    d.bucket_changed_at,
+                )
+            });
             if let Some((last_enqueued_bucket, last_seen_bucket, bucket_changed_at)) =
                 debounce_entry
             {
@@ -897,22 +899,16 @@ impl MermaidRenderer {
                             now
                         });
                     let elapsed = changed_at.elapsed();
-                    let debounce_dur =
-                        std::time::Duration::from_millis(MERMAID_RESIZE_DEBOUNCE_MS);
+                    let debounce_dur = std::time::Duration::from_millis(MERMAID_RESIZE_DEBOUNCE_MS);
                     if elapsed < debounce_dur {
                         // Still in cooldown — show stale texture or placeholder
-                        let stale_key = self
-                            .mermaid_latest_texture
-                            .borrow()
-                            .get(&svg_key)
-                            .cloned();
-                        if let Some(ref stale_key) =
-                            stale_key.as_ref().and_then(|k| {
-                                self.mermaid_textures.borrow_mut().get(k).map(|entry| {
-                                    (entry.texture.clone(), entry.size)
-                                })
-                            })
-                        {
+                        let stale_key = self.mermaid_latest_texture.borrow().get(&svg_key).cloned();
+                        if let Some(ref stale_key) = stale_key.as_ref().and_then(|k| {
+                            self.mermaid_textures
+                                .borrow_mut()
+                                .get(k)
+                                .map(|entry| (entry.texture.clone(), entry.size))
+                        }) {
                             let (tex, sz) = stale_key;
                             let (tw, th) = (sz[0] as f32, sz[1] as f32);
                             let available_w = ui.available_width().max(1.0);
@@ -1797,7 +1793,8 @@ impl MermaidWorker {
                     ctx.clone(),
                     move |text: String, font_size: f64, font_weight: Option<f64>| {
                         let weight = font_weight.map(|value| value as f32);
-                        let (width, height) = measurer.measure_text(&text, font_size as f32, weight);
+                        let (width, height) =
+                            measurer.measure_text(&text, font_size as f32, weight);
                         vec![width as f64, height as f64]
                     },
                 ),
@@ -1808,13 +1805,17 @@ impl MermaidWorker {
                     MermaidWorker::format_js_error(&ctx, err)
                 )
             })?;
-            maybe_force_mermaid_init_error(2, ctx.globals().set("__mdmdview_measure_text_native", measure_fn))
-                .map_err(|err| {
-                    format!(
-                        "Mermaid text measure init error: {}",
-                        MermaidWorker::format_js_error(&ctx, err)
-                    )
-                })?;
+            maybe_force_mermaid_init_error(
+                2,
+                ctx.globals()
+                    .set("__mdmdview_measure_text_native", measure_fn),
+            )
+            .map_err(|err| {
+                format!(
+                    "Mermaid text measure init error: {}",
+                    MermaidWorker::format_js_error(&ctx, err)
+                )
+            })?;
             let eval = |stage: usize, label: &str, source: &str| -> Result<(), String> {
                 let result = maybe_force_mermaid_init_error(stage, ctx.eval::<(), _>(source));
                 result.map_err(|err| {
@@ -5980,7 +5981,6 @@ mod tests {
         ));
     }
 
-
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_mermaid_site_config_json_includes_security_flags() {
@@ -6016,7 +6016,10 @@ mod tests {
                 name,
                 json
             );
-            assert!(!json.contains("themeVariables"), "themeVariables should be absent");
+            assert!(
+                !json.contains("themeVariables"),
+                "themeVariables should be absent"
+            );
         }
     }
 
@@ -6063,19 +6066,49 @@ mod tests {
         let viewport_height = 900;
 
         let flow_svg = worker
-            .render_svg(hash_str(flow), flow, viewport_width, viewport_height, MermaidTheme::Default)
+            .render_svg(
+                hash_str(flow),
+                flow,
+                viewport_width,
+                viewport_height,
+                MermaidTheme::Default,
+            )
             .expect("flowchart render");
         let seq_svg = worker
-            .render_svg(hash_str(seq), seq, viewport_width, viewport_height, MermaidTheme::Default)
+            .render_svg(
+                hash_str(seq),
+                seq,
+                viewport_width,
+                viewport_height,
+                MermaidTheme::Default,
+            )
             .expect("sequence render");
         let class_svg = worker
-            .render_svg(hash_str(class), class, viewport_width, viewport_height, MermaidTheme::Default)
+            .render_svg(
+                hash_str(class),
+                class,
+                viewport_width,
+                viewport_height,
+                MermaidTheme::Default,
+            )
             .expect("class render");
         let er_svg = worker
-            .render_svg(hash_str(er), er, viewport_width, viewport_height, MermaidTheme::Default)
+            .render_svg(
+                hash_str(er),
+                er,
+                viewport_width,
+                viewport_height,
+                MermaidTheme::Default,
+            )
             .expect("er render");
         let gantt_svg = worker
-            .render_svg(hash_str(gantt), gantt, viewport_width, viewport_height, MermaidTheme::Default)
+            .render_svg(
+                hash_str(gantt),
+                gantt,
+                viewport_width,
+                viewport_height,
+                MermaidTheme::Default,
+            )
             .expect("gantt render");
 
         assert!(flow_svg.contains("<svg"));
@@ -6087,7 +6120,12 @@ mod tests {
         let width_bucket = MermaidRenderer::width_bucket(600.0);
         let scale_bucket = MermaidRenderer::scale_bucket(1.0);
         let (rgba, w, h) = worker
-            .rasterize_svg(&flow_svg, width_bucket, scale_bucket, MermaidTheme::Default.bg_fill())
+            .rasterize_svg(
+                &flow_svg,
+                width_bucket,
+                scale_bucket,
+                MermaidTheme::Default.bg_fill(),
+            )
             .expect("rasterize svg");
         assert!(!rgba.is_empty());
         assert_eq!(rgba.len(), (w as usize) * (h as usize) * 4);
@@ -6109,7 +6147,13 @@ mod tests {
         let viewport_height = 900;
 
         let svg = worker
-            .render_svg(hash_str(diagram), diagram, viewport_width, viewport_height, MermaidTheme::Default)
+            .render_svg(
+                hash_str(diagram),
+                diagram,
+                viewport_width,
+                viewport_height,
+                MermaidTheme::Default,
+            )
             .expect("diagram with html tags render");
 
         assert!(svg.contains("<svg"));
@@ -6140,7 +6184,13 @@ mod tests {
         let viewport_height = 900;
 
         let svg = worker
-            .render_svg(hash_str(diagram), diagram, viewport_width, viewport_height, MermaidTheme::Default)
+            .render_svg(
+                hash_str(diagram),
+                diagram,
+                viewport_width,
+                viewport_height,
+                MermaidTheme::Default,
+            )
             .expect("subgraph diagram render");
 
         assert!(svg.contains("<svg"));
@@ -6164,7 +6214,13 @@ mod tests {
         let viewport_height = 900;
 
         let svg = worker
-            .render_svg(hash_str(diagram), diagram, viewport_width, viewport_height, MermaidTheme::Default)
+            .render_svg(
+                hash_str(diagram),
+                diagram,
+                viewport_width,
+                viewport_height,
+                MermaidTheme::Default,
+            )
             .expect("ampersand in labels render");
 
         assert!(svg.contains("<svg"));
@@ -6304,7 +6360,12 @@ mod tests {
         let worker = test_worker();
 
         let err = worker
-            .rasterize_svg("not svg", 100, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
+            .rasterize_svg(
+                "not svg",
+                100,
+                MermaidRenderer::scale_bucket(1.0),
+                MermaidTheme::Default.bg_fill(),
+            )
             .unwrap_err();
         assert!(!err.is_empty());
     }
@@ -6315,7 +6376,12 @@ mod tests {
         let worker = test_worker();
         let svg = r#"<svg width="100" height="100" viewBox="0 0 0 0" xmlns="http://www.w3.org/2000/svg"></svg>"#;
         let (data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
+            .rasterize_svg(
+                svg,
+                0,
+                MermaidRenderer::scale_bucket(1.0),
+                MermaidTheme::Default.bg_fill(),
+            )
             .expect("rasterize svg");
         assert_eq!(data.len(), (w as usize) * (h as usize) * 4);
     }
@@ -6326,7 +6392,12 @@ mod tests {
         let worker = test_worker();
         let svg = r#"<svg width="10" height="10" viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><rect width="1000" height="1000" fill="red"/></svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
+            .rasterize_svg(
+                svg,
+                0,
+                MermaidRenderer::scale_bucket(1.0),
+                MermaidTheme::Default.bg_fill(),
+            )
             .expect("rasterize svg");
         assert_eq!((w, h), (10, 10));
     }
@@ -6337,7 +6408,12 @@ mod tests {
         let worker = test_worker();
         let svg = r#"<svg width="100" height="50" xmlns="http://www.w3.org/2000/svg"><rect x="-60" y="0" width="200" height="50" fill="red"/></svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
+            .rasterize_svg(
+                svg,
+                0,
+                MermaidRenderer::scale_bucket(1.0),
+                MermaidTheme::Default.bg_fill(),
+            )
             .expect("rasterize svg");
         assert!(w > 100);
         assert!(h >= 50);
@@ -6349,7 +6425,12 @@ mod tests {
         let worker = test_worker();
         let svg = r#"<svg width="100" height="100" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="0" width="100" height="200" fill="red"/></svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
+            .rasterize_svg(
+                svg,
+                0,
+                MermaidRenderer::scale_bucket(1.0),
+                MermaidTheme::Default.bg_fill(),
+            )
             .expect("rasterize svg");
         assert!(w >= 108);
         assert!(h >= 200);
@@ -6361,7 +6442,12 @@ mod tests {
         let worker = test_worker();
         let svg = r#"<svg width="4100" height="10" xmlns="http://www.w3.org/2000/svg"><rect width="4100" height="10" fill="red"/></svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
+            .rasterize_svg(
+                svg,
+                0,
+                MermaidRenderer::scale_bucket(1.0),
+                MermaidTheme::Default.bg_fill(),
+            )
             .expect("rasterize svg");
         assert!(w <= MermaidRenderer::MERMAID_MAX_RENDER_SIDE);
         assert!(h > 0);
@@ -6373,7 +6459,12 @@ mod tests {
         let worker = test_worker();
         let svg = r#"<svg width="10" height="10000" xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10000" fill="red"/></svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
+            .rasterize_svg(
+                svg,
+                0,
+                MermaidRenderer::scale_bucket(1.0),
+                MermaidTheme::Default.bg_fill(),
+            )
             .expect("rasterize svg");
         assert!(w > 0);
         assert!(h <= MermaidRenderer::MERMAID_MAX_RENDER_SIDE);
@@ -6385,7 +6476,12 @@ mod tests {
         let worker = test_worker();
         let svg = r#"<svg width="10" height="10" viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><rect width="0.1" height="0.1" fill="red"/></svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
+            .rasterize_svg(
+                svg,
+                0,
+                MermaidRenderer::scale_bucket(1.0),
+                MermaidTheme::Default.bg_fill(),
+            )
             .expect("rasterize svg");
         assert_eq!((w, h), (10, 10));
     }
@@ -6398,7 +6494,12 @@ mod tests {
         force_raw_tree_parse_fail_for_test();
         let svg = r#"<svg width="10" height="10" viewBox="0 0 10 10" xmlns="http://www.w3.org/2000/svg"><rect width="20" height="20" fill="red"/></svg>"#;
         let (data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
+            .rasterize_svg(
+                svg,
+                0,
+                MermaidRenderer::scale_bucket(1.0),
+                MermaidTheme::Default.bg_fill(),
+            )
             .expect("rasterize svg");
         assert_eq!(data.len(), (w as usize) * (h as usize) * 4);
         assert!(w > 0);
@@ -6475,7 +6576,12 @@ mod tests {
 <rect x="-50" y="-50" width="200" height="200" fill="red"/>
 </svg>"#;
         let (data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
+            .rasterize_svg(
+                svg,
+                0,
+                MermaidRenderer::scale_bucket(1.0),
+                MermaidTheme::Default.bg_fill(),
+            )
             .expect("rasterize svg");
         assert_eq!((w, h), (208, 208));
         assert_eq!(data.len(), (w as usize) * (h as usize) * 4);
@@ -6490,7 +6596,12 @@ mod tests {
  <rect width="0.1" height="0.1" fill="red"/>
  </svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
+            .rasterize_svg(
+                svg,
+                0,
+                MermaidRenderer::scale_bucket(1.0),
+                MermaidTheme::Default.bg_fill(),
+            )
             .expect("rasterize svg");
         assert_eq!((w, h), (10, 12));
     }
@@ -6504,7 +6615,12 @@ mod tests {
  <rect x="10" y="10" width="20" height="20" fill="red"/>
  </svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
+            .rasterize_svg(
+                svg,
+                0,
+                MermaidRenderer::scale_bucket(1.0),
+                MermaidTheme::Default.bg_fill(),
+            )
             .expect("rasterize svg");
         assert_eq!((w, h), (100, 100));
     }
@@ -6518,7 +6634,12 @@ mod tests {
 <rect width="10000" height="10000" fill="blue"/>
 </svg>"#;
         let (_data, w, h) = worker
-            .rasterize_svg(svg, 0, MermaidRenderer::scale_bucket(1.0), MermaidTheme::Default.bg_fill())
+            .rasterize_svg(
+                svg,
+                0,
+                MermaidRenderer::scale_bucket(1.0),
+                MermaidTheme::Default.bg_fill(),
+            )
             .expect("rasterize svg");
         assert!(w <= MermaidRenderer::MERMAID_MAX_RENDER_SIDE);
         assert!(h <= MermaidRenderer::MERMAID_MAX_RENDER_SIDE);
@@ -6946,7 +7067,11 @@ mod tests {
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         rendered = renderer.render_block(
-                            ui, "%% comment", 1.0, 14.0, MermaidTheme::Default,
+                            ui,
+                            "%% comment",
+                            1.0,
+                            14.0,
+                            MermaidTheme::Default,
                         );
                     },
                 );
@@ -6970,7 +7095,11 @@ mod tests {
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
                         rendered = renderer.render_block(
-                            ui, "%% comment", 1.0, 14.0, MermaidTheme::Default,
+                            ui,
+                            "%% comment",
+                            1.0,
+                            14.0,
+                            MermaidTheme::Default,
                         );
                     },
                 );
@@ -8305,15 +8434,28 @@ mod tests {
     #[test]
     fn test_parse_width_from_texture_key() {
         let key = MermaidRenderer::texture_key(0xABCD, 320, 100, [0, 0, 0, 255]);
-        assert_eq!(MermaidRenderer::parse_width_from_texture_key(&key), Some(320));
+        assert_eq!(
+            MermaidRenderer::parse_width_from_texture_key(&key),
+            Some(320)
+        );
 
         let key2 = MermaidRenderer::texture_key(0x1234, 1024, 200, [255, 255, 255, 255]);
-        assert_eq!(MermaidRenderer::parse_width_from_texture_key(&key2), Some(1024));
+        assert_eq!(
+            MermaidRenderer::parse_width_from_texture_key(&key2),
+            Some(1024)
+        );
 
         // Malformed keys
-        assert_eq!(MermaidRenderer::parse_width_from_texture_key("no-w-here"), None);
-        assert_eq!(MermaidRenderer::parse_width_from_texture_key("mermaid:abc:wNOT_A_NUM:s100:bg00000000"), None);
-        assert_eq!(MermaidRenderer::parse_width_from_texture_key(":w32"), None); // no trailing ':'
+        assert_eq!(
+            MermaidRenderer::parse_width_from_texture_key("no-w-here"),
+            None
+        );
+        assert_eq!(
+            MermaidRenderer::parse_width_from_texture_key("mermaid:abc:wNOT_A_NUM:s100:bg00000000"),
+            None
+        );
+        assert_eq!(MermaidRenderer::parse_width_from_texture_key(":w32"), None);
+        // no trailing ':'
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -8326,9 +8468,9 @@ mod tests {
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 let image = egui::ColorImage::new([2, 2], Color32::WHITE);
-                let tex = ui
-                    .ctx()
-                    .load_texture("test-latest", image, egui::TextureOptions::default());
+                let tex =
+                    ui.ctx()
+                        .load_texture("test-latest", image, egui::TextureOptions::default());
 
                 let svg_key: u64 = 42;
                 renderer.store_mermaid_texture("key_v1", tex.clone(), [2, 2], svg_key);
@@ -8382,10 +8524,18 @@ mod tests {
         renderer.poll_mermaid_results(&ctx);
 
         // SVG should be cached (always cached regardless of staleness)
-        assert!(renderer.mermaid_svg_cache.borrow_mut().get(&svg_key).is_some());
+        assert!(renderer
+            .mermaid_svg_cache
+            .borrow_mut()
+            .get(&svg_key)
+            .is_some());
 
         // Texture should NOT be uploaded (stale result)
-        assert!(renderer.mermaid_textures.borrow_mut().get(&texture_key_old).is_none());
+        assert!(renderer
+            .mermaid_textures
+            .borrow_mut()
+            .get(&texture_key_old)
+            .is_none());
 
         // Pending should be cleared
         assert!(!renderer.mermaid_pending.borrow().contains(&texture_key_old));
@@ -8492,7 +8642,10 @@ mod tests {
 
         // Debounce entry should exist after successful enqueue
         let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
-        assert!(renderer.mermaid_width_debounce.borrow().contains_key(&svg_key));
+        assert!(renderer
+            .mermaid_width_debounce
+            .borrow()
+            .contains_key(&svg_key));
 
         drop(job_rx);
     }
@@ -8533,7 +8686,10 @@ mod tests {
 
         // No debounce entry should be created on QueueFull
         let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
-        assert!(!renderer.mermaid_width_debounce.borrow().contains_key(&svg_key));
+        assert!(!renderer
+            .mermaid_width_debounce
+            .borrow()
+            .contains_key(&svg_key));
 
         drop(job_rx);
     }
@@ -8614,8 +8770,9 @@ mod tests {
         {
             let mut debounce = renderer.mermaid_width_debounce.borrow_mut();
             let entry = debounce.get_mut(&svg_key).unwrap();
-            entry.bucket_changed_at =
-                Some(Instant::now() - std::time::Duration::from_millis(MERMAID_RESIZE_DEBOUNCE_MS + 50));
+            entry.bucket_changed_at = Some(
+                Instant::now() - std::time::Duration::from_millis(MERMAID_RESIZE_DEBOUNCE_MS + 50),
+            );
         }
 
         // Re-render at width 600 — debounce should have expired, enqueue fires
@@ -8723,8 +8880,9 @@ mod tests {
         {
             let mut debounce = renderer.mermaid_width_debounce.borrow_mut();
             let entry = debounce.get_mut(&svg_key).unwrap();
-            entry.bucket_changed_at =
-                Some(Instant::now() - std::time::Duration::from_millis(MERMAID_RESIZE_DEBOUNCE_MS - 20));
+            entry.bucket_changed_at = Some(
+                Instant::now() - std::time::Duration::from_millis(MERMAID_RESIZE_DEBOUNCE_MS - 20),
+            );
         }
 
         // Width change to 600 — should reset the timer (trailing edge)

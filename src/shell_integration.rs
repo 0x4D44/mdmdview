@@ -119,9 +119,7 @@ pub fn reveal_in_file_manager(path: &Path) -> anyhow::Result<()> {
         let parent = abs_path
             .parent()
             .ok_or_else(|| anyhow::anyhow!("Cannot determine parent directory"))?;
-        std::process::Command::new("xdg-open")
-            .arg(parent)
-            .spawn()?;
+        std::process::Command::new("xdg-open").arg(parent).spawn()?;
     }
 
     Ok(())

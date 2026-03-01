@@ -36,7 +36,6 @@ const ASYNC_LOAD_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024;
 /// Maximum number of entries in the navigation history
 const MAX_HISTORY_SIZE: usize = 100;
 
-
 #[cfg(test)]
 thread_local! {
     static FORCED_APP_ACTIONS: RefCell<HashSet<&'static str>> = RefCell::new(HashSet::new());
@@ -635,11 +634,8 @@ impl MarkdownViewerApp {
         // Apply loaded settings to renderer
         app.renderer
             .set_allow_remote_images(app.settings.allow_remote_images);
-        app.renderer.set_mermaid_theme(
-            app.settings
-                .mermaid_theme
-                .resolve(app.settings.dark_mode),
-        );
+        app.renderer
+            .set_mermaid_theme(app.settings.mermaid_theme.resolve(app.settings.dark_mode));
         // Load welcome content by default
         app.load_welcome_from_samples(SAMPLE_FILES, false);
 
@@ -1318,7 +1314,9 @@ impl MarkdownViewerApp {
     /// Copy the currently open file to the system clipboard as a file
     /// (like Explorer's Copy), so it can be pasted into Discord, email, etc.
     fn copy_file_to_clipboard(&mut self) {
-        let Some(path) = &self.current_file else { return };
+        let Some(path) = &self.current_file else {
+            return;
+        };
         if !path.exists() {
             self.error_message = Some("File no longer exists on disk".into());
             return;
@@ -1334,7 +1332,9 @@ impl MarkdownViewerApp {
 
     /// Open the OS file manager with the current file's location.
     fn open_containing_folder(&mut self) {
-        let Some(path) = &self.current_file else { return };
+        let Some(path) = &self.current_file else {
+            return;
+        };
         if !path.exists() {
             self.error_message = Some("File no longer exists on disk".into());
             return;
@@ -1983,31 +1983,28 @@ impl MarkdownViewerApp {
         });
 
         #[cfg(feature = "mermaid-quickjs")]
-        ui.menu_button(Self::menu_text_with_mnemonic(
-            None,
-            "Mermaid Theme",
-            'T',
-            alt_pressed,
-            menu_text_color,
-        ), |ui| {
-            let current = self.settings.mermaid_theme;
-            for variant in MermaidTheme::ALL {
-                let selected = current == variant;
-                if ui
-                    .add(egui::SelectableLabel::new(selected, variant.label()))
-                    .clicked()
-                {
-                    self.settings.mermaid_theme = variant;
-                    let resolved = variant.resolve(self.settings.dark_mode);
-                    self.renderer.set_mermaid_theme(resolved);
-                    self.renderer.clear_mermaid_cache();
-                    if let Err(e) = save_app_settings(&self.settings) {
-                        eprintln!("Failed to save app settings: {e}");
+        ui.menu_button(
+            Self::menu_text_with_mnemonic(None, "Mermaid Theme", 'T', alt_pressed, menu_text_color),
+            |ui| {
+                let current = self.settings.mermaid_theme;
+                for variant in MermaidTheme::ALL {
+                    let selected = current == variant;
+                    if ui
+                        .add(egui::SelectableLabel::new(selected, variant.label()))
+                        .clicked()
+                    {
+                        self.settings.mermaid_theme = variant;
+                        let resolved = variant.resolve(self.settings.dark_mode);
+                        self.renderer.set_mermaid_theme(resolved);
+                        self.renderer.clear_mermaid_cache();
+                        if let Err(e) = save_app_settings(&self.settings) {
+                            eprintln!("Failed to save app settings: {e}");
+                        }
+                        ui.close_menu();
                     }
-                    ui.close_menu();
                 }
-            }
-        });
+            },
+        );
 
         ui.separator();
 
@@ -2227,10 +2224,7 @@ impl MarkdownViewerApp {
         apply_dark_mode_visuals(ctx, self.settings.dark_mode);
         self.renderer.set_dark_mode(self.settings.dark_mode);
         // Update mermaid theme resolution (Auto resolves differently for dark/light)
-        let resolved = self
-            .settings
-            .mermaid_theme
-            .resolve(self.settings.dark_mode);
+        let resolved = self.settings.mermaid_theme.resolve(self.settings.dark_mode);
         self.renderer.set_mermaid_theme(resolved);
         #[cfg(feature = "mermaid-quickjs")]
         self.renderer.clear_mermaid_cache();
