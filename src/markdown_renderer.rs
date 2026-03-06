@@ -2874,14 +2874,18 @@ impl MarkdownRenderer {
                 self.render_text_with_emojis(ui, &fixed_text, size, style);
             }
             InlineSpan::Code(code) => {
-                // Inline code: adapt style to theme (light vs dark)
+                // Inline code: adapt style to theme (light vs dark).
+                // Use the caller's font size when set (e.g. inside headers) so
+                // inline code matches the surrounding text; fall back to the
+                // dedicated code size for body text.
                 ui.spacing_mut().item_spacing.x = 0.0;
                 let tc = ThemeColors::current(ui.visuals().dark_mode);
                 let (bg, fg) = (tc.inline_code_bg, tc.inline_code_fg);
+                let code_size = font_size.unwrap_or(self.font_sizes.code);
                 let response = ui.add(
                     egui::Label::new(
                         RichText::new(code.clone())
-                            .size(self.font_sizes.code)
+                            .size(code_size)
                             .family(egui::FontFamily::Monospace)
                             .background_color(bg)
                             .color(fg),
