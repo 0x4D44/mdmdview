@@ -102,3 +102,53 @@ jobs:
           files: |
             artifacts/*.zip
             artifacts/*.msi
+
+  winget:
+    name: Publish WinGet Manifest
+    needs: release
+    runs-on: windows-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    env:
+      WINGET_PACKAGE_IDENTIFIER: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
+      WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_CREATE_GITHUB_TOKEN }}
+    steps:
+      - name: Check WinGet configuration
+        id: winget-config
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINGET_PACKAGE_IDENTIFIER)) {
+            Write-Host "::notice::Skipping WinGet publish because repo variable WINGET_PACKAGE_IDENTIFIER is not set."
+            exit 0
+          }
+
+          if ([string]::IsNullOrWhiteSpace($env:WINGET_CREATE_GITHUB_TOKEN)) {
+            Write-Host "::notice::Skipping WinGet publish because secret WINGET_CREATE_GITHUB_TOKEN is not set."
+            exit 0
+          }
+
+          "enabled=true" >> $env:GITHUB_OUTPUT
+
+      - name: Install WinGetCreate
+        if: steps.winget-config.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          .\wingetcreate.exe --version
+
+      - name: Submit WinGet manifest update
+        if: steps.winget-config.outputs.enabled == 'true'
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag -replace '^v', ''
+          $installerUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/mdmdview-$tag-windows-x86_64.msi"
+
+          Write-Host "Updating WinGet package $env:WINGET_PACKAGE_IDENTIFIER"
+          Write-Host "Version: $version"
+          Write-Host "Installer URL: $installerUrl"
+
+          .\wingetcreate.exe update $env:WINGET_PACKAGE_IDENTIFIER `
+            --version $version `
+            --urls $installerUrl `
+            --token $env:WINGET_CREATE_GITHUB_TOKEN `
+            --submit
