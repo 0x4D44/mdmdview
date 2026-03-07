@@ -2253,6 +2253,20 @@ impl MarkdownViewerApp {
         egui::Layout::left_to_right(egui::Align::Center)
     }
 
+    fn left_aligned_truncated_label(
+        ui: &mut egui::Ui,
+        width: f32,
+        text: impl Into<egui::WidgetText>,
+    ) {
+        ui.allocate_ui_with_layout(
+            egui::vec2(width.max(0.0), ui.spacing().interact_size.y),
+            Self::status_bar_left_layout(),
+            |ui| {
+                ui.add(Label::new(text).truncate(true));
+            },
+        );
+    }
+
     fn measure_status_text(ui: &egui::Ui, text: &str) -> f32 {
         ui.fonts(|fonts| {
             fonts
@@ -2452,10 +2466,7 @@ impl MarkdownViewerApp {
                             }
 
                             if let Some(max_width) = max_width {
-                                ui.add_sized(
-                                    [max_width, ui.spacing().interact_size.y],
-                                    Label::new(rich).truncate(true),
-                                );
+                                Self::left_aligned_truncated_label(ui, max_width, rich);
                             } else {
                                 ui.label(rich);
                             }
@@ -2475,10 +2486,7 @@ impl MarkdownViewerApp {
             None => "No file loaded".to_string(),
         };
 
-        ui.add_sized(
-            [ui.available_width().max(0.0), ui.spacing().interact_size.y],
-            Label::new(label).truncate(true),
-        );
+        Self::left_aligned_truncated_label(ui, ui.available_width(), label);
     }
 
     /// Render the status bar
