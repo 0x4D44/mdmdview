@@ -178,7 +178,6 @@ jobs:
         shell: pwsh
         run: |
           Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
-          .\wingetcreate.exe version
 
       - name: Submit WinGet manifest update
         if: steps.winget-config.outputs.enabled == 'true'
