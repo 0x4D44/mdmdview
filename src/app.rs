@@ -10,8 +10,9 @@ use anyhow::{bail, Result};
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use egui::text::LayoutJob;
 use egui::text::TextFormat;
-use egui::{menu, CentralPanel, Color32, Context, RichText, TopBottomPanel};
+use egui::{menu, CentralPanel, Color32, Context, Label, RichText, TopBottomPanel};
 use egui::{TextEdit, TextStyle};
+use egui_extras::{Size, StripBuilder};
 use image::{imageops, RgbaImage};
 #[cfg(not(test))]
 use rfd::FileDialog;
@@ -35,6 +36,10 @@ const BUILD_TIMESTAMP: &str = env!("MDMDVIEW_BUILD_TIMESTAMP");
 const ASYNC_LOAD_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024;
 /// Maximum number of entries in the navigation history
 const MAX_HISTORY_SIZE: usize = 100;
+const STATUS_BAR_LEFT_MIN_WIDTH: f32 = 220.0;
+const STATUS_BAR_THEME_WIDTH: f32 = 64.0;
+const STATUS_BAR_SEPARATOR_WIDTH: f32 = 10.0;
+const STATUS_BAR_PENDING_MAX_WIDTH: f32 = 220.0;
 
 #[cfg(test)]
 thread_local! {
@@ -2237,119 +2242,298 @@ impl MarkdownViewerApp {
         let _ = save_app_settings(&self.settings);
     }
 
+    fn status_view_label(&self) -> &'static str {
+        match self.view_mode {
+            ViewMode::Rendered => "Preview",
+            ViewMode::Raw => "Raw source",
+        }
+    }
+
+    fn measure_status_text(ui: &egui::Ui, text: &str) -> f32 {
+        ui.fonts(|fonts| {
+            fonts
+                .layout_no_wrap(
+                    text.to_owned(),
+                    TextStyle::Body.resolve(ui.style()),
+                    ui.visuals().text_color(),
+                )
+                .size()
+                .x
+        })
+    }
+
+    fn take_chars(text: &str, count: usize) -> String {
+        text.chars().take(count).collect()
+    }
+
+    fn take_last_chars(text: &str, count: usize) -> String {
+        let mut chars: Vec<char> = text.chars().rev().take(count).collect();
+        chars.reverse();
+        chars.into_iter().collect()
+    }
+
+    fn middle_ellipsize(text: &str, max_chars: usize) -> String {
+        let total_chars = text.chars().count();
+        if total_chars <= max_chars {
+            return text.to_string();
+        }
+
+        if max_chars <= 3 {
+            return ".".repeat(max_chars);
+        }
+
+        let file_name = text
+            .rsplit(['\\', '/'])
+            .next()
+            .filter(|segment| !segment.is_empty());
+
+        if let Some(file_name) = file_name {
+            let file_name_chars = file_name.chars().count();
+            if file_name_chars + 3 < max_chars {
+                let prefix_chars = max_chars - file_name_chars - 3;
+                return format!("{}...{}", Self::take_chars(text, prefix_chars), file_name);
+            }
+        }
+
+        let head_chars = (max_chars - 3) / 2;
+        let tail_chars = max_chars - 3 - head_chars;
+        format!(
+            "{}...{}",
+            Self::take_chars(text, head_chars),
+            Self::take_last_chars(text, tail_chars)
+        )
+    }
+
+    fn fit_middle_ellipsized_label(
+        ui: &egui::Ui,
+        prefix: &str,
+        value: &str,
+        max_width: f32,
+    ) -> String {
+        let full_label = format!("{prefix}{value}");
+        if max_width <= 0.0 || Self::measure_status_text(ui, &full_label) <= max_width {
+            return full_label;
+        }
+
+        let value_chars = value.chars().count();
+        let mut best = format!("{prefix}...");
+        let mut low = 3;
+        let mut high = value_chars.max(3);
+
+        while low <= high {
+            let mid = (low + high) / 2;
+            let candidate = format!("{prefix}{}", Self::middle_ellipsize(value, mid));
+            if Self::measure_status_text(ui, &candidate) <= max_width {
+                best = candidate;
+                low = mid + 1;
+            } else {
+                high = mid.saturating_sub(1);
+            }
+        }
+
+        best
+    }
+
+    fn status_summary_candidates(&self) -> Vec<String> {
+        let word_count = self
+            .readability_stats
+            .as_ref()
+            .map(|stats| stats.word_count)
+            .unwrap_or(0);
+        let char_count = self.current_content.len();
+
+        let mut candidates = vec![format!("Words: {word_count} | Chars: {char_count}")];
+
+        if let Some(stats) = &self.readability_stats {
+            candidates.insert(
+                0,
+                format!(
+                    "Words: {word_count} | Flesch: {:.0} | Chars: {char_count}",
+                    stats.flesch_ease
+                ),
+            );
+        } else if !self.current_content.is_empty() {
+            candidates.insert(
+                0,
+                format!("Words: {word_count} | Flesch: ... | Chars: {char_count}"),
+            );
+        }
+
+        candidates.push(format!("Words: {word_count}"));
+        candidates.push(format!("Chars: {char_count}"));
+        candidates.push(String::new());
+        candidates
+    }
+
+    fn pick_status_summary(&self, ui: &egui::Ui, max_width: f32) -> String {
+        self.status_summary_candidates()
+            .into_iter()
+            .find(|candidate| {
+                candidate.is_empty() || Self::measure_status_text(ui, candidate) <= max_width
+            })
+            .unwrap_or_default()
+    }
+
+    fn render_status_bar_left(&mut self, ui: &mut egui::Ui) {
+        let tc = ThemeColors::current(self.settings.dark_mode);
+        let mut aux_labels: Vec<(String, Option<Color32>, bool, Option<f32>)> = Vec::new();
+
+        if let Some(pending) = &self.pending_file_load {
+            aux_labels.push((
+                format!("Loading {}", pending.path.display()),
+                Some(tc.status_loading),
+                false,
+                Some(STATUS_BAR_PENDING_MAX_WIDTH),
+            ));
+        }
+
+        if !self.pending_files.is_empty() {
+            aux_labels.push((
+                format!("{} files in queue", self.pending_files.len()),
+                Some(tc.status_queue),
+                false,
+                None,
+            ));
+            aux_labels.push((
+                "(Alt+Right for next)".to_string(),
+                Some(tc.status_hint),
+                true,
+                None,
+            ));
+        }
+
+        if let Some((ref msg, when)) = self.status_message {
+            if when.elapsed() < Duration::from_secs(3) {
+                aux_labels.push((
+                    msg.clone(),
+                    Some(Color32::from_rgb(120, 200, 120)),
+                    false,
+                    None,
+                ));
+            } else {
+                self.status_message = None;
+            }
+        }
+
+        let aux_width = aux_labels
+            .iter()
+            .fold(0.0, |width, (text, _, _, max_width)| {
+                let measured = Self::measure_status_text(ui, text);
+                let capped = max_width.map(|max| measured.min(max)).unwrap_or(measured);
+                width + STATUS_BAR_SEPARATOR_WIDTH + capped
+            });
+
+        if aux_width <= 0.0 {
+            self.render_primary_status_label(ui);
+            return;
+        }
+
+        StripBuilder::new(ui)
+            .clip(true)
+            .size(Size::remainder())
+            .size(Size::exact(aux_width))
+            .horizontal(|mut strip| {
+                strip.cell(|ui| self.render_primary_status_label(ui));
+                strip.cell(|ui| {
+                    ui.horizontal(|ui| {
+                        for (text, color, italics, max_width) in aux_labels {
+                            ui.separator();
+                            let mut rich = RichText::new(text);
+                            if let Some(color) = color {
+                                rich = rich.color(color);
+                            }
+                            if italics {
+                                rich = rich.italics();
+                            }
+
+                            if let Some(max_width) = max_width {
+                                ui.add_sized(
+                                    [max_width, ui.spacing().interact_size.y],
+                                    Label::new(rich).truncate(true),
+                                );
+                            } else {
+                                ui.label(rich);
+                            }
+                        }
+                    });
+                });
+            });
+    }
+
+    fn render_primary_status_label(&self, ui: &mut egui::Ui) {
+        let label = match &self.current_file {
+            Some(path) => {
+                let display = path.display().to_string();
+                Self::fit_middle_ellipsized_label(ui, "File: ", &display, ui.available_width())
+            }
+            None if !self.parsed_elements.is_empty() => "Sample file".to_string(),
+            None => "No file loaded".to_string(),
+        };
+
+        ui.add_sized(
+            [ui.available_width().max(0.0), ui.spacing().interact_size.y],
+            Label::new(label).truncate(true),
+        );
+    }
+
     /// Render the status bar
     fn render_status_bar(&mut self, ctx: &Context) {
         TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                // Current file info
-                if let Some(path) = &self.current_file {
-                    ui.label(format!("File: {}", path.display()));
-                } else if !self.parsed_elements.is_empty() {
-                    ui.label("Sample file");
-                } else {
-                    ui.label("No file loaded");
-                }
+            let total_width = ui.available_width();
+            let max_summary_width =
+                (total_width - STATUS_BAR_LEFT_MIN_WIDTH - STATUS_BAR_THEME_WIDTH).max(0.0);
+            let status = self.pick_status_summary(ui, max_summary_width);
+            let status_width = if status.is_empty() {
+                0.0
+            } else {
+                Self::measure_status_text(ui, &status) + STATUS_BAR_SEPARATOR_WIDTH
+            };
+            let right_width = STATUS_BAR_THEME_WIDTH + status_width;
 
-                if let Some(pending) = &self.pending_file_load {
-                    let tc = ThemeColors::current(self.settings.dark_mode);
-                    ui.separator();
-                    ui.label(
-                        RichText::new(format!("Loading {}", pending.path.display()))
-                            .color(tc.status_loading),
-                    );
-                }
+            StripBuilder::new(ui)
+                .clip(true)
+                .size(Size::remainder())
+                .size(Size::exact(right_width))
+                .horizontal(|mut strip| {
+                    strip.cell(|ui| self.render_status_bar_left(ui));
+                    strip.cell(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let label = if self.settings.dark_mode {
+                                "Dark"
+                            } else {
+                                "Light"
+                            };
+                            if ui.small_button(label).clicked() {
+                                self.theme_toggle_requested = true;
+                            }
 
-                // Show pending file count if files are queued
-                if !self.pending_files.is_empty() {
-                    let tc = ThemeColors::current(self.settings.dark_mode);
-                    ui.separator();
-                    ui.label(
-                        RichText::new(format!("{} files in queue", self.pending_files.len()))
-                            .color(tc.status_queue),
-                    );
-
-                    ui.label(
-                        RichText::new("(Alt+Right for next)")
-                            .color(tc.status_hint)
-                            .italics(),
-                    );
-                }
-
-                // Transient status message (e.g., "Copied to clipboard")
-                if let Some((ref msg, when)) = self.status_message {
-                    if when.elapsed() < std::time::Duration::from_secs(3) {
-                        ui.separator();
-                        ui.colored_label(egui::Color32::from_rgb(120, 200, 120), msg);
-                    } else {
-                        self.status_message = None;
-                    }
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Theme toggle button (rightmost)
-                    let label = if self.settings.dark_mode {
-                        "Dark"
-                    } else {
-                        "Light"
-                    };
-                    if ui.small_button(label).clicked() {
-                        self.theme_toggle_requested = true;
-                    }
-                    ui.separator();
-
-                    // Document stats (word_count from cached readability stats to avoid per-frame calculation)
-                    let element_count = self.parsed_elements.len();
-                    let word_count = self
-                        .readability_stats
-                        .as_ref()
-                        .map(|s| s.word_count)
-                        .unwrap_or(0);
-                    let char_count = self.current_content.len();
-                    let mode = match self.view_mode {
-                        ViewMode::Rendered => "Rendered",
-                        ViewMode::Raw => "Raw",
-                    };
-
-                    // Readability score
-                    let readability = match &self.readability_stats {
-                        Some(stats) => format!("Flesch: {:.0}", stats.flesch_ease),
-                        None if !self.current_content.is_empty() => "Flesch: ...".to_string(),
-                        None => String::new(),
-                    };
-
-                    let status = if readability.is_empty() {
-                        format!(
-                            "Mode: {} | Elements: {} | Words: {} | Characters: {}",
-                            mode, element_count, word_count, char_count
-                        )
-                    } else {
-                        format!(
-                            "Mode: {} | Elements: {} | Words: {} | {} | Characters: {}",
-                            mode, element_count, word_count, readability, char_count
-                        )
-                    };
-
-                    #[cfg(test)]
-                    {
-                        ui.label(status);
-                        self.render_status_tooltip(ui);
-                    }
-                    #[cfg(not(test))]
-                    {
-                        ui.label(status)
-                            .on_hover_ui(|ui| self.render_status_tooltip(ui));
-                    }
-                    if app_action_triggered(false, "status_hover") {
-                        self.render_status_tooltip(ui);
-                    }
+                            if !status.is_empty() {
+                                ui.separator();
+                                #[cfg(test)]
+                                {
+                                    ui.label(&status);
+                                    self.render_status_tooltip(ui);
+                                }
+                                #[cfg(not(test))]
+                                {
+                                    ui.label(&status)
+                                        .on_hover_ui(|ui| self.render_status_tooltip(ui));
+                                }
+                                if app_action_triggered(false, "status_hover") {
+                                    self.render_status_tooltip(ui);
+                                }
+                            }
+                        });
+                    });
                 });
-            });
         });
     }
 
     fn render_status_tooltip(&self, ui: &mut egui::Ui) {
         ui.label(format!("Version: {}", BUILD_VERSION));
         ui.label(format!("Built: {}", BUILD_TIMESTAMP));
+        ui.label(format!("View: {}", self.status_view_label()));
+        ui.label(format!("Parsed elements: {}", self.parsed_elements.len()));
 
         if let Some(stats) = &self.readability_stats {
             ui.separator();
@@ -6076,6 +6260,68 @@ The end.
 
         let ctx = egui::Context::default();
         let _ = ctx.run(default_input(), |ctx| {
+            app.render_status_bar(ctx);
+        });
+    }
+
+    #[test]
+    fn test_middle_ellipsize_preserves_filename_when_possible() {
+        let path = r"C:\language\mdmdview\wrk_docs\2026.02.26 - HLD - Munt.md";
+
+        let shortened = MarkdownViewerApp::middle_ellipsize(path, 40);
+
+        assert!(shortened.starts_with("C:\\language"));
+        assert!(shortened.contains("..."));
+        assert!(shortened.ends_with("2026.02.26 - HLD - Munt.md"));
+    }
+
+    #[test]
+    fn test_status_summary_candidates_drop_debug_fields() {
+        let mut app = MarkdownViewerApp::new();
+        app.current_content = "Hello world.".to_string();
+        app.readability_stats = Some(ReadabilityStats {
+            flesch_ease: 95.0,
+            grade_level: 3.0,
+            word_count: 2,
+            sentences: 1,
+            syllables: 3,
+        });
+
+        let candidates = app.status_summary_candidates();
+
+        assert!(candidates[0].contains("Words: 2"));
+        assert!(candidates[0].contains("Flesch: 95"));
+        assert!(candidates[0].contains("Chars: 12"));
+        assert!(!candidates[0].contains("Mode:"));
+        assert!(!candidates[0].contains("Elements:"));
+    }
+
+    #[test]
+    fn test_render_status_bar_handles_narrow_window_with_long_path() {
+        let mut app = MarkdownViewerApp::new();
+        app.current_file = Some(PathBuf::from(
+            r"C:\language\mdmdview\wrk_docs\2026.02.26 - HLD - Munt Research V3.md",
+        ));
+        app.current_content = "Hello world.".to_string();
+        app.parsed_elements = vec![MarkdownElement::Paragraph(vec![InlineSpan::Text(
+            "Hello world.".to_string(),
+        )])];
+        app.readability_stats = Some(ReadabilityStats {
+            flesch_ease: 95.0,
+            grade_level: 3.0,
+            word_count: 2,
+            sentences: 1,
+            syllables: 3,
+        });
+
+        let mut input = default_input();
+        input.screen_rect = Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(420.0, 80.0),
+        ));
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(input, |ctx| {
             app.render_status_bar(ctx);
         });
     }
