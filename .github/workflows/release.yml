@@ -149,6 +149,7 @@ jobs:
     env:
       WINGET_PACKAGE_IDENTIFIER: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
       WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_CREATE_GITHUB_TOKEN }}
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
     steps:
       - name: Check WinGet configuration
         id: winget-config
@@ -159,11 +160,17 @@ jobs:
             exit 0
           }
 
-          if ([string]::IsNullOrWhiteSpace($env:WINGET_CREATE_GITHUB_TOKEN)) {
-            Write-Host "::notice::Skipping WinGet publish because secret WINGET_CREATE_GITHUB_TOKEN is not set."
+          $token = $env:WINGET_CREATE_GITHUB_TOKEN
+          if ([string]::IsNullOrWhiteSpace($token)) {
+            $token = $env:WINGET_TOKEN
+          }
+
+          if ([string]::IsNullOrWhiteSpace($token)) {
+            Write-Host "::notice::Skipping WinGet publish because neither WINGET_CREATE_GITHUB_TOKEN nor WINGET_TOKEN is set."
             exit 0
           }
 
+          "winget_token=$token" >> $env:GITHUB_OUTPUT
           "enabled=true" >> $env:GITHUB_OUTPUT
 
       - name: Install WinGetCreate
@@ -188,5 +195,5 @@ jobs:
           .\wingetcreate.exe update $env:WINGET_PACKAGE_IDENTIFIER `
             --version $version `
             --urls $installerUrl `
-            --token $env:WINGET_CREATE_GITHUB_TOKEN `
+            --token "${{ steps.winget-config.outputs.winget_token }}" `
             --submit
