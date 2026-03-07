@@ -2249,6 +2249,10 @@ impl MarkdownViewerApp {
         }
     }
 
+    fn status_bar_left_layout() -> egui::Layout {
+        egui::Layout::left_to_right(egui::Align::Center)
+    }
+
     fn measure_status_text(ui: &egui::Ui, text: &str) -> f32 {
         ui.fonts(|fonts| {
             fonts
@@ -2430,6 +2434,7 @@ impl MarkdownViewerApp {
 
         StripBuilder::new(ui)
             .clip(true)
+            .cell_layout(Self::status_bar_left_layout())
             .size(Size::remainder())
             .size(Size::exact(aux_width))
             .horizontal(|mut strip| {
@@ -2492,6 +2497,7 @@ impl MarkdownViewerApp {
 
             StripBuilder::new(ui)
                 .clip(true)
+                .cell_layout(Self::status_bar_left_layout())
                 .size(Size::remainder())
                 .size(Size::exact(right_width))
                 .horizontal(|mut strip| {
@@ -6273,6 +6279,14 @@ The end.
         assert!(shortened.starts_with("C:\\language"));
         assert!(shortened.contains("..."));
         assert!(shortened.ends_with("2026.02.26 - HLD - Munt.md"));
+    }
+
+    #[test]
+    fn test_status_bar_left_layout_anchors_labels_to_left() {
+        let layout = MarkdownViewerApp::status_bar_left_layout();
+
+        assert_eq!(layout.horizontal_placement(), egui::Align::LEFT);
+        assert!(!layout.horizontal_justify());
     }
 
     #[test]
