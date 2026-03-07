@@ -6,6 +6,10 @@ on:
       - "v*"
   workflow_dispatch:
     inputs:
+      release_ref:
+        description: "Existing tag to rebuild and publish (for example: v1.13.2)"
+        required: false
+        default: ""
       toolchain:
         description: "Rust toolchain version"
         required: false
@@ -15,13 +19,47 @@ permissions:
   contents: write
 
 jobs:
+  resolve:
+    name: Resolve Release Ref
+    runs-on: ubuntu-latest
+    outputs:
+      release_ref: ${{ steps.resolve.outputs.release_ref }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+    steps:
+      - name: Resolve target ref
+        id: resolve
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            ref="${GITHUB_REF#refs/tags/}"
+            tag="$ref"
+          else
+            ref="${{ github.event.inputs.release_ref }}"
+            if [[ -z "$ref" ]]; then
+              echo "::error::workflow_dispatch requires release_ref to be set to an existing tag such as v1.13.2"
+              exit 1
+            fi
+            tag="${ref#refs/tags/}"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9] ]]; then
+            echo "::error::Release ref must resolve to a semver-style tag like v1.13.2"
+            exit 1
+          fi
+
+          echo "release_ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+
   build:
     name: Build (Windows)
+    needs: resolve
     runs-on: windows-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.release_ref }}
 
       - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -69,22 +107,22 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           Copy-Item target/release/mdmdview.exe dist/mdmdview.exe
-          Compress-Archive -Path dist/mdmdview.exe -DestinationPath "mdmdview-${{ github.ref_name }}-windows-x86_64.zip"
-          Copy-Item target/wix/*.msi "mdmdview-${{ github.ref_name }}-windows-x86_64.msi"
+          Compress-Archive -Path dist/mdmdview.exe -DestinationPath "mdmdview-${{ needs.resolve.outputs.release_tag }}-windows-x86_64.zip"
+          Copy-Item target/wix/*.msi "mdmdview-${{ needs.resolve.outputs.release_tag }}-windows-x86_64.msi"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: mdmdview-Windows
           path: |
-            mdmdview-${{ github.ref_name }}-windows-x86_64.zip
-            mdmdview-${{ github.ref_name }}-windows-x86_64.msi
+            mdmdview-${{ needs.resolve.outputs.release_tag }}-windows-x86_64.zip
+            mdmdview-${{ needs.resolve.outputs.release_tag }}-windows-x86_64.msi
 
   release:
     name: Publish Release
-    needs: build
+    needs: [resolve, build]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -95,8 +133,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
+          tag_name: ${{ needs.resolve.outputs.release_tag }}
+          name: ${{ needs.resolve.outputs.release_tag }}
           draft: false
           generate_release_notes: true
           files: |
@@ -105,9 +143,9 @@ jobs:
 
   winget:
     name: Publish WinGet Manifest
-    needs: release
+    needs: [resolve, release]
     runs-on: windows-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     env:
       WINGET_PACKAGE_IDENTIFIER: ${{ vars.WINGET_PACKAGE_IDENTIFIER }}
       WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_CREATE_GITHUB_TOKEN }}
@@ -139,7 +177,7 @@ jobs:
         if: steps.winget-config.outputs.enabled == 'true'
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = "${{ needs.resolve.outputs.release_tag }}"
           $version = $tag -replace '^v', ''
           $installerUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/mdmdview-$tag-windows-x86_64.msi"
 
