@@ -107,6 +107,20 @@
                             KeyPath='yes'/>
                     </Component>
 
+                    <Component Id='PathEntry' Guid='*'>
+                        <Environment Id='PathEnvironmentVariable'
+                            Name='PATH'
+                            Value='[APPLICATIONFOLDER]'
+                            Part='last'
+                            Action='set'
+                            System='yes'
+                            Permanent='no'/>
+                        <RegistryValue Root='HKLM'
+                            Key='Software\mdmdview\Installer'
+                            Name='PathEntry'
+                            Type='integer' Value='1' KeyPath='yes'/>
+                    </Component>
+
                 </Directory>
                 </Directory>
             </Directory>
@@ -163,6 +177,7 @@
             <ComponentRef Id='License'/>
             <ComponentRef Id='binary0'/>
             <ComponentRef Id='AppRegistration'/>
+            <ComponentRef Id='PathEntry'/>
             <ComponentRef Id='ApplicationShortcut'/>
 
             <Feature
