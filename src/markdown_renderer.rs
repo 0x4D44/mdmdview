@@ -200,6 +200,11 @@ const IMAGE_MAX_PENDING: usize = 64;
 const IMAGE_FAILURE_BACKOFF: Duration = Duration::from_secs(5);
 const EMOJI_TEXTURE_CACHE_CAPACITY: usize = 512;
 const IMAGE_FAILURE_CACHE_CAPACITY: usize = 256;
+/// Tolerance window for image timestamp comparison.  Timestamps that differ
+/// by less than this are treated as identical.  This prevents infinite reload
+/// loops on filesystems (e.g. WSL's 9P) where `metadata().modified()` returns
+/// slightly different values on successive calls for the same unmodified file.
+const IMAGE_TIMESTAMP_TOLERANCE: Duration = Duration::from_secs(30);
 /// Maximum total bytes for the image texture cache (100 MB).
 /// When exceeded, oldest entries are evicted until under the limit.
 const MAX_IMAGE_TEXTURE_CACHE_BYTES: usize = 100 * 1024 * 1024;
@@ -5797,7 +5802,18 @@ impl MarkdownRenderer {
         cached_modified: Option<SystemTime>,
         current: Option<SystemTime>,
     ) -> bool {
-        cached_modified != current
+        match (cached_modified, current) {
+            (Some(a), Some(b)) => {
+                // Treat timestamps within the tolerance window as identical.
+                let delta = if a > b { a.duration_since(b) } else { b.duration_since(a) };
+                match delta {
+                    Ok(d) => d > IMAGE_TIMESTAMP_TOLERANCE,
+                    Err(_) => true, // clock went backwards — treat as stale
+                }
+            }
+            (None, None) => false,
+            _ => true, // one side is None — file appeared or disappeared
+        }
     }
 
     fn image_source_stale(cached_modified: Option<SystemTime>, path: &Path) -> bool {
@@ -7356,21 +7372,22 @@ mod tests {
 
     #[test]
     fn test_image_source_stale_detects_file_changes() {
-        use std::time::Duration as StdDuration;
-
         let dir = tempfile::tempdir().expect("temp dir");
         let file_path = dir.path().join("image.bin");
         std::fs::write(&file_path, [1u8, 2, 3, 4]).expect("write image");
         let initial = MarkdownRenderer::disk_image_timestamp(&file_path);
+
+        // Unchanged file → not stale
         assert!(!MarkdownRenderer::image_source_stale(initial, &file_path));
 
-        std::thread::sleep(StdDuration::from_millis(5));
-        std::fs::write(&file_path, [4u8, 3, 2, 1]).expect("rewrite image");
-
-        assert!(MarkdownRenderer::image_source_stale(initial, &file_path));
-
+        // Deleted file → stale (cached is Some, disk is gone)
         std::fs::remove_file(&file_path).expect("remove image");
         assert!(MarkdownRenderer::image_source_stale(initial, &file_path));
+
+        // A timestamp far in the past → stale (beyond tolerance)
+        std::fs::write(&file_path, [4u8, 3, 2, 1]).expect("rewrite image");
+        let old = Some(SystemTime::UNIX_EPOCH);
+        assert!(MarkdownRenderer::image_source_stale(old, &file_path));
     }
 
     #[test]
@@ -7382,6 +7399,7 @@ mod tests {
     #[test]
     fn test_image_source_stale_with_timestamp_combinations() {
         let stamp = SystemTime::UNIX_EPOCH;
+        // One side None → stale (file appeared or disappeared)
         assert!(MarkdownRenderer::image_source_stale_with_timestamp(
             Some(stamp),
             None
@@ -7390,8 +7408,34 @@ mod tests {
             None,
             Some(stamp)
         ));
+        // Both None → not stale
         assert!(!MarkdownRenderer::image_source_stale_with_timestamp(
             None, None
+        ));
+        // Same timestamp → not stale
+        assert!(!MarkdownRenderer::image_source_stale_with_timestamp(
+            Some(stamp),
+            Some(stamp)
+        ));
+        // Within tolerance → not stale
+        let nearby = stamp + Duration::from_secs(5);
+        assert!(!MarkdownRenderer::image_source_stale_with_timestamp(
+            Some(stamp),
+            Some(nearby)
+        ));
+        assert!(!MarkdownRenderer::image_source_stale_with_timestamp(
+            Some(nearby),
+            Some(stamp)
+        ));
+        // Beyond tolerance → stale
+        let far = stamp + IMAGE_TIMESTAMP_TOLERANCE + Duration::from_secs(1);
+        assert!(MarkdownRenderer::image_source_stale_with_timestamp(
+            Some(stamp),
+            Some(far)
+        ));
+        assert!(MarkdownRenderer::image_source_stale_with_timestamp(
+            Some(far),
+            Some(stamp)
         ));
     }
 
