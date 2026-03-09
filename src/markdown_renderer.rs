@@ -5811,15 +5811,17 @@ impl MarkdownRenderer {
                     Err(_) => true, // clock went backwards — treat as stale
                 }
             }
+            // Had a valid cache but metadata now fails (file locked by AV,
+            // transient 9P error, etc.) — keep the cached texture rather than
+            // flashing "Loading image…" every frame.
+            (Some(_), None) => false,
             (None, None) => false,
-            _ => true, // one side is None — file appeared or disappeared
+            // File appeared after being missing → stale, pick it up.
+            (None, Some(_)) => true,
         }
     }
 
     fn image_source_stale(cached_modified: Option<SystemTime>, path: &Path) -> bool {
-        if !path.exists() {
-            return cached_modified.is_some();
-        }
         let current = Self::disk_image_timestamp(path);
         Self::image_source_stale_with_timestamp(cached_modified, current)
     }
@@ -7380,12 +7382,16 @@ mod tests {
         // Unchanged file → not stale
         assert!(!MarkdownRenderer::image_source_stale(initial, &file_path));
 
-        // Deleted file → stale (cached is Some, disk is gone)
+        // Deleted file → NOT stale (keep cached texture; avoids flashing when
+        // antivirus or filesystem transiently locks the file)
         std::fs::remove_file(&file_path).expect("remove image");
-        assert!(MarkdownRenderer::image_source_stale(initial, &file_path));
+        assert!(!MarkdownRenderer::image_source_stale(initial, &file_path));
+
+        // File without cached timestamp appears → stale (pick it up)
+        std::fs::write(&file_path, [4u8, 3, 2, 1]).expect("rewrite image");
+        assert!(MarkdownRenderer::image_source_stale(None, &file_path));
 
         // A timestamp far in the past → stale (beyond tolerance)
-        std::fs::write(&file_path, [4u8, 3, 2, 1]).expect("rewrite image");
         let old = Some(SystemTime::UNIX_EPOCH);
         assert!(MarkdownRenderer::image_source_stale(old, &file_path));
     }
@@ -7399,11 +7405,12 @@ mod tests {
     #[test]
     fn test_image_source_stale_with_timestamp_combinations() {
         let stamp = SystemTime::UNIX_EPOCH;
-        // One side None → stale (file appeared or disappeared)
-        assert!(MarkdownRenderer::image_source_stale_with_timestamp(
+        // Had cache, metadata now fails → NOT stale (transient failure)
+        assert!(!MarkdownRenderer::image_source_stale_with_timestamp(
             Some(stamp),
             None
         ));
+        // No cache, file appeared → stale (pick it up)
         assert!(MarkdownRenderer::image_source_stale_with_timestamp(
             None,
             Some(stamp)
