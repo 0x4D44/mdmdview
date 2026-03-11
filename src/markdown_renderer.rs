@@ -206,8 +206,13 @@ const IMAGE_FAILURE_CACHE_CAPACITY: usize = 256;
 /// slightly different values on successive calls for the same unmodified file.
 const IMAGE_TIMESTAMP_TOLERANCE: Duration = Duration::from_secs(30);
 /// Maximum total bytes for the image texture cache (100 MB).
-/// When exceeded, oldest entries are evicted until under the limit.
+/// When exceeded, entries are evicted (furthest from viewport, or LRU)
+/// until under the limit.
 const MAX_IMAGE_TEXTURE_CACHE_BYTES: usize = 100 * 1024 * 1024;
+/// Headroom factor for image downscaling.  Images wider (or taller) than
+/// the screen dimension multiplied by this factor are downscaled before
+/// uploading to the GPU, saving significant texture memory.
+const IMAGE_DOWNSCALE_FACTOR: f32 = 2.0;
 
 /// Generic LRU (Least Recently Used) cache with configurable capacity.
 ///
@@ -465,6 +470,10 @@ struct ImageCache {
     total_bytes: usize,
     /// Maximum total bytes before size-based eviction triggers.
     max_bytes: usize,
+    /// Distance of each cached image from the viewport center (in pixels).
+    /// Updated each frame by the renderer.  When non-empty, eviction prefers
+    /// the entry with the greatest distance instead of plain LRU order.
+    viewport_distances: HashMap<String, f32>,
 }
 
 impl ImageCache {
@@ -475,6 +484,7 @@ impl ImageCache {
             capacity: capacity.max(1),
             total_bytes: 0,
             max_bytes: MAX_IMAGE_TEXTURE_CACHE_BYTES,
+            viewport_distances: HashMap::new(),
         }
     }
 
@@ -498,11 +508,16 @@ impl ImageCache {
             return;
         }
 
-        // Evict oldest entries if at entry capacity or memory limit exceeded
+        // Evict entries if at entry capacity or memory limit exceeded.
+        // When viewport distances are available, evict the entry furthest from
+        // the viewport center.  Fall back to LRU (oldest) otherwise.
         while self.entries.len() >= self.capacity
             || (self.total_bytes + new_bytes > self.max_bytes && !self.entries.is_empty())
         {
-            if let Some(old_key) = self.order.pop_front() {
+            let evict_key = self.pick_eviction_candidate(&key);
+            if let Some(old_key) = evict_key {
+                self.order.retain(|k| k != &old_key);
+                self.viewport_distances.remove(&old_key);
                 if let Some(old_entry) = self.entries.remove(&old_key) {
                     self.total_bytes = self.total_bytes.saturating_sub(old_entry.byte_size);
                 }
@@ -516,11 +531,46 @@ impl ImageCache {
         self.entries.insert(key, entry);
     }
 
+    /// Pick the best eviction candidate.  If viewport distances are available
+    /// for at least two entries, evict the one furthest from the viewport —
+    /// but never evict `skip_key` (the entry about to be inserted).
+    /// Falls back to LRU (front of `order`) when distances are unavailable.
+    fn pick_eviction_candidate(&self, skip_key: &str) -> Option<String> {
+        // Try viewport-distance-based eviction first.
+        // We need at least two entries with distances so we don't evict the
+        // only nearby image.
+        let candidates_with_dist: Vec<_> = self
+            .viewport_distances
+            .iter()
+            .filter(|(k, _)| k.as_str() != skip_key && self.entries.contains_key(k.as_str()))
+            .collect();
+
+        if candidates_with_dist.len() >= 2 {
+            // Evict the entry with the greatest distance from viewport center
+            if let Some((key, _)) = candidates_with_dist
+                .iter()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                return Some((*key).clone());
+            }
+        }
+
+        // Fall back to LRU: oldest entry in `order`
+        self.order.front().cloned()
+    }
+
+    /// Replace viewport distances wholesale.  Called once per frame by the
+    /// renderer after it has collected all image Y positions.
+    fn update_viewport_distances(&mut self, distances: HashMap<String, f32>) {
+        self.viewport_distances = distances;
+    }
+
     fn remove(&mut self, key: &str) {
         if let Some(entry) = self.entries.remove(key) {
             self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
         }
         self.order.retain(|entry| entry != key);
+        self.viewport_distances.remove(key);
     }
 
     #[cfg(test)]
@@ -543,6 +593,7 @@ impl ImageCache {
         self.entries.clear();
         self.order.clear();
         self.total_bytes = 0;
+        self.viewport_distances.clear();
     }
 }
 
@@ -560,6 +611,9 @@ enum ImageLoadSource {
 struct ImageLoadRequest {
     key: String,
     source: ImageLoadSource,
+    /// Generation counter at the time this request was enqueued.
+    /// Results from older generations are discarded in poll_image_results.
+    generation: u64,
 }
 
 enum ImageLoadResult {
@@ -568,9 +622,11 @@ enum ImageLoadResult {
         image: egui::ColorImage,
         size: [u32; 2],
         modified: Option<SystemTime>,
+        generation: u64,
     },
     Failed {
         key: String,
+        generation: u64,
     },
 }
 
@@ -585,6 +641,14 @@ pub struct MarkdownRenderer {
     image_failures: RefCell<LruCache<String, ImageFailure>>,
     image_job_tx: Sender<ImageLoadRequest>,
     image_result_rx: Receiver<ImageLoadResult>,
+    /// Generation counter incremented on each document load.  Image load results
+    /// from a previous generation are silently discarded so that stale background
+    /// loads do not pollute the cache after a document switch.
+    image_generation: Cell<u64>,
+    // Per-frame Y position of each image (keyed by resolved path) for viewport
+    // distance calculation.  Populated during rendering, consumed at frame end
+    // to update the cache's eviction distances.
+    image_doc_y: RefCell<HashMap<String, f32>>,
     // Mapping of header id -> last rendered rect (for in-document navigation)
     header_rects: RefCell<HashMap<String, egui::Rect>>,
     // Last clicked internal anchor (e.g., "getting-started") for the app to consume
@@ -972,6 +1036,8 @@ impl MarkdownRenderer {
             image_failures: RefCell::new(LruCache::new(IMAGE_FAILURE_CACHE_CAPACITY)),
             image_job_tx,
             image_result_rx,
+            image_generation: Cell::new(0),
+            image_doc_y: RefCell::new(HashMap::new()),
             header_rects: RefCell::new(HashMap::new()),
             pending_anchor: RefCell::new(None),
             link_counter: RefCell::new(0),
@@ -1022,7 +1088,11 @@ impl MarkdownRenderer {
     fn spawn_image_loader(job_rx: Receiver<ImageLoadRequest>, result_tx: Sender<ImageLoadResult>) {
         if let Err(err) = Self::spawn_named_thread("mdmdview-image-loader", move || {
             for request in job_rx.iter() {
-                let ImageLoadRequest { key, source } = request;
+                let ImageLoadRequest {
+                    key,
+                    source,
+                    generation,
+                } = request;
                 let result = match source {
                     ImageLoadSource::Embedded(bytes) => {
                         match image_decode::bytes_to_color_image_guess(bytes, None) {
@@ -1031,13 +1101,14 @@ impl MarkdownRenderer {
                                 image,
                                 size: [w, h],
                                 modified: None,
+                                generation,
                             },
-                            None => ImageLoadResult::Failed { key },
+                            None => ImageLoadResult::Failed { key, generation },
                         }
                     }
                     ImageLoadSource::File(path) => {
                         if !path.exists() {
-                            ImageLoadResult::Failed { key }
+                            ImageLoadResult::Failed { key, generation }
                         } else {
                             match std::fs::read(&path) {
                                 Ok(bytes) => {
@@ -1048,11 +1119,12 @@ impl MarkdownRenderer {
                                             image,
                                             size: [w, h],
                                             modified,
+                                            generation,
                                         },
-                                        None => ImageLoadResult::Failed { key },
+                                        None => ImageLoadResult::Failed { key, generation },
                                     }
                                 }
-                                Err(_) => ImageLoadResult::Failed { key },
+                                Err(_) => ImageLoadResult::Failed { key, generation },
                             }
                         }
                     }
@@ -1067,14 +1139,15 @@ impl MarkdownRenderer {
                                             image,
                                             size: [w, h],
                                             modified: None,
+                                            generation,
                                         },
-                                        None => ImageLoadResult::Failed { key },
+                                        None => ImageLoadResult::Failed { key, generation },
                                     }
                                 }
-                                Err(_) => ImageLoadResult::Failed { key },
+                                Err(_) => ImageLoadResult::Failed { key, generation },
                             }
                         }
-                        Err(_) => ImageLoadResult::Failed { key },
+                        Err(_) => ImageLoadResult::Failed { key, generation },
                     },
                 };
                 let _ = result_tx.send(result);
@@ -2780,6 +2853,8 @@ impl MarkdownRenderer {
         *self.table_counter.borrow_mut() = 0;
         // Reset per-frame element rects
         self.element_rects.borrow_mut().clear();
+        // Clear per-frame image Y positions
+        self.image_doc_y.borrow_mut().clear();
         for element in elements.iter() {
             // Wrap each element in a no-op frame to capture its rect
             let ir = egui::Frame::none().show(ui, |ui| {
@@ -2787,6 +2862,22 @@ impl MarkdownRenderer {
             });
             self.element_rects.borrow_mut().push(ir.response.rect);
         }
+
+        // Update viewport distances for image cache eviction.
+        // `clip_rect()` gives the visible portion of the scroll area.
+        let viewport_center_y = ui.clip_rect().center().y;
+        let distances: HashMap<String, f32> = self
+            .image_doc_y
+            .borrow()
+            .iter()
+            .map(|(key, &y)| (key.clone(), (y - viewport_center_y).abs()))
+            .collect();
+        if !distances.is_empty() {
+            self.image_textures
+                .borrow_mut()
+                .update_viewport_distances(distances);
+        }
+
         // Add a little extra breathing room at the end so
         // the final line doesn't sit flush under the status bar.
         ui.add_space(16.0);
@@ -2988,6 +3079,10 @@ impl MarkdownRenderer {
                     let size = egui::vec2((tw * scale).round(), (th * scale).round());
                     let image = egui::Image::new(&tex).fit_to_exact_size(size);
                     let resp = ui.add(image);
+                    // Track Y position for viewport-aware cache eviction
+                    self.image_doc_y
+                        .borrow_mut()
+                        .insert(resolved.clone(), resp.rect.center().y);
                     if let Some(t) = title {
                         if !t.is_empty() {
                             if render_action_triggered(resp.hovered(), "image_hover") {
@@ -3007,7 +3102,7 @@ impl MarkdownRenderer {
                 } else {
                     // Placeholder with alt and error info
                     let tc = ThemeColors::current(ui.visuals().dark_mode);
-                    egui::Frame::none()
+                    let placeholder_resp = egui::Frame::none()
                         .fill(tc.code_bg)
                         .stroke(Stroke::new(1.0, tc.code_border))
                         .inner_margin(8.0)
@@ -3037,6 +3132,10 @@ impl MarkdownRenderer {
                                     .size(self.font_sizes.body),
                             );
                         });
+                    // Track Y position for viewport-aware cache eviction
+                    self.image_doc_y
+                        .borrow_mut()
+                        .insert(resolved.clone(), placeholder_resp.response.rect.center().y);
                     ui.add_space(6.0);
                 }
             }
@@ -5531,6 +5630,41 @@ impl MarkdownRenderer {
         self.image_failures.borrow_mut().clear();
     }
 
+    /// Reset per-document image runtime state.  Called when loading new content
+    /// so that stale pending/failure/position state from the old document does
+    /// not interfere with the new one.
+    pub fn reset_image_state(&self) {
+        self.image_generation.set(self.image_generation.get() + 1);
+        self.image_pending.borrow_mut().clear();
+        self.image_failures.borrow_mut().clear();
+        self.image_doc_y.borrow_mut().clear();
+    }
+
+    /// Returns image cache stats: `(entries, used_mb, max_mb)`.
+    pub fn image_cache_stats(&self) -> (usize, f32, f32) {
+        let cache = self.image_textures.borrow();
+        let entries = cache.entries.len();
+        let used_mb = cache.total_bytes as f32 / (1024.0 * 1024.0);
+        let max_mb = cache.max_bytes as f32 / (1024.0 * 1024.0);
+        (entries, used_mb, max_mb)
+    }
+
+    /// Returns `Some((used_mb, max_mb))` if the image cache is at or above 75%
+    /// capacity, indicating memory pressure.  Returns `None` otherwise.
+    pub fn image_cache_pressure(&self) -> Option<(f32, f32)> {
+        let cache = self.image_textures.borrow();
+        let used = cache.total_bytes;
+        let max = cache.max_bytes;
+        if max > 0 && used * 4 >= max * 3 {
+            // At or above 75%
+            let used_mb = used as f32 / (1024.0 * 1024.0);
+            let max_mb = max as f32 / (1024.0 * 1024.0);
+            Some((used_mb, max_mb))
+        } else {
+            None
+        }
+    }
+
     /// Release GPU textures to reduce idle GPU usage (e.g., when minimized).
     /// Textures rebuild lazily on next render. SVG/error caches retained for fast rebuilds.
     pub fn release_gpu_textures(&self) {
@@ -5631,15 +5765,49 @@ impl MarkdownRenderer {
     }
 
     fn poll_image_results(&self, ctx: &egui::Context) -> bool {
+        // Compute max texture dimensions: screen size * headroom factor,
+        // hard-capped at MAX_IMAGE_SIDE to prevent runaway memory usage on
+        // high-DPI displays.
+        let screen = ctx.screen_rect();
+        let hard_cap = image_decode::max_image_side();
+        let max_tex_w = ((screen.width() * IMAGE_DOWNSCALE_FACTOR) as u32).min(hard_cap);
+        let max_tex_h = ((screen.height() * IMAGE_DOWNSCALE_FACTOR) as u32).min(hard_cap);
+        let current_gen = self.image_generation.get();
+
         let mut changed = false;
         while let Ok(result) = self.image_result_rx.try_recv() {
+            // Extract the generation from the result and skip stale ones.
+            let result_gen = match &result {
+                ImageLoadResult::Loaded { generation, .. } => *generation,
+                ImageLoadResult::Failed { generation, .. } => *generation,
+            };
+            if result_gen != current_gen {
+                // Stale result from a previous document — discard it.
+                let stale_key = match &result {
+                    ImageLoadResult::Loaded { key, .. } | ImageLoadResult::Failed { key, .. } => {
+                        key.clone()
+                    }
+                };
+                self.image_pending.borrow_mut().remove(&stale_key);
+                continue;
+            }
+
             match result {
                 ImageLoadResult::Loaded {
                     key,
                     image,
                     size,
                     modified,
+                    generation: _,
                 } => {
+                    // Downscale oversized images to reduce texture memory.
+                    // Use the decoded size from the loader (not image.size) as
+                    // the authoritative source dimensions.
+                    let (image, size) = {
+                        let (img, w, h) = downscale_color_image(image, max_tex_w, max_tex_h);
+                        let _ = size; // original size consumed by downscale
+                        (img, [w, h])
+                    };
                     let tex =
                         ctx.load_texture(format!("img:{key}"), image, egui::TextureOptions::LINEAR);
                     self.store_image_texture(&key, tex.clone(), size, modified);
@@ -5647,7 +5815,7 @@ impl MarkdownRenderer {
                     self.image_pending.borrow_mut().remove(&key);
                     changed = true;
                 }
-                ImageLoadResult::Failed { key } => {
+                ImageLoadResult::Failed { key, generation: _ } => {
                     self.image_pending.borrow_mut().remove(&key);
                     self.note_image_failure(&key);
                 }
@@ -5785,6 +5953,7 @@ impl MarkdownRenderer {
         let request = ImageLoadRequest {
             key: resolved_src.to_string(),
             source,
+            generation: self.image_generation.get(),
         };
         if self.enqueue_image_job(request).is_ok() {
             self.image_pending
@@ -5805,7 +5974,11 @@ impl MarkdownRenderer {
         match (cached_modified, current) {
             (Some(a), Some(b)) => {
                 // Treat timestamps within the tolerance window as identical.
-                let delta = if a > b { a.duration_since(b) } else { b.duration_since(a) };
+                let delta = if a > b {
+                    a.duration_since(b)
+                } else {
+                    b.duration_since(a)
+                };
                 match delta {
                     Ok(d) => d > IMAGE_TIMESTAMP_TOLERANCE,
                     Err(_) => true, // clock went backwards — treat as stale
@@ -6059,6 +6232,46 @@ fn data_uri_cache_key(uri: &str) -> String {
     format!("data-uri:{:016x}", hasher.finish())
 }
 
+/// Downscale a `ColorImage` if it exceeds `max_w` or `max_h`, preserving
+/// aspect ratio.  Returns the (possibly new) image and its pixel dimensions.
+///
+/// Uses nearest-neighbor sampling directly on the `Color32` pixel buffer so
+/// there is **no intermediate byte-copy** — peak memory is just the original
+/// plus the (smaller) destination.
+fn downscale_color_image(
+    image: egui::ColorImage,
+    max_w: u32,
+    max_h: u32,
+) -> (egui::ColorImage, u32, u32) {
+    let (src_w, src_h) = (image.size[0] as u32, image.size[1] as u32);
+    if src_w <= max_w && src_h <= max_h {
+        return (image, src_w, src_h);
+    }
+    // Determine uniform scale factor
+    let scale_x = max_w as f64 / src_w as f64;
+    let scale_y = max_h as f64 / src_h as f64;
+    let scale = scale_x.min(scale_y);
+    let dst_w = ((src_w as f64 * scale).round() as u32).max(1);
+    let dst_h = ((src_h as f64 * scale).round() as u32).max(1);
+
+    // Nearest-neighbor downscale — reads directly from the source pixel
+    // buffer with no intermediate Vec<u8> copy.
+    let src_stride = src_w as usize;
+    let mut dst_pixels = Vec::with_capacity((dst_w * dst_h) as usize);
+    for y in 0..dst_h {
+        let src_y = ((y as f64 / scale).min((src_h - 1) as f64)) as usize;
+        for x in 0..dst_w {
+            let src_x = ((x as f64 / scale).min((src_w - 1) as f64)) as usize;
+            dst_pixels.push(image.pixels[src_y * src_stride + src_x]);
+        }
+    }
+    let out = egui::ColorImage {
+        size: [dst_w as usize, dst_h as usize],
+        pixels: dst_pixels,
+    };
+    (out, dst_w, dst_h)
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -6263,6 +6476,19 @@ mod tests {
         input
     }
 
+    /// Create a solid-color PNG of the given dimensions.  Solid PNGs compress
+    /// extremely well (a few hundred bytes on disk) but decode to
+    /// `width * height * 4` bytes of RGBA — ideal for cache-pressure tests.
+    fn solid_png_bytes(width: u32, height: u32) -> Vec<u8> {
+        let pixels = vec![255u8; (width * height * 4) as usize];
+        let mut out = Vec::new();
+        let encoder = PngEncoder::new(&mut out);
+        encoder
+            .write_image(&pixels, width, height, ColorType::Rgba8)
+            .expect("encode png");
+        out
+    }
+
     fn tiny_png_bytes() -> Vec<u8> {
         let width = 2u32;
         let height = 2u32;
@@ -6454,6 +6680,229 @@ mod tests {
         assert!(!cache.contains_key("b"));
         assert!(!cache.contains_key("c"));
         assert_eq!(cache.current_bytes(), 0);
+    }
+
+    // --- Viewport-aware eviction tests ---
+
+    #[test]
+    fn test_image_cache_viewport_evicts_furthest() {
+        // Cache with low memory limit: fits exactly 2 entries of 16 bytes each
+        let mut cache = ImageCache::new(100);
+        cache.max_bytes = 32;
+
+        let entry = make_test_cache_entry([2, 2]); // 16 bytes each
+
+        cache.insert("near".to_string(), entry.clone());
+        cache.insert("far".to_string(), entry.clone());
+        assert_eq!(cache.current_bytes(), 32);
+
+        // Set viewport distances: "far" is further away
+        let mut distances = HashMap::new();
+        distances.insert("near".to_string(), 100.0);
+        distances.insert("far".to_string(), 5000.0);
+        cache.update_viewport_distances(distances);
+
+        // Inserting a third entry should evict "far" (greatest distance)
+        cache.insert("new".to_string(), entry);
+        assert!(cache.contains_key("near"), "near should survive");
+        assert!(!cache.contains_key("far"), "far should be evicted");
+        assert!(cache.contains_key("new"), "new should be inserted");
+    }
+
+    #[test]
+    fn test_image_cache_viewport_eviction_does_not_evict_incoming_key() {
+        // Ensure the entry being inserted is never chosen as eviction victim
+        let mut cache = ImageCache::new(100);
+        cache.max_bytes = 32;
+
+        let entry = make_test_cache_entry([2, 2]); // 16 bytes each
+        cache.insert("a".to_string(), entry.clone());
+        cache.insert("b".to_string(), entry.clone());
+
+        // "new_entry" has the greatest distance, but it's the one being inserted
+        let mut distances = HashMap::new();
+        distances.insert("a".to_string(), 100.0);
+        distances.insert("b".to_string(), 200.0);
+        distances.insert("new_entry".to_string(), 9999.0);
+        cache.update_viewport_distances(distances);
+
+        cache.insert("new_entry".to_string(), entry);
+        assert!(cache.contains_key("new_entry"), "incoming key must survive");
+        // "b" should be evicted (furthest among existing entries)
+        assert!(!cache.contains_key("b"), "b should be evicted (furthest)");
+        assert!(cache.contains_key("a"), "a should survive (nearest)");
+    }
+
+    #[test]
+    fn test_image_cache_viewport_falls_back_to_lru_without_distances() {
+        // With no viewport distances set, eviction should use LRU (oldest first)
+        let mut cache = ImageCache::new(100);
+        cache.max_bytes = 32;
+
+        let entry = make_test_cache_entry([2, 2]); // 16 bytes
+        cache.insert("first".to_string(), entry.clone());
+        cache.insert("second".to_string(), entry.clone());
+
+        // No viewport distances set — should fall back to LRU
+        cache.insert("third".to_string(), entry);
+        assert!(!cache.contains_key("first"), "LRU oldest evicted");
+        assert!(cache.contains_key("second"));
+        assert!(cache.contains_key("third"));
+    }
+
+    #[test]
+    fn test_image_cache_viewport_falls_back_with_only_one_distance() {
+        // With fewer than 2 entries having distances, fall back to LRU
+        let mut cache = ImageCache::new(100);
+        cache.max_bytes = 32;
+
+        let entry = make_test_cache_entry([2, 2]);
+        cache.insert("a".to_string(), entry.clone());
+        cache.insert("b".to_string(), entry.clone());
+
+        // Only one entry has a distance — not enough for viewport eviction
+        let mut distances = HashMap::new();
+        distances.insert("a".to_string(), 100.0);
+        cache.update_viewport_distances(distances);
+
+        cache.insert("c".to_string(), entry);
+        assert!(!cache.contains_key("a"), "LRU oldest evicted");
+        assert!(cache.contains_key("b"));
+        assert!(cache.contains_key("c"));
+    }
+
+    #[test]
+    fn test_image_cache_clear_resets_viewport_distances() {
+        let mut cache = ImageCache::new(10);
+        let entry = make_test_cache_entry([2, 2]);
+        cache.insert("a".to_string(), entry);
+
+        let mut distances = HashMap::new();
+        distances.insert("a".to_string(), 42.0);
+        cache.update_viewport_distances(distances);
+
+        cache.clear();
+        assert!(cache.viewport_distances.is_empty());
+    }
+
+    #[test]
+    fn test_image_cache_remove_cleans_viewport_distance() {
+        let mut cache = ImageCache::new(10);
+        let entry = make_test_cache_entry([2, 2]);
+        cache.insert("a".to_string(), entry);
+
+        let mut distances = HashMap::new();
+        distances.insert("a".to_string(), 42.0);
+        cache.update_viewport_distances(distances);
+
+        cache.remove("a");
+        assert!(!cache.viewport_distances.contains_key("a"));
+    }
+
+    // --- Generation token tests ---
+
+    #[test]
+    fn test_stale_generation_result_is_discarded() {
+        let mut renderer = MarkdownRenderer::new();
+        let (result_tx, result_rx) = crossbeam_channel::unbounded::<ImageLoadResult>();
+        renderer.image_result_rx = result_rx;
+
+        // Simulate: gen 0 enqueued an image, then document was switched (gen → 1)
+        renderer
+            .image_pending
+            .borrow_mut()
+            .insert("old.png".to_string());
+        renderer.reset_image_state(); // bumps to gen 1
+
+        // Stale result from gen 0 arrives
+        result_tx
+            .send(ImageLoadResult::Failed {
+                key: "old.png".to_string(),
+                generation: 0,
+            })
+            .expect("send");
+
+        let ctx = egui::Context::default();
+        renderer.poll_image_results(&ctx);
+
+        // The stale result should NOT register as a failure in the current gen
+        assert!(
+            !renderer
+                .image_failures
+                .borrow()
+                .contains_key(&"old.png".to_string()),
+            "stale generation result should be discarded"
+        );
+    }
+
+    #[test]
+    fn test_current_generation_result_is_accepted() {
+        let mut renderer = MarkdownRenderer::new();
+        let (result_tx, result_rx) = crossbeam_channel::unbounded::<ImageLoadResult>();
+        renderer.image_result_rx = result_rx;
+
+        renderer
+            .image_pending
+            .borrow_mut()
+            .insert("current.png".to_string());
+
+        // Result from current gen (0)
+        result_tx
+            .send(ImageLoadResult::Failed {
+                key: "current.png".to_string(),
+                generation: 0,
+            })
+            .expect("send");
+
+        let ctx = egui::Context::default();
+        renderer.poll_image_results(&ctx);
+
+        assert!(
+            renderer
+                .image_failures
+                .borrow()
+                .contains_key(&"current.png".to_string()),
+            "current generation result should be processed"
+        );
+    }
+
+    // --- Image downscale tests ---
+
+    #[test]
+    fn test_downscale_color_image_no_op_when_within_limits() {
+        let img = egui::ColorImage::new([100, 80], egui::Color32::RED);
+        let (out, w, h) = downscale_color_image(img, 200, 200);
+        assert_eq!(w, 100);
+        assert_eq!(h, 80);
+        assert_eq!(out.size, [100, 80]);
+    }
+
+    #[test]
+    fn test_downscale_color_image_shrinks_oversized() {
+        let img = egui::ColorImage::new([1000, 500], egui::Color32::BLUE);
+        let (out, w, h) = downscale_color_image(img, 200, 200);
+        // Scale factor: min(200/1000, 200/500) = 0.2
+        // 1000 * 0.2 = 200, 500 * 0.2 = 100
+        assert_eq!(w, 200);
+        assert_eq!(h, 100);
+        assert_eq!(out.size, [200, 100]);
+    }
+
+    #[test]
+    fn test_downscale_color_image_preserves_aspect_ratio() {
+        let img = egui::ColorImage::new([800, 200], egui::Color32::GREEN);
+        let (_, w, h) = downscale_color_image(img, 400, 400);
+        // Scale = min(400/800, 400/200) = 0.5
+        assert_eq!(w, 400);
+        assert_eq!(h, 100);
+    }
+
+    #[test]
+    fn test_downscale_color_image_exact_boundary() {
+        let img = egui::ColorImage::new([200, 200], egui::Color32::WHITE);
+        let (_, w, h) = downscale_color_image(img, 200, 200);
+        assert_eq!(w, 200);
+        assert_eq!(h, 200);
     }
 
     // --- LruCache Tests ---
@@ -6759,6 +7208,7 @@ mod tests {
             .send(ImageLoadRequest {
                 key: "missing".to_string(),
                 source: ImageLoadSource::File(path),
+                generation: 0,
             })
             .expect("send");
         let result = result_rx
@@ -6766,7 +7216,7 @@ mod tests {
             .expect("result");
         assert!(matches!(
             result,
-            ImageLoadResult::Failed { ref key } if key == "missing"
+            ImageLoadResult::Failed { ref key, .. } if key == "missing"
         ));
     }
 
@@ -6780,6 +7230,7 @@ mod tests {
             .send(ImageLoadRequest {
                 key: "bad-embedded".to_string(),
                 source: ImageLoadSource::Embedded(b"not an image"),
+                generation: 0,
             })
             .expect("send");
         let result = result_rx
@@ -6787,7 +7238,7 @@ mod tests {
             .expect("result");
         assert!(matches!(
             result,
-            ImageLoadResult::Failed { ref key } if key == "bad-embedded"
+            ImageLoadResult::Failed { ref key, .. } if key == "bad-embedded"
         ));
     }
 
@@ -6804,6 +7255,7 @@ mod tests {
             .send(ImageLoadRequest {
                 key: "bad-file".to_string(),
                 source: ImageLoadSource::File(path),
+                generation: 0,
             })
             .expect("send");
         let result = result_rx
@@ -6811,7 +7263,7 @@ mod tests {
             .expect("result");
         assert!(matches!(
             result,
-            ImageLoadResult::Failed { ref key } if key == "bad-file"
+            ImageLoadResult::Failed { ref key, .. } if key == "bad-file"
         ));
         Ok(())
     }
@@ -6829,6 +7281,7 @@ mod tests {
             .send(ImageLoadRequest {
                 key: "read-error".to_string(),
                 source: ImageLoadSource::File(bad_path),
+                generation: 0,
             })
             .expect("send");
         let result = result_rx
@@ -6836,7 +7289,7 @@ mod tests {
             .expect("result");
         assert!(matches!(
             result,
-            ImageLoadResult::Failed { ref key } if key == "read-error"
+            ImageLoadResult::Failed { ref key, .. } if key == "read-error"
         ));
         Ok(())
     }
@@ -10850,6 +11303,7 @@ contexts:
         result_tx
             .send(ImageLoadResult::Failed {
                 key: "failed.png".to_string(),
+                generation: 0,
             })
             .expect("send");
         let ctx = egui::Context::default();
@@ -10869,14 +11323,123 @@ contexts:
         let request = ImageLoadRequest {
             key: "full".to_string(),
             source: ImageLoadSource::Embedded(b"png"),
+            generation: 0,
         };
         renderer.image_job_tx.send(request).expect("fill queue");
         let request = ImageLoadRequest {
             key: "full-2".to_string(),
             source: ImageLoadSource::Embedded(b"png"),
+            generation: 0,
         };
         assert!(renderer.enqueue_image_job(request).is_err());
         drop(job_rx);
+    }
+
+    /// Integration test: solid-color PNGs that are tiny on disk but large when
+    /// decoded.  Verifies that (a) cache pressure triggers eviction and
+    /// (b) viewport-aware eviction keeps near images and drops far ones.
+    #[test]
+    fn test_cache_pressure_with_large_decoded_images() {
+        let renderer = MarkdownRenderer::new();
+
+        // Each 200x200 image decodes to 200*200*4 = 160,000 bytes.
+        // Set cache limit to hold exactly 2 images worth (320,000 bytes).
+        renderer.image_textures.borrow_mut().max_bytes = 160_000 * 2;
+
+        let temp = tempdir().expect("temp dir");
+        let mut keys = Vec::new();
+        for i in 0..4 {
+            let name = format!("img_{i}.png");
+            let path = temp.path().join(&name);
+            std::fs::write(&path, solid_png_bytes(200, 200)).expect("write png");
+            keys.push(path.to_string_lossy().to_string());
+        }
+
+        // Verify the PNGs are tiny on disk
+        let disk_size = std::fs::metadata(temp.path().join("img_0.png"))
+            .unwrap()
+            .len();
+        assert!(
+            disk_size < 2000,
+            "solid PNG should be tiny on disk, got {disk_size} bytes"
+        );
+
+        with_test_ui(|ctx, _ui| {
+            // Simulate the background loader completing all 4 images
+            for (i, key) in keys.iter().enumerate() {
+                let image = egui::ColorImage::new([200, 200], Color32::WHITE);
+                let tex =
+                    ctx.load_texture(format!("img:{key}"), image, egui::TextureOptions::LINEAR);
+                renderer.store_image_texture(key, tex, [200, 200], None);
+
+                // After inserting image 2 (index 2), cache should have evicted
+                // to stay within the 2-image budget
+                if i >= 2 {
+                    let cache = renderer.image_textures.borrow();
+                    assert!(
+                        cache.entries.len() <= 2,
+                        "cache should hold at most 2 images, has {}",
+                        cache.entries.len()
+                    );
+                }
+            }
+
+            // Now set viewport distances and insert a 5th image to test
+            // viewport-aware eviction.  Make keys[2] "near" and keys[3] "far".
+            {
+                let mut cache = renderer.image_textures.borrow_mut();
+                let mut distances = HashMap::new();
+                for key in cache.entries.keys() {
+                    // Find which of our keys are still in the cache
+                    if *key == keys[2] || *key == keys[3] {
+                        let dist = if *key == keys[2] { 10.0 } else { 9999.0 };
+                        distances.insert(key.clone(), dist);
+                    }
+                }
+                cache.update_viewport_distances(distances);
+            }
+
+            // Insert a new image — should evict keys[3] (far), keep keys[2] (near)
+            let new_key = "new_image".to_string();
+            let image = egui::ColorImage::new([200, 200], Color32::WHITE);
+            let tex = ctx.load_texture(
+                format!("img:{new_key}"),
+                image,
+                egui::TextureOptions::LINEAR,
+            );
+            renderer.store_image_texture(&new_key, tex, [200, 200], None);
+
+            let cache = renderer.image_textures.borrow();
+            assert!(
+                cache.contains_key(&keys[2]),
+                "near image should survive eviction"
+            );
+            assert!(!cache.contains_key(&keys[3]), "far image should be evicted");
+            assert!(
+                cache.contains_key(&new_key),
+                "newly inserted image should exist"
+            );
+        });
+    }
+
+    /// Verify that solid PNGs produce the expected compression ratio:
+    /// small on disk, large decoded.
+    #[test]
+    fn test_solid_png_compression_ratio() {
+        let bytes = solid_png_bytes(500, 500);
+        // 500x500 decodes to 1,000,000 bytes (1 MB), but the PNG should be
+        // well under 10 KB on disk due to solid-color compression.
+        assert!(
+            bytes.len() < 10_000,
+            "solid 500x500 PNG should compress well, got {} bytes",
+            bytes.len()
+        );
+        // Verify it decodes to the expected dimensions
+        let (img, w, h) =
+            image_decode::bytes_to_color_image_guess(&bytes, None).expect("should decode");
+        assert_eq!(w, 500);
+        assert_eq!(h, 500);
+        assert_eq!(img.pixels.len(), 500 * 500);
     }
 
     #[test]

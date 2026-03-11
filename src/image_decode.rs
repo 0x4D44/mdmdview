@@ -47,7 +47,12 @@ fn take_forced_guess_format_error() -> bool {
     FORCED_GUESS_FORMAT_ERROR.with(|flag| flag.replace(false))
 }
 
-const MAX_IMAGE_SIDE: u32 = 4096;
+pub(crate) const MAX_IMAGE_SIDE: u32 = 4096;
+
+/// Returns the hard cap on image dimensions used for decode and downscale.
+pub(crate) fn max_image_side() -> u32 {
+    MAX_IMAGE_SIDE
+}
 const MAX_IMAGE_PIXELS: u64 = MAX_IMAGE_SIDE as u64 * MAX_IMAGE_SIDE as u64;
 const MAX_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
