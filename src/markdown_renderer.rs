@@ -576,7 +576,25 @@ impl ImageCache {
             return;
         }
 
-        // Collect non-degraded entries that have viewport distances.
+        // Phase 1: Degrade orphan entries (no viewport distance) first.
+        // These are leftovers from a previous document — safe to degrade before
+        // touching current-document entries.
+        let orphans: Vec<String> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| !e.degraded)
+            .filter(|(k, _)| !self.viewport_distances.contains_key(k.as_str()))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &orphans {
+            self.degrade(key, ctx);
+            if self.total_bytes <= self.max_bytes {
+                return;
+            }
+        }
+
+        // Phase 2: Degrade current-document entries by viewport distance
+        // (furthest first).
         let mut candidates: Vec<(String, f32)> = self
             .entries
             .iter()
@@ -6932,6 +6950,57 @@ mod tests {
             assert!(cache.entries.get("b").unwrap().degraded, "b (mid) should also be degraded");
             assert!(!cache.entries.get("a").unwrap().degraded, "a (nearest) should survive");
             assert!(cache.current_bytes() <= 800);
+        });
+    }
+
+    #[test]
+    fn test_enforce_budget_degrades_orphan_entries_without_distances() {
+        // Entries from a previous document have no viewport distances.
+        // enforce_budget should degrade them as a fallback when still over budget.
+        let mut cache = ImageCache::new(100);
+        cache.max_bytes = 600; // fits 1 full entry (400 bytes) + margin
+
+        with_test_ui(|ctx, _ui| {
+            let make = |name: &str| {
+                let tex = ctx.load_texture(
+                    name,
+                    egui::ColorImage::new([10, 10], Color32::WHITE),
+                    egui::TextureOptions::LINEAR,
+                );
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [10, 10],
+                    modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([10, 10]),
+                    degraded: false,
+                }
+            };
+
+            // "old_a" and "old_b" are from a previous document (no viewport distances).
+            cache.insert("old_a".to_string(), make("old_a"));
+            cache.insert("old_b".to_string(), make("old_b"));
+            // "current" is from the active document.
+            cache.insert("current".to_string(), make("current"));
+            assert_eq!(cache.current_bytes(), 1200);
+
+            // Only "current" has a viewport distance.
+            let mut distances = HashMap::new();
+            distances.insert("current".to_string(), 50.0);
+            cache.update_viewport_distances(distances);
+
+            cache.enforce_budget(ctx);
+
+            // "current" should survive (it's the only entry with a distance and
+            // we keep at least one non-degraded). The orphans should be degraded.
+            assert!(
+                !cache.entries.get("current").unwrap().degraded,
+                "current doc entry should survive"
+            );
+            // At least one orphan must be degraded to get under budget.
+            let orphan_degraded = cache.entries.get("old_a").unwrap().degraded
+                || cache.entries.get("old_b").unwrap().degraded;
+            assert!(orphan_degraded, "at least one orphan should be degraded");
+            assert!(cache.current_bytes() <= 600);
         });
     }
 
