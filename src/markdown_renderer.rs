@@ -713,6 +713,11 @@ pub struct MarkdownRenderer {
     /// Current theme mode — true for dark, false for light.
     /// Used by syntect highlighting at parse time.
     dark_mode: bool,
+    /// Last observed viewport height (pixels).  Updated each frame during
+    /// viewport distance calculation in `render_to_ui`.  Used by
+    /// `get_or_load_image_texture` to decide the reload zone for degraded
+    /// entries (2× viewport height per the LOD HLD).
+    last_viewport_height: Cell<f32>,
 }
 
 impl Default for MarkdownRenderer {
@@ -1090,6 +1095,7 @@ impl MarkdownRenderer {
             column_stats_cache: RefCell::new(HashMap::new()),
             allow_remote_images: Cell::new(false),
             dark_mode: true,
+            last_viewport_height: Cell::new(0.0),
         }
     }
 
@@ -2899,6 +2905,8 @@ impl MarkdownRenderer {
 
         // Update viewport distances for image cache eviction.
         // `clip_rect()` gives the visible portion of the scroll area.
+        let viewport_height = ui.clip_rect().height();
+        self.last_viewport_height.set(viewport_height);
         let viewport_center_y = ui.clip_rect().center().y;
         let distances: HashMap<String, f32> = self
             .image_doc_y
@@ -5927,18 +5935,73 @@ impl MarkdownRenderer {
         let path = Path::new(resolved_src);
         let embedded = Self::embedded_image_bytes(resolved_src);
 
+        // --- Cache lookup with degraded-entry handling (LOD Stage 2) ---
+        //
+        // Four cases:
+        //   1. Cached, not degraded, not stale → return as-is.
+        //   2. Cached, degraded, not stale → return placeholder (layout-stable)
+        //      and maybe enqueue a background reload if within reload zone.
+        //   3. Cached, degraded, stale → return placeholder (layout-stable)
+        //      and enqueue reload unconditionally (skip budget check).
+        //   4. Cached, not degraded, stale → remove and fall through to enqueue.
+        //
+        // We extract everything we need from the cache borrow, then drop it
+        // before touching `image_pending` (a separate RefCell).
         {
-            let mut cache = self.image_textures.borrow_mut();
+            let cache = self.image_textures.borrow();
             if let Some(entry) = cache.get(&cache_key) {
                 let stale = if embedded.is_some() || is_remote || is_data_uri {
                     false // Embedded, remote, and data URI images don't go stale
                 } else {
                     Self::image_source_stale(entry.modified, path)
                 };
-                if !stale {
-                    return Some((entry.texture.clone(), entry.size[0], entry.size[1]));
+                let result = Some((entry.texture.clone(), entry.size[0], entry.size[1]));
+
+                if entry.degraded {
+                    // Cases 2 & 3: entry is degraded — return the placeholder
+                    // texture (preserving layout) and decide whether to reload.
+                    let already_pending =
+                        self.image_pending.borrow().contains(cache_key.as_str());
+                    let should_reload = if stale {
+                        // Case 3: degraded + stale — always reload (skip budget check).
+                        !already_pending
+                    } else {
+                        // Case 2: degraded + not stale — reload only when close
+                        // to viewport and budget allows.
+                        if already_pending {
+                            false
+                        } else {
+                            let viewport_height = self.last_viewport_height.get();
+                            let in_reload_zone = cache
+                                .viewport_distances
+                                .get(&cache_key)
+                                .is_some_and(|&d| d < viewport_height * 2.0);
+                            in_reload_zone && cache.would_restore_fit(&cache_key)
+                        }
+                    };
+                    // Drop the immutable cache borrow before enqueuing.
+                    drop(cache);
+
+                    if should_reload {
+                        self.enqueue_degraded_reload(
+                            resolved_src,
+                            &cache_key,
+                            embedded,
+                            is_remote,
+                            path,
+                        );
+                    }
+                    return result;
                 }
-                cache.remove(&cache_key);
+
+                if !stale {
+                    // Case 1: not degraded, not stale — return cached texture.
+                    return result;
+                }
+
+                // Case 4: not degraded but stale — drop borrow, remove, fall through.
+                drop(cache);
+                self.image_textures.borrow_mut().remove(&cache_key);
             }
         }
 
@@ -5995,6 +6058,42 @@ impl MarkdownRenderer {
                 .insert(resolved_src.to_string());
         }
         None
+    }
+
+    /// Enqueue a background reload for a degraded image entry.
+    ///
+    /// Builds the appropriate `ImageLoadSource` and sends an `ImageLoadRequest`
+    /// to the background loader.  Data URIs are excluded (they are decoded
+    /// synchronously and never degraded in the normal flow).
+    fn enqueue_degraded_reload(
+        &self,
+        resolved_src: &str,
+        cache_key: &str,
+        embedded: Option<&'static [u8]>,
+        is_remote: bool,
+        path: &Path,
+    ) {
+        let source = if let Some(bytes) = embedded {
+            ImageLoadSource::Embedded(bytes)
+        } else if is_remote {
+            ImageLoadSource::Remote(resolved_src.to_string())
+        } else {
+            if !path.exists() {
+                return;
+            }
+            ImageLoadSource::File(path.to_path_buf())
+        };
+
+        let request = ImageLoadRequest {
+            key: cache_key.to_string(),
+            source,
+            generation: self.image_generation.get(),
+        };
+        if self.enqueue_image_job(request).is_ok() {
+            self.image_pending
+                .borrow_mut()
+                .insert(cache_key.to_string());
+        }
     }
 
     fn disk_image_timestamp(path: &Path) -> Option<SystemTime> {
@@ -7083,6 +7182,87 @@ mod tests {
         assert!(cache.contains_key("b"));
         assert!(cache.contains_key("c"));
         assert!(cache.contains_key("d"));
+    }
+
+    // --- Degraded get_or_load tests (LOD Stage 2) ---
+
+    #[test]
+    fn test_get_or_load_returns_degraded_texture_with_original_size() {
+        // A degraded entry should still return Some with the original display
+        // dimensions, even though the actual texture is 2x2.
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|ctx, ui| {
+            let tex = ctx.load_texture(
+                "full-res",
+                egui::ColorImage::new([100, 80], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            renderer.image_textures.borrow_mut().insert(
+                "assets/emoji/1f600.png".to_string(),
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [100, 80],
+                    modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([100, 80]),
+                    degraded: false,
+                },
+            );
+            // Degrade the entry — texture becomes 2x2 but size stays [100, 80].
+            renderer
+                .image_textures
+                .borrow_mut()
+                .degrade("assets/emoji/1f600.png", ctx);
+
+            let result = renderer.get_or_load_image_texture(ui, "assets/emoji/1f600.png");
+            assert!(result.is_some(), "degraded entry should still return Some");
+            let (_tex, w, h) = result.unwrap();
+            assert_eq!(w, 100, "width should be original display width");
+            assert_eq!(h, 80, "height should be original display height");
+        });
+    }
+
+    #[test]
+    fn test_degraded_entry_not_removed_when_stale() -> Result<()> {
+        // When a degraded entry's source file changes on disk (stale), the
+        // entry must NOT be removed — it stays in the cache as a layout
+        // placeholder while a reload is enqueued.
+        let renderer = MarkdownRenderer::new();
+        let temp = tempdir()?;
+        let image_path = temp.path().join("image.png");
+        std::fs::write(&image_path, tiny_png_bytes())?;
+        let resolved = image_path.to_string_lossy().to_string();
+
+        with_test_ui(|ctx, ui| {
+            let tex = ctx.load_texture(
+                "degraded-stale",
+                egui::ColorImage::new([2, 2], Color32::from_rgb(128, 128, 128)),
+                egui::TextureOptions::LINEAR,
+            );
+            renderer.image_textures.borrow_mut().insert(
+                resolved.clone(),
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [50, 40],
+                    // Use UNIX_EPOCH to ensure it's detected as stale
+                    modified: Some(SystemTime::UNIX_EPOCH),
+                    byte_size: 2 * 2 * 4,
+                    degraded: true,
+                },
+            );
+
+            let result = renderer.get_or_load_image_texture(ui, &resolved);
+            // Should still return the degraded texture (layout preservation).
+            assert!(result.is_some(), "degraded stale entry should return Some");
+            let (_tex, w, h) = result.unwrap();
+            assert_eq!(w, 50);
+            assert_eq!(h, 40);
+            // Entry must NOT have been removed from the cache.
+            assert!(
+                renderer.image_textures.borrow().contains_key(&resolved),
+                "degraded stale entry must not be removed from cache"
+            );
+        });
+        Ok(())
     }
 
     // --- Generation token tests ---
