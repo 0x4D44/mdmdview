@@ -442,6 +442,8 @@ struct ImageCacheEntry {
     modified: Option<SystemTime>,
     /// Approximate memory size in bytes (width * height * 4 for RGBA).
     byte_size: usize,
+    /// True when the texture has been replaced with a 2x2 placeholder to save memory.
+    degraded: bool,
 }
 
 impl ImageCacheEntry {
@@ -451,17 +453,17 @@ impl ImageCacheEntry {
     }
 }
 
-/// LRU cache for image textures with both entry count and memory size limits.
+/// Cache for image textures with entry count and memory size limits.
 ///
-/// Eviction occurs when either:
-/// - Entry count exceeds `capacity`
-/// - Total memory exceeds `MAX_IMAGE_TEXTURE_CACHE_BYTES`
+/// Entry count is capped at `capacity` (safety valve).  Memory budget is
+/// enforced separately by `enforce_budget()`, which degrades far-from-viewport
+/// entries to tiny placeholders instead of evicting them.
 ///
 /// # Performance Note
 ///
-/// The `touch()` and `remove()` operations use `VecDeque::retain()` which is O(n).
-/// This is acceptable because the cache capacity is bounded (256 entries max) and
-/// these operations are infrequent compared to `get()` which is O(1).
+/// The `remove()` operation uses `VecDeque::retain()` which is O(n).
+/// This is acceptable because the cache capacity is bounded (256 entries max)
+/// and these operations are infrequent compared to `get()` which is O(1).
 struct ImageCache {
     entries: HashMap<String, ImageCacheEntry>,
     order: VecDeque<String>,
@@ -488,75 +490,35 @@ impl ImageCache {
         }
     }
 
-    fn get(&mut self, key: &str) -> Option<ImageCacheEntry> {
-        let entry = self.entries.get(key).cloned();
-        if entry.is_some() {
-            self.touch(key);
-        }
-        entry
+    fn get(&self, key: &str) -> Option<ImageCacheEntry> {
+        self.entries.get(key).cloned()
     }
 
     fn insert(&mut self, key: String, entry: ImageCacheEntry) {
         let new_bytes = entry.byte_size;
 
-        // If key already exists, update value and adjust total_bytes
+        // If key already exists, update in-place and adjust total_bytes.
         if let Some(old_entry) = self.entries.get(&key) {
             self.total_bytes = self.total_bytes.saturating_sub(old_entry.byte_size);
-            self.entries.insert(key.clone(), entry);
+            self.entries.insert(key, entry);
             self.total_bytes += new_bytes;
-            self.touch(&key);
             return;
         }
 
-        // Evict entries if at entry capacity or memory limit exceeded.
-        // When viewport distances are available, evict the entry furthest from
-        // the viewport center.  Fall back to LRU (oldest) otherwise.
-        while self.entries.len() >= self.capacity
-            || (self.total_bytes + new_bytes > self.max_bytes && !self.entries.is_empty())
-        {
-            let evict_key = self.pick_eviction_candidate(&key);
-            if let Some(old_key) = evict_key {
-                self.order.retain(|k| k != &old_key);
+        // Entry-count safety valve: if at capacity, remove the oldest entry.
+        if self.entries.len() >= self.capacity {
+            if let Some(old_key) = self.order.front().cloned() {
+                self.order.pop_front();
                 self.viewport_distances.remove(&old_key);
                 if let Some(old_entry) = self.entries.remove(&old_key) {
                     self.total_bytes = self.total_bytes.saturating_sub(old_entry.byte_size);
                 }
-            } else {
-                break;
             }
         }
 
         self.order.push_back(key.clone());
         self.total_bytes += new_bytes;
         self.entries.insert(key, entry);
-    }
-
-    /// Pick the best eviction candidate.  If viewport distances are available
-    /// for at least two entries, evict the one furthest from the viewport —
-    /// but never evict `skip_key` (the entry about to be inserted).
-    /// Falls back to LRU (front of `order`) when distances are unavailable.
-    fn pick_eviction_candidate(&self, skip_key: &str) -> Option<String> {
-        // Try viewport-distance-based eviction first.
-        // We need at least two entries with distances so we don't evict the
-        // only nearby image.
-        let candidates_with_dist: Vec<_> = self
-            .viewport_distances
-            .iter()
-            .filter(|(k, _)| k.as_str() != skip_key && self.entries.contains_key(k.as_str()))
-            .collect();
-
-        if candidates_with_dist.len() >= 2 {
-            // Evict the entry with the greatest distance from viewport center
-            if let Some((key, _)) = candidates_with_dist
-                .iter()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            {
-                return Some((*key).clone());
-            }
-        }
-
-        // Fall back to LRU: oldest entry in `order`
-        self.order.front().cloned()
     }
 
     /// Replace viewport distances wholesale.  Called once per frame by the
@@ -584,9 +546,81 @@ impl ImageCache {
         self.total_bytes
     }
 
-    fn touch(&mut self, key: &str) {
-        self.order.retain(|entry| entry != key);
-        self.order.push_back(key.to_string());
+    /// Degrade an entry to a 2x2 neutral grey placeholder texture.
+    /// Preserves `size` (layout dimensions) and `modified` timestamp.
+    /// No-op if the key is not found or already degraded.
+    #[allow(dead_code)]
+    fn degrade(&mut self, key: &str, ctx: &egui::Context) {
+        let entry = match self.entries.get_mut(key) {
+            Some(e) => e,
+            None => return,
+        };
+        if entry.degraded {
+            return;
+        }
+        let old_bytes = entry.byte_size;
+        let placeholder = egui::ColorImage::new([2, 2], Color32::from_rgb(128, 128, 128));
+        entry.texture = ctx.load_texture(
+            format!("degraded:{key}"),
+            placeholder,
+            egui::TextureOptions::LINEAR,
+        );
+        entry.byte_size = 2 * 2 * 4;
+        entry.degraded = true;
+        self.total_bytes = self.total_bytes.saturating_sub(old_bytes) + entry.byte_size;
+    }
+
+    /// Degrade far-from-viewport entries until `total_bytes <= max_bytes`.
+    /// Entries are degraded furthest-first.  At least one non-degraded entry
+    /// is always preserved (the nearest to the viewport).
+    #[allow(dead_code)]
+    fn enforce_budget(&mut self, ctx: &egui::Context) {
+        if self.total_bytes <= self.max_bytes {
+            return;
+        }
+
+        // Collect non-degraded entries that have viewport distances.
+        let mut candidates: Vec<(String, f32)> = self
+            .entries
+            .iter()
+            .filter(|(_, e)| !e.degraded)
+            .filter_map(|(k, _)| {
+                self.viewport_distances
+                    .get(k)
+                    .map(|&d| (k.clone(), d))
+            })
+            .collect();
+
+        // Sort by distance descending (furthest first).
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Walk the list, degrading each until under budget or only one remains.
+        for (key, _) in &candidates {
+            // Keep at least one non-degraded entry.
+            let non_degraded_count = self.entries.values().filter(|e| !e.degraded).count();
+            if non_degraded_count <= 1 {
+                break;
+            }
+            self.degrade(key, ctx);
+            if self.total_bytes <= self.max_bytes {
+                break;
+            }
+        }
+    }
+
+    /// Returns true if restoring a degraded entry (replacing its 2x2 texture
+    /// with full-resolution) would keep `total_bytes` within `max_bytes`.
+    #[allow(dead_code)]
+    fn would_restore_fit(&self, key: &str) -> bool {
+        let entry = match self.entries.get(key) {
+            Some(e) => e,
+            None => return false,
+        };
+        if !entry.degraded {
+            return false;
+        }
+        let full_bytes = ImageCacheEntry::estimate_bytes(entry.size);
+        self.total_bytes - entry.byte_size + full_bytes <= self.max_bytes
     }
 
     fn clear(&mut self) {
@@ -6013,6 +6047,7 @@ impl MarkdownRenderer {
                 size,
                 modified,
                 byte_size: ImageCacheEntry::estimate_bytes(size),
+                degraded: false,
             },
         );
     }
@@ -6515,6 +6550,7 @@ mod tests {
                 size: [size[0] as u32, size[1] as u32],
                 modified: None,
                 byte_size: ImageCacheEntry::estimate_bytes([size[0] as u32, size[1] as u32]),
+                degraded: false,
             });
         });
         entry_slot.expect("texture")
@@ -6617,8 +6653,8 @@ mod tests {
     }
 
     #[test]
-    fn test_image_cache_tracks_memory_and_evicts_on_size_limit() {
-        // Create a cache with high entry limit but low memory limit
+    fn test_image_cache_tracks_memory_without_byte_eviction() {
+        // insert() no longer evicts based on bytes — only enforce_budget() does.
         let mut cache = ImageCache::new(100);
         cache.max_bytes = 32; // 8 pixels worth (2x2 RGBA = 16 bytes each)
 
@@ -6629,17 +6665,16 @@ mod tests {
         assert_eq!(cache.current_bytes(), 16);
         assert!(cache.contains_key("a"));
 
-        // Insert second entry (16 bytes) - should fit within 32 byte limit
+        // Insert second entry (16 bytes) — fits within 32 byte limit
         cache.insert("b".to_string(), entry.clone());
         assert_eq!(cache.current_bytes(), 32);
         assert!(cache.contains_key("a"));
         assert!(cache.contains_key("b"));
 
-        // Insert third entry - should evict "a" due to memory limit
+        // Insert third entry — does NOT evict despite exceeding max_bytes
         cache.insert("c".to_string(), entry);
-        // Memory should still be at 32 bytes (evicted "a", added "c")
-        assert_eq!(cache.current_bytes(), 32);
-        assert!(!cache.contains_key("a")); // Evicted due to memory limit
+        assert_eq!(cache.current_bytes(), 48);
+        assert!(cache.contains_key("a"));
         assert!(cache.contains_key("b"));
         assert!(cache.contains_key("c"));
     }
@@ -6682,93 +6717,127 @@ mod tests {
         assert_eq!(cache.current_bytes(), 0);
     }
 
-    // --- Viewport-aware eviction tests ---
+    // --- Viewport-aware degradation tests ---
 
     #[test]
-    fn test_image_cache_viewport_evicts_furthest() {
-        // Cache with low memory limit: fits exactly 2 entries of 16 bytes each
+    fn test_image_cache_enforce_budget_degrades_furthest() {
+        // Each 10x10 entry is 400 bytes. Budget fits 2 full entries (800 bytes).
         let mut cache = ImageCache::new(100);
-        cache.max_bytes = 32;
+        cache.max_bytes = 800;
 
-        let entry = make_test_cache_entry([2, 2]); // 16 bytes each
+        with_test_ui(|ctx, _ui| {
+            let make = |name: &str| {
+                let tex = ctx.load_texture(
+                    name,
+                    egui::ColorImage::new([10, 10], Color32::WHITE),
+                    egui::TextureOptions::LINEAR,
+                );
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [10, 10],
+                    modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([10, 10]), // 400
+                    degraded: false,
+                }
+            };
 
-        cache.insert("near".to_string(), entry.clone());
-        cache.insert("far".to_string(), entry.clone());
-        assert_eq!(cache.current_bytes(), 32);
+            cache.insert("near".to_string(), make("near"));
+            cache.insert("mid".to_string(), make("mid"));
+            cache.insert("far".to_string(), make("far"));
+            assert_eq!(cache.current_bytes(), 1200); // over budget of 800
 
-        // Set viewport distances: "far" is further away
-        let mut distances = HashMap::new();
-        distances.insert("near".to_string(), 100.0);
-        distances.insert("far".to_string(), 5000.0);
-        cache.update_viewport_distances(distances);
+            let mut distances = HashMap::new();
+            distances.insert("near".to_string(), 100.0);
+            distances.insert("mid".to_string(), 500.0);
+            distances.insert("far".to_string(), 5000.0);
+            cache.update_viewport_distances(distances);
 
-        // Inserting a third entry should evict "far" (greatest distance)
-        cache.insert("new".to_string(), entry);
-        assert!(cache.contains_key("near"), "near should survive");
-        assert!(!cache.contains_key("far"), "far should be evicted");
-        assert!(cache.contains_key("new"), "new should be inserted");
+            cache.enforce_budget(ctx);
+
+            // "far" should be degraded (furthest), others kept
+            assert!(cache.entries.get("far").unwrap().degraded, "far should be degraded");
+            assert!(!cache.entries.get("near").unwrap().degraded, "near should survive");
+            // total_bytes should be back under budget (800 - 400 + 16 = 416 ≤ 800)
+            assert!(cache.current_bytes() <= 800, "should be under budget");
+        });
     }
 
     #[test]
-    fn test_image_cache_viewport_eviction_does_not_evict_incoming_key() {
-        // Ensure the entry being inserted is never chosen as eviction victim
+    fn test_image_cache_enforce_budget_noop_under_budget() {
         let mut cache = ImageCache::new(100);
-        cache.max_bytes = 32;
+        cache.max_bytes = 500;
 
-        let entry = make_test_cache_entry([2, 2]); // 16 bytes each
-        cache.insert("a".to_string(), entry.clone());
-        cache.insert("b".to_string(), entry.clone());
+        with_test_ui(|ctx, _ui| {
+            let tex = ctx.load_texture(
+                "small",
+                egui::ColorImage::new([10, 10], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            cache.insert(
+                "a".to_string(),
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [10, 10],
+                    modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([10, 10]), // 400
+                    degraded: false,
+                },
+            );
 
-        // "new_entry" has the greatest distance, but it's the one being inserted
-        let mut distances = HashMap::new();
-        distances.insert("a".to_string(), 100.0);
-        distances.insert("b".to_string(), 200.0);
-        distances.insert("new_entry".to_string(), 9999.0);
-        cache.update_viewport_distances(distances);
+            let mut distances = HashMap::new();
+            distances.insert("a".to_string(), 100.0);
+            cache.update_viewport_distances(distances);
 
-        cache.insert("new_entry".to_string(), entry);
-        assert!(cache.contains_key("new_entry"), "incoming key must survive");
-        // "b" should be evicted (furthest among existing entries)
-        assert!(!cache.contains_key("b"), "b should be evicted (furthest)");
-        assert!(cache.contains_key("a"), "a should survive (nearest)");
+            cache.enforce_budget(ctx);
+            assert!(!cache.entries.get("a").unwrap().degraded);
+        });
     }
 
     #[test]
-    fn test_image_cache_viewport_falls_back_to_lru_without_distances() {
-        // With no viewport distances set, eviction should use LRU (oldest first)
+    fn test_image_cache_enforce_budget_stops_when_under_budget() {
+        // With 3 entries over budget, only enough should be degraded to get under.
         let mut cache = ImageCache::new(100);
-        cache.max_bytes = 32;
+        // Each 10x10 entry is 400 bytes. Budget fits 2 full entries (800 bytes).
+        cache.max_bytes = 800;
 
-        let entry = make_test_cache_entry([2, 2]); // 16 bytes
-        cache.insert("first".to_string(), entry.clone());
-        cache.insert("second".to_string(), entry.clone());
+        with_test_ui(|ctx, _ui| {
+            let make = |name: &str| {
+                let tex = ctx.load_texture(
+                    name,
+                    egui::ColorImage::new([10, 10], Color32::WHITE),
+                    egui::TextureOptions::LINEAR,
+                );
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [10, 10],
+                    modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([10, 10]), // 400
+                    degraded: false,
+                }
+            };
 
-        // No viewport distances set — should fall back to LRU
-        cache.insert("third".to_string(), entry);
-        assert!(!cache.contains_key("first"), "LRU oldest evicted");
-        assert!(cache.contains_key("second"));
-        assert!(cache.contains_key("third"));
-    }
+            cache.insert("a".to_string(), make("a"));
+            cache.insert("b".to_string(), make("b"));
+            cache.insert("c".to_string(), make("c"));
+            assert_eq!(cache.current_bytes(), 1200);
 
-    #[test]
-    fn test_image_cache_viewport_falls_back_with_only_one_distance() {
-        // With fewer than 2 entries having distances, fall back to LRU
-        let mut cache = ImageCache::new(100);
-        cache.max_bytes = 32;
+            let mut distances = HashMap::new();
+            distances.insert("a".to_string(), 100.0); // nearest
+            distances.insert("b".to_string(), 300.0);
+            distances.insert("c".to_string(), 500.0); // furthest
+            cache.update_viewport_distances(distances);
 
-        let entry = make_test_cache_entry([2, 2]);
-        cache.insert("a".to_string(), entry.clone());
-        cache.insert("b".to_string(), entry.clone());
+            cache.enforce_budget(ctx);
 
-        // Only one entry has a distance — not enough for viewport eviction
-        let mut distances = HashMap::new();
-        distances.insert("a".to_string(), 100.0);
-        cache.update_viewport_distances(distances);
-
-        cache.insert("c".to_string(), entry);
-        assert!(!cache.contains_key("a"), "LRU oldest evicted");
-        assert!(cache.contains_key("b"));
-        assert!(cache.contains_key("c"));
+            // Only "c" should be degraded (furthest) — that brings us to 800 + 16 = 816
+            // Wait, 400 + 400 + 16 = 816. That's still > 800. So "b" might also be degraded.
+            // Let's verify: 1200 - 400 + 16 = 816 > 800, so "b" also gets degraded.
+            // 816 - 400 + 16 = 432 ≤ 800. Now under budget.
+            assert!(cache.entries.get("c").unwrap().degraded, "c (furthest) should be degraded");
+            assert!(cache.entries.get("b").unwrap().degraded, "b (mid) should also be degraded");
+            assert!(!cache.entries.get("a").unwrap().degraded, "a (nearest) should survive");
+            assert!(cache.current_bytes() <= 800);
+        });
     }
 
     #[test]
@@ -6797,6 +6866,223 @@ mod tests {
 
         cache.remove("a");
         assert!(!cache.viewport_distances.contains_key("a"));
+    }
+
+    // --- Degrade / enforce_budget / would_restore_fit unit tests ---
+
+    #[test]
+    fn test_degrade_reduces_bytes() {
+        let mut cache = ImageCache::new(100);
+        with_test_ui(|ctx, _ui| {
+            let tex = ctx.load_texture(
+                "big",
+                egui::ColorImage::new([10, 10], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            cache.insert(
+                "img".to_string(),
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [10, 10],
+                    modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([10, 10]), // 400
+                    degraded: false,
+                },
+            );
+            assert_eq!(cache.current_bytes(), 400);
+
+            cache.degrade("img", ctx);
+
+            let entry = cache.entries.get("img").unwrap();
+            assert!(entry.degraded);
+            assert_eq!(entry.byte_size, 16); // 2*2*4
+            assert_eq!(cache.current_bytes(), 16);
+        });
+    }
+
+    #[test]
+    fn test_degrade_preserves_size() {
+        let mut cache = ImageCache::new(100);
+        with_test_ui(|ctx, _ui| {
+            let tex = ctx.load_texture(
+                "sized",
+                egui::ColorImage::new([10, 10], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            cache.insert(
+                "img".to_string(),
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [200, 150],
+                    modified: Some(SystemTime::UNIX_EPOCH),
+                    byte_size: ImageCacheEntry::estimate_bytes([200, 150]),
+                    degraded: false,
+                },
+            );
+
+            cache.degrade("img", ctx);
+
+            let entry = cache.entries.get("img").unwrap();
+            assert_eq!(entry.size, [200, 150], "size must be preserved");
+            assert_eq!(
+                entry.modified,
+                Some(SystemTime::UNIX_EPOCH),
+                "modified must be preserved"
+            );
+        });
+    }
+
+    #[test]
+    fn test_degrade_noop_if_already_degraded() {
+        let mut cache = ImageCache::new(100);
+        with_test_ui(|ctx, _ui| {
+            let tex = ctx.load_texture(
+                "d",
+                egui::ColorImage::new([10, 10], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            cache.insert(
+                "img".to_string(),
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [10, 10],
+                    modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([10, 10]),
+                    degraded: false,
+                },
+            );
+
+            cache.degrade("img", ctx);
+            assert_eq!(cache.current_bytes(), 16);
+
+            // Second degrade is a no-op
+            cache.degrade("img", ctx);
+            assert_eq!(cache.current_bytes(), 16);
+            assert!(cache.entries.get("img").unwrap().degraded);
+        });
+    }
+
+    #[test]
+    fn test_degrade_noop_if_key_missing() {
+        let mut cache = ImageCache::new(100);
+        with_test_ui(|ctx, _ui| {
+            let before = cache.current_bytes();
+            cache.degrade("nonexistent", ctx);
+            assert_eq!(cache.current_bytes(), before);
+        });
+    }
+
+    #[test]
+    fn test_insert_no_byte_eviction() {
+        // Verify that inserting when over max_bytes does NOT evict.
+        let mut cache = ImageCache::new(100);
+        cache.max_bytes = 16;
+
+        let entry = make_test_cache_entry([2, 2]); // 16 bytes
+        cache.insert("a".to_string(), entry.clone());
+        cache.insert("b".to_string(), entry);
+        // Both entries should coexist even though total (32) > max_bytes (16)
+        assert!(cache.contains_key("a"));
+        assert!(cache.contains_key("b"));
+        assert_eq!(cache.current_bytes(), 32);
+    }
+
+    #[test]
+    fn test_insert_count_limit_still_works() {
+        let mut cache = ImageCache::new(2);
+        let entry = make_test_cache_entry([2, 2]);
+
+        cache.insert("a".to_string(), entry.clone());
+        cache.insert("b".to_string(), entry.clone());
+        cache.insert("c".to_string(), entry);
+
+        // "a" should be evicted (oldest by insertion order)
+        assert!(!cache.contains_key("a"));
+        assert!(cache.contains_key("b"));
+        assert!(cache.contains_key("c"));
+        assert_eq!(cache.entries.len(), 2);
+    }
+
+    #[test]
+    fn test_would_restore_fit() {
+        let mut cache = ImageCache::new(100);
+        // Budget of 400 bytes
+        cache.max_bytes = 400;
+
+        with_test_ui(|ctx, _ui| {
+            let tex = ctx.load_texture(
+                "restorable",
+                egui::ColorImage::new([10, 10], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            cache.insert(
+                "img".to_string(),
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [10, 10],
+                    modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([10, 10]), // 400
+                    degraded: false,
+                },
+            );
+            cache.degrade("img", ctx);
+            // Now 16 bytes used. Restoring would use 400. Budget is 400. Should fit.
+            assert!(cache.would_restore_fit("img"));
+
+            // Shrink budget so restore wouldn't fit
+            cache.max_bytes = 200;
+            assert!(!cache.would_restore_fit("img"));
+
+            // Non-degraded entry returns false
+            let tex2 = ctx.load_texture(
+                "full",
+                egui::ColorImage::new([2, 2], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            cache.insert(
+                "full".to_string(),
+                ImageCacheEntry {
+                    texture: tex2,
+                    size: [2, 2],
+                    modified: None,
+                    byte_size: 16,
+                    degraded: false,
+                },
+            );
+            assert!(!cache.would_restore_fit("full"));
+
+            // Missing key returns false
+            assert!(!cache.would_restore_fit("missing"));
+        });
+    }
+
+    #[test]
+    fn test_get_no_touch() {
+        // Verify get() doesn't reorder `order` — it's now a pure lookup.
+        let mut cache = ImageCache::new(3);
+        let entry = make_test_cache_entry([2, 2]);
+
+        cache.insert("a".to_string(), entry.clone());
+        cache.insert("b".to_string(), entry.clone());
+        cache.insert("c".to_string(), entry.clone());
+
+        // Order should be [a, b, c]
+        assert_eq!(cache.order[0], "a");
+        assert_eq!(cache.order[1], "b");
+        assert_eq!(cache.order[2], "c");
+
+        // get("a") should NOT move "a" to the back
+        let _ = cache.get("a");
+        assert_eq!(cache.order[0], "a", "get() must not reorder");
+        assert_eq!(cache.order[1], "b");
+        assert_eq!(cache.order[2], "c");
+
+        // Insert "d" — should evict "a" (front of order), proving order wasn't touched
+        cache.insert("d".to_string(), entry);
+        assert!(!cache.contains_key("a"), "a should be evicted (oldest)");
+        assert!(cache.contains_key("b"));
+        assert!(cache.contains_key("c"));
+        assert!(cache.contains_key("d"));
     }
 
     // --- Generation token tests ---
@@ -11198,6 +11484,7 @@ contexts:
                     size: [64, 32],
                     modified: None,
                     byte_size: ImageCacheEntry::estimate_bytes([64, 32]),
+                    degraded: false,
                 },
             );
             let spans = vec![
@@ -11257,6 +11544,7 @@ contexts:
                     size: [2, 2],
                     modified: Some(SystemTime::UNIX_EPOCH),
                     byte_size: ImageCacheEntry::estimate_bytes([2, 2]),
+                    degraded: false,
                 },
             );
 
@@ -11336,8 +11624,8 @@ contexts:
     }
 
     /// Integration test: solid-color PNGs that are tiny on disk but large when
-    /// decoded.  Verifies that (a) cache pressure triggers eviction and
-    /// (b) viewport-aware eviction keeps near images and drops far ones.
+    /// decoded.  Verifies that (a) insert() does not evict by bytes, and
+    /// (b) enforce_budget() degrades far entries to bring memory under budget.
     #[test]
     fn test_cache_pressure_with_large_decoded_images() {
         let renderer = MarkdownRenderer::new();
@@ -11365,59 +11653,56 @@ contexts:
         );
 
         with_test_ui(|ctx, _ui| {
-            // Simulate the background loader completing all 4 images
-            for (i, key) in keys.iter().enumerate() {
+            // Simulate the background loader completing all 4 images.
+            // insert() no longer evicts by bytes — all 4 should be present.
+            for key in keys.iter() {
                 let image = egui::ColorImage::new([200, 200], Color32::WHITE);
                 let tex =
                     ctx.load_texture(format!("img:{key}"), image, egui::TextureOptions::LINEAR);
                 renderer.store_image_texture(key, tex, [200, 200], None);
-
-                // After inserting image 2 (index 2), cache should have evicted
-                // to stay within the 2-image budget
-                if i >= 2 {
-                    let cache = renderer.image_textures.borrow();
-                    assert!(
-                        cache.entries.len() <= 2,
-                        "cache should hold at most 2 images, has {}",
-                        cache.entries.len()
-                    );
-                }
             }
 
-            // Now set viewport distances and insert a 5th image to test
-            // viewport-aware eviction.  Make keys[2] "near" and keys[3] "far".
+            {
+                let cache = renderer.image_textures.borrow();
+                assert_eq!(
+                    cache.entries.len(),
+                    4,
+                    "all 4 images should be present (no byte eviction on insert)"
+                );
+                assert_eq!(cache.current_bytes(), 160_000 * 4);
+            }
+
+            // Set viewport distances: keys[0] near, keys[3] far
             {
                 let mut cache = renderer.image_textures.borrow_mut();
                 let mut distances = HashMap::new();
-                for key in cache.entries.keys() {
-                    // Find which of our keys are still in the cache
-                    if *key == keys[2] || *key == keys[3] {
-                        let dist = if *key == keys[2] { 10.0 } else { 9999.0 };
-                        distances.insert(key.clone(), dist);
-                    }
+                for (i, key) in keys.iter().enumerate() {
+                    distances.insert(key.clone(), (i as f32 + 1.0) * 1000.0);
                 }
                 cache.update_viewport_distances(distances);
             }
 
-            // Insert a new image — should evict keys[3] (far), keep keys[2] (near)
-            let new_key = "new_image".to_string();
-            let image = egui::ColorImage::new([200, 200], Color32::WHITE);
-            let tex = ctx.load_texture(
-                format!("img:{new_key}"),
-                image,
-                egui::TextureOptions::LINEAR,
-            );
-            renderer.store_image_texture(&new_key, tex, [200, 200], None);
+            // enforce_budget should degrade the furthest entries
+            {
+                let mut cache = renderer.image_textures.borrow_mut();
+                cache.enforce_budget(ctx);
+            }
 
             let cache = renderer.image_textures.borrow();
+            // All entries should still exist (degraded, not evicted)
+            for key in &keys {
+                assert!(cache.contains_key(key), "entry should still exist: {key}");
+            }
+            // Memory should be at or under budget
             assert!(
-                cache.contains_key(&keys[2]),
-                "near image should survive eviction"
+                cache.current_bytes() <= 160_000 * 2,
+                "total_bytes should be under budget, got {}",
+                cache.current_bytes()
             );
-            assert!(!cache.contains_key(&keys[3]), "far image should be evicted");
+            // Near entry should not be degraded
             assert!(
-                cache.contains_key(&new_key),
-                "newly inserted image should exist"
+                !cache.entries.get(&keys[0]).unwrap().degraded,
+                "nearest image should not be degraded"
             );
         });
     }
@@ -11493,6 +11778,7 @@ contexts:
                     size: [120, 80],
                     modified: None,
                     byte_size: ImageCacheEntry::estimate_bytes([120, 80]),
+                    degraded: false,
                 },
             );
             let table_id = renderer.compute_table_id(&headers, &rows, &[], 12);
@@ -12093,6 +12379,7 @@ contexts:
                     size: [200, 120],
                     modified: None,
                     byte_size: ImageCacheEntry::estimate_bytes([200, 120]),
+                    degraded: false,
                 },
             );
             let span = InlineSpan::Image {
@@ -12215,6 +12502,7 @@ contexts:
                     size: [20, 12],
                     modified: None,
                     byte_size: ImageCacheEntry::estimate_bytes([20, 12]),
+                    degraded: false,
                 },
             );
             let span = InlineSpan::Image {
@@ -13926,6 +14214,7 @@ contexts:
                     size: [64, 32],
                     modified: None,
                     byte_size: ImageCacheEntry::estimate_bytes([64, 32]),
+                    degraded: false,
                 },
             );
 
