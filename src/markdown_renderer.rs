@@ -206,7 +206,7 @@ const IMAGE_FAILURE_CACHE_CAPACITY: usize = 256;
 /// slightly different values on successive calls for the same unmodified file.
 const IMAGE_TIMESTAMP_TOLERANCE: Duration = Duration::from_secs(30);
 /// Maximum total bytes for the image texture cache (100 MB).
-/// When exceeded, entries are evicted (furthest from viewport, or LRU)
+/// When exceeded, entries are degraded (furthest from viewport first)
 /// until under the limit.
 const MAX_IMAGE_TEXTURE_CACHE_BYTES: usize = 100 * 1024 * 1024;
 /// Headroom factor for image downscaling.  Images wider (or taller) than
@@ -469,11 +469,11 @@ struct ImageCache {
     capacity: usize,
     /// Total approximate bytes of all cached textures.
     total_bytes: usize,
-    /// Maximum total bytes before size-based eviction triggers.
+    /// Maximum total bytes before degradation triggers.
     max_bytes: usize,
     /// Distance of each cached image from the viewport center (in pixels).
-    /// Updated each frame by the renderer.  When non-empty, eviction prefers
-    /// the entry with the greatest distance instead of plain LRU order.
+    /// Updated each frame by the renderer.  When non-empty, enforce_budget()
+    /// degrades the entry with the greatest distance first.
     viewport_distances: HashMap<String, f32>,
 }
 
@@ -634,7 +634,7 @@ impl ImageCache {
             return false;
         }
         let full_bytes = ImageCacheEntry::estimate_bytes(entry.size);
-        self.total_bytes - entry.byte_size + full_bytes <= self.max_bytes
+        self.total_bytes.saturating_sub(entry.byte_size) + full_bytes <= self.max_bytes
     }
 
     fn clear(&mut self) {
@@ -695,7 +695,7 @@ pub struct MarkdownRenderer {
     image_generation: Cell<u64>,
     // Per-frame Y position of each image (keyed by resolved path) for viewport
     // distance calculation.  Populated during rendering, consumed at frame end
-    // to update the cache's eviction distances.
+    // to update the cache's degradation distances.
     image_doc_y: RefCell<HashMap<String, f32>>,
     // Mapping of header id -> last rendered rect (for in-document navigation)
     header_rects: RefCell<HashMap<String, egui::Rect>>,
@@ -2917,7 +2917,7 @@ impl MarkdownRenderer {
             self.element_rects.borrow_mut().push(ir.response.rect);
         }
 
-        // Update viewport distances for image cache eviction.
+        // Update viewport distances for image cache degradation.
         // `clip_rect()` gives the visible portion of the scroll area.
         let viewport_height = ui.clip_rect().height();
         self.last_viewport_height.set(viewport_height);
@@ -3135,7 +3135,7 @@ impl MarkdownRenderer {
                     let size = egui::vec2((tw * scale).round(), (th * scale).round());
                     let image = egui::Image::new(&tex).fit_to_exact_size(size);
                     let resp = ui.add(image);
-                    // Track Y position for viewport-aware cache eviction
+                    // Track Y position for viewport-aware cache degradation
                     self.image_doc_y
                         .borrow_mut()
                         .insert(resolved.clone(), resp.rect.center().y);
@@ -3188,7 +3188,7 @@ impl MarkdownRenderer {
                                     .size(self.font_sizes.body),
                             );
                         });
-                    // Track Y position for viewport-aware cache eviction
+                    // Track Y position for viewport-aware cache degradation
                     self.image_doc_y
                         .borrow_mut()
                         .insert(resolved.clone(), placeholder_resp.response.rect.center().y);
@@ -6942,10 +6942,8 @@ mod tests {
 
             cache.enforce_budget(ctx);
 
-            // Only "c" should be degraded (furthest) — that brings us to 800 + 16 = 816
-            // Wait, 400 + 400 + 16 = 816. That's still > 800. So "b" might also be degraded.
-            // Let's verify: 1200 - 400 + 16 = 816 > 800, so "b" also gets degraded.
-            // 816 - 400 + 16 = 432 ≤ 800. Now under budget.
+            // 1200 - 400(c) + 16 = 816 > 800 → "c" degraded, still over budget.
+            // 816 - 400(b) + 16 = 432 ≤ 800 → "b" also degraded, now under budget.
             assert!(cache.entries.get("c").unwrap().degraded, "c (furthest) should be degraded");
             assert!(cache.entries.get("b").unwrap().degraded, "b (mid) should also be degraded");
             assert!(!cache.entries.get("a").unwrap().degraded, "a (nearest) should survive");
