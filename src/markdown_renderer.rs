@@ -297,14 +297,13 @@ where
     }
 
     /// Clears all entries from the cache.
-    #[allow(dead_code)] // Used in tests and Stage 6
     fn clear(&mut self) {
         self.entries.clear();
         self.order.clear();
     }
 
     /// Returns the number of entries in the cache.
-    #[allow(dead_code)] // Used in tests and Stage 8 logging
+    #[allow(dead_code)] // Used in tests (texture_cache_stats)
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -549,7 +548,6 @@ impl ImageCache {
     /// Degrade an entry to a 2x2 neutral grey placeholder texture.
     /// Preserves `size` (layout dimensions) and `modified` timestamp.
     /// No-op if the key is not found or already degraded.
-    #[allow(dead_code)]
     fn degrade(&mut self, key: &str, ctx: &egui::Context) {
         let entry = match self.entries.get_mut(key) {
             Some(e) => e,
@@ -609,7 +607,6 @@ impl ImageCache {
 
     /// Returns true if restoring a degraded entry (replacing its 2x2 texture
     /// with full-resolution) would keep `total_bytes` within `max_bytes`.
-    #[allow(dead_code)]
     fn would_restore_fit(&self, key: &str) -> bool {
         let entry = match self.entries.get(key) {
             Some(e) => e,
