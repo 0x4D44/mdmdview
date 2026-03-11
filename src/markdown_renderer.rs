@@ -5870,6 +5870,12 @@ impl MarkdownRenderer {
                 if let Some(entry) = cache.entries.get(result_key) {
                     if entry.degraded {
                         let est = ImageCacheEntry::estimate_bytes(entry.size);
+                        debug_assert!(
+                            cache.pending_restore_bytes >= est,
+                            "pending_restore_bytes underflow: {} < {}",
+                            cache.pending_restore_bytes,
+                            est
+                        );
                         cache.pending_restore_bytes =
                             cache.pending_restore_bytes.saturating_sub(est);
                     }
@@ -5905,6 +5911,15 @@ impl MarkdownRenderer {
                 }
             }
         }
+        // Self-correction: if no images are pending but the counter is non-zero,
+        // a result was lost (e.g. worker panic). Reset to prevent permanent budget leak.
+        if self.image_pending.borrow().is_empty() {
+            let mut cache = self.image_textures.borrow_mut();
+            if cache.pending_restore_bytes > 0 {
+                cache.pending_restore_bytes = 0;
+            }
+        }
+
         if changed {
             ctx.request_repaint();
         }
