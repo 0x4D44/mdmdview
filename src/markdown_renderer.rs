@@ -573,7 +573,6 @@ impl ImageCache {
     /// Degrade far-from-viewport entries until `total_bytes <= max_bytes`.
     /// Entries are degraded furthest-first.  At least one non-degraded entry
     /// is always preserved (the nearest to the viewport).
-    #[allow(dead_code)]
     fn enforce_budget(&mut self, ctx: &egui::Context) {
         if self.total_bytes <= self.max_bytes {
             return;
@@ -2915,9 +2914,9 @@ impl MarkdownRenderer {
             .map(|(key, &y)| (key.clone(), (y - viewport_center_y).abs()))
             .collect();
         if !distances.is_empty() {
-            self.image_textures
-                .borrow_mut()
-                .update_viewport_distances(distances);
+            let mut cache = self.image_textures.borrow_mut();
+            cache.update_viewport_distances(distances);
+            cache.enforce_budget(ui.ctx());
         }
 
         // Add a little extra breathing room at the end so
