@@ -475,6 +475,10 @@ struct ImageCache {
     /// Updated each frame by the renderer.  When non-empty, enforce_budget()
     /// degrades the entry with the greatest distance first.
     viewport_distances: HashMap<String, f32>,
+    /// Estimated bytes of all in-flight restore reloads (enqueued but not yet
+    /// completed).  Used by `would_restore_fit` to prevent over-committing the
+    /// budget when multiple degraded images are enqueued in the same frame.
+    pending_restore_bytes: usize,
 }
 
 impl ImageCache {
@@ -486,6 +490,7 @@ impl ImageCache {
             total_bytes: 0,
             max_bytes: MAX_IMAGE_TEXTURE_CACHE_BYTES,
             viewport_distances: HashMap::new(),
+            pending_restore_bytes: 0,
         }
     }
 
@@ -634,7 +639,10 @@ impl ImageCache {
             return false;
         }
         let full_bytes = ImageCacheEntry::estimate_bytes(entry.size);
-        self.total_bytes.saturating_sub(entry.byte_size) + full_bytes <= self.max_bytes
+        self.total_bytes.saturating_sub(entry.byte_size)
+            + full_bytes
+            + self.pending_restore_bytes
+            <= self.max_bytes
     }
 
     fn clear(&mut self) {
@@ -642,6 +650,7 @@ impl ImageCache {
         self.order.clear();
         self.total_bytes = 0;
         self.viewport_distances.clear();
+        self.pending_restore_bytes = 0;
     }
 }
 
@@ -5694,6 +5703,7 @@ impl MarkdownRenderer {
         self.image_pending.borrow_mut().clear();
         self.image_failures.borrow_mut().clear();
         self.image_doc_y.borrow_mut().clear();
+        self.image_textures.borrow_mut().pending_restore_bytes = 0;
     }
 
     /// Returns image cache stats: `(entries, used_mb, max_mb)`.
@@ -5848,6 +5858,24 @@ impl MarkdownRenderer {
                 continue;
             }
 
+            // Decrement pending_restore_bytes for current-generation results
+            // that are completing a degraded restore reload.
+            {
+                let result_key = match &result {
+                    ImageLoadResult::Loaded { key, .. } | ImageLoadResult::Failed { key, .. } => {
+                        key.as_str()
+                    }
+                };
+                let mut cache = self.image_textures.borrow_mut();
+                if let Some(entry) = cache.entries.get(result_key) {
+                    if entry.degraded {
+                        let est = ImageCacheEntry::estimate_bytes(entry.size);
+                        cache.pending_restore_bytes =
+                            cache.pending_restore_bytes.saturating_sub(est);
+                    }
+                }
+            }
+
             match result {
                 ImageLoadResult::Loaded {
                     key,
@@ -5993,17 +6021,23 @@ impl MarkdownRenderer {
                             in_reload_zone && cache.would_restore_fit(&cache_key)
                         }
                     };
+                    // Compute restore bytes before dropping the cache borrow.
+                    let restore_bytes = ImageCacheEntry::estimate_bytes(entry.size);
                     // Drop the immutable cache borrow before enqueuing.
                     drop(cache);
 
                     if should_reload {
-                        self.enqueue_degraded_reload(
+                        let enqueued = self.enqueue_degraded_reload(
                             resolved_src,
                             &cache_key,
                             embedded,
                             is_remote,
                             path,
                         );
+                        if enqueued {
+                            self.image_textures.borrow_mut().pending_restore_bytes +=
+                                restore_bytes;
+                        }
                     }
                     return result;
                 }
@@ -6079,6 +6113,9 @@ impl MarkdownRenderer {
     /// Builds the appropriate `ImageLoadSource` and sends an `ImageLoadRequest`
     /// to the background loader.  Data URIs are excluded (they are decoded
     /// synchronously and never degraded in the normal flow).
+    ///
+    /// Returns `true` if the reload was successfully enqueued, `false` if the
+    /// channel was full or the source file doesn't exist.
     fn enqueue_degraded_reload(
         &self,
         resolved_src: &str,
@@ -6086,14 +6123,14 @@ impl MarkdownRenderer {
         embedded: Option<&'static [u8]>,
         is_remote: bool,
         path: &Path,
-    ) {
+    ) -> bool {
         let source = if let Some(bytes) = embedded {
             ImageLoadSource::Embedded(bytes)
         } else if is_remote {
             ImageLoadSource::Remote(resolved_src.to_string())
         } else {
             if !path.exists() {
-                return;
+                return false;
             }
             ImageLoadSource::File(path.to_path_buf())
         };
@@ -6107,6 +6144,9 @@ impl MarkdownRenderer {
             self.image_pending
                 .borrow_mut()
                 .insert(cache_key.to_string());
+            true
+        } else {
+            false
         }
     }
 
@@ -7216,6 +7256,76 @@ mod tests {
             // Missing key returns false
             assert!(!cache.would_restore_fit("missing"));
         });
+    }
+
+    #[test]
+    fn test_would_restore_fit_accounts_for_pending_bytes() {
+        let mut cache = ImageCache::new(100);
+        // Budget of 800 bytes. Two 10x10 images (400 bytes each).
+        cache.max_bytes = 800;
+
+        with_test_ui(|ctx, _ui| {
+            // Insert and degrade two images.
+            for name in &["img_a", "img_b"] {
+                let tex = ctx.load_texture(
+                    *name,
+                    egui::ColorImage::new([10, 10], Color32::WHITE),
+                    egui::TextureOptions::LINEAR,
+                );
+                cache.insert(
+                    name.to_string(),
+                    ImageCacheEntry {
+                        texture: tex,
+                        size: [10, 10],
+                        modified: None,
+                        byte_size: ImageCacheEntry::estimate_bytes([10, 10]), // 400
+                        degraded: false,
+                    },
+                );
+                cache.degrade(name, ctx);
+            }
+            // Both degraded: total_bytes = 32 (two 2x2 placeholders).
+            // Restoring either one: 32 - 16 + 400 = 416 ≤ 800. Fits.
+            assert!(cache.would_restore_fit("img_a"));
+            assert!(cache.would_restore_fit("img_b"));
+
+            // Simulate enqueuing img_a's restore: pending_restore_bytes = 400.
+            cache.pending_restore_bytes = ImageCacheEntry::estimate_bytes([10, 10]);
+            // Now img_b: 32 - 16 + 400 + 400 = 816 > 800. Doesn't fit.
+            assert!(!cache.would_restore_fit("img_b"));
+            // img_a still individually fits (its own pending is already counted,
+            // but that's correct — the check is conservative).
+            // 32 - 16 + 400 + 400 = 816 > 800. Also blocked.
+            assert!(!cache.would_restore_fit("img_a"));
+
+            // Increase budget so both fit even with pending.
+            cache.max_bytes = 900;
+            // 32 - 16 + 400 + 400 = 816 ≤ 900. Fits.
+            assert!(cache.would_restore_fit("img_b"));
+        });
+    }
+
+    #[test]
+    fn test_pending_restore_bytes_cleared_by_clear() {
+        let mut cache = ImageCache::new(100);
+        cache.pending_restore_bytes = 12345;
+        cache.clear();
+        assert_eq!(cache.pending_restore_bytes, 0);
+    }
+
+    #[test]
+    fn test_pending_restore_bytes_zeroed_on_reset() {
+        // Verify that reset_image_state() zeros pending_restore_bytes on the cache.
+        let renderer = MarkdownRenderer::new();
+        renderer.image_textures.borrow_mut().pending_restore_bytes = 99999;
+        renderer.reset_image_state();
+        assert_eq!(renderer.image_textures.borrow().pending_restore_bytes, 0);
+    }
+
+    #[test]
+    fn test_pending_restore_bytes_initialized_to_zero() {
+        let cache = ImageCache::new(100);
+        assert_eq!(cache.pending_restore_bytes, 0);
     }
 
     #[test]
