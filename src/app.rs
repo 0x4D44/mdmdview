@@ -821,7 +821,7 @@ impl MarkdownViewerApp {
                                  // Ensure scroll resets to top on new content
         self.pending_scroll_to_element = Some(0);
         self.renderer.clear_table_layout_cache();
-        self.renderer.clear_image_failure_cache();
+        self.renderer.reset_image_state();
 
         match self.renderer.parse(content) {
             Ok(elements) => {
@@ -2433,6 +2433,15 @@ impl MarkdownViewerApp {
             }
         }
 
+        if let Some((used_mb, max_mb)) = self.renderer.image_cache_pressure() {
+            aux_labels.push((
+                format!("Image cache: {used_mb:.0}/{max_mb:.0} MB"),
+                Some(tc.status_cache_pressure),
+                false,
+                None,
+            ));
+        }
+
         let aux_width = aux_labels
             .iter()
             .fold(0.0, |width, (text, _, _, max_width)| {
@@ -2548,6 +2557,10 @@ impl MarkdownViewerApp {
         ui.label(format!("Built: {}", BUILD_TIMESTAMP));
         ui.label(format!("View: {}", self.status_view_label()));
         ui.label(format!("Parsed elements: {}", self.parsed_elements.len()));
+        let (entries, used_mb, max_mb) = self.renderer.image_cache_stats();
+        ui.label(format!(
+            "Image cache: {used_mb:.1} / {max_mb:.0} MB, {entries} entries"
+        ));
 
         if let Some(stats) = &self.readability_stats {
             ui.separator();

@@ -38,6 +38,7 @@ pub struct ThemeColors {
     pub status_loading: Color32,
     pub status_queue: Color32,
     pub status_hint: Color32,
+    pub status_cache_pressure: Color32,
 }
 
 impl ThemeColors {
@@ -62,6 +63,7 @@ impl ThemeColors {
         status_loading: Color32::from_rgb(120, 200, 255),
         status_queue: Color32::from_rgb(100, 150, 255),
         status_hint: Color32::GRAY,
+        status_cache_pressure: Color32::from_rgb(255, 200, 60),
     };
 
     /// Light palette — readable on white/light backgrounds.
@@ -85,6 +87,7 @@ impl ThemeColors {
         status_loading: Color32::from_rgb(30, 120, 200),
         status_queue: Color32::from_rgb(30, 100, 200),
         status_hint: Color32::from_rgb(130, 130, 130),
+        status_cache_pressure: Color32::from_rgb(200, 150, 0),
     };
 
     /// Returns the palette for the given mode.
