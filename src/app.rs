@@ -58,12 +58,7 @@ fn process_memory_mb() -> Option<f64> {
         unsafe {
             let mut counters: ProcessMemoryCounters = std::mem::zeroed();
             counters.cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
-            if K32GetProcessMemoryInfo(
-                GetCurrentProcess(),
-                &mut counters,
-                counters.cb,
-            ) != 0
-            {
+            if K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) != 0 {
                 Some(counters.WorkingSetSize as f64 / (1024.0 * 1024.0))
             } else {
                 None
