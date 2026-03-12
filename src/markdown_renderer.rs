@@ -573,33 +573,37 @@ impl ImageCache {
         self.total_bytes = self.total_bytes.saturating_sub(old_bytes) + entry.byte_size;
     }
 
-    /// Degrade far-from-viewport entries until `total_bytes <= max_bytes`.
-    /// Entries are degraded furthest-first.  At least one non-degraded entry
-    /// is always preserved (the nearest to the viewport).
-    fn enforce_budget(&mut self, ctx: &egui::Context) {
-        if self.total_bytes <= self.max_bytes {
-            return;
-        }
-
+    /// Degrade far-from-viewport entries to keep memory within budget and
+    /// create headroom for near-viewport degraded entries to restore.
+    ///
+    /// Phase 1: Degrade orphan entries (no viewport distance, from old documents).
+    /// Phase 2: Degrade current-document entries furthest-first until under budget.
+    /// Phase 3: Proactively degrade far non-degraded entries to make room for
+    ///   near-viewport degraded entries. Without this, enforce_budget and
+    ///   would_restore_fit deadlock: enforce_budget stops because under budget,
+    ///   but would_restore_fit blocks restores because there's no headroom.
+    fn enforce_budget(&mut self, ctx: &egui::Context, viewport_height: f32) {
         // Phase 1: Degrade orphan entries (no viewport distance) first.
         // These are leftovers from a previous document — safe to degrade before
         // touching current-document entries.
-        let orphans: Vec<String> = self
-            .entries
-            .iter()
-            .filter(|(_, e)| !e.degraded)
-            .filter(|(k, _)| !self.viewport_distances.contains_key(k.as_str()))
-            .map(|(k, _)| k.clone())
-            .collect();
-        for key in &orphans {
-            self.degrade(key, ctx);
-            if self.total_bytes <= self.max_bytes {
-                return;
+        if self.total_bytes > self.max_bytes {
+            let orphans: Vec<String> = self
+                .entries
+                .iter()
+                .filter(|(_, e)| !e.degraded)
+                .filter(|(k, _)| !self.viewport_distances.contains_key(k.as_str()))
+                .map(|(k, _)| k.clone())
+                .collect();
+            for key in &orphans {
+                self.degrade(key, ctx);
+                if self.total_bytes <= self.max_bytes {
+                    break;
+                }
             }
         }
 
-        // Phase 2: Degrade current-document entries by viewport distance
-        // (furthest first).
+        // Build sorted candidate list (non-degraded entries with distances,
+        // sorted furthest-first). Used by both Phase 2 and Phase 3.
         let mut candidates: Vec<(String, f32)> = self
             .entries
             .iter()
@@ -610,20 +614,64 @@ impl ImageCache {
                     .map(|&d| (k.clone(), d))
             })
             .collect();
-
-        // Sort by distance descending (furthest first).
         candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Walk the list, degrading each until under budget or only one remains.
-        for (key, _) in &candidates {
-            // Keep at least one non-degraded entry.
-            let non_degraded_count = self.entries.values().filter(|e| !e.degraded).count();
-            if non_degraded_count <= 1 {
-                break;
+        // Phase 2: Degrade current-document entries furthest-first until under budget.
+        if self.total_bytes > self.max_bytes {
+            for (key, _) in &candidates {
+                let non_degraded_count = self.entries.values().filter(|e| !e.degraded).count();
+                if non_degraded_count <= 1 {
+                    break;
+                }
+                self.degrade(key, ctx);
+                if self.total_bytes <= self.max_bytes {
+                    break;
+                }
             }
-            self.degrade(key, ctx);
-            if self.total_bytes <= self.max_bytes {
-                break;
+        }
+
+        // Phase 3: Proactive headroom — degrade far non-degraded entries to make
+        // room for near-viewport degraded entries that want to restore.
+        // Compute how many bytes near-viewport degraded entries would need.
+        let reload_zone = viewport_height * 2.0;
+        let needed: usize = self
+            .entries
+            .iter()
+            .filter(|(_, e)| e.degraded)
+            .filter(|(k, _)| {
+                self.viewport_distances
+                    .get(k.as_str())
+                    .is_some_and(|&d| d < reload_zone)
+            })
+            .map(|(_, e)| {
+                ImageCacheEntry::estimate_bytes(e.size)
+                    .saturating_sub(e.byte_size)
+            })
+            .sum();
+
+        if needed > 0 {
+            let target = self.max_bytes.saturating_sub(needed);
+            // Re-filter candidates (some may have been degraded in Phase 2).
+            let far_candidates: Vec<(String, f32)> = candidates
+                .iter()
+                .filter(|(k, _)| {
+                    self.entries
+                        .get(k)
+                        .is_some_and(|e| !e.degraded)
+                })
+                .filter(|(_, d)| *d >= reload_zone)
+                .cloned()
+                .collect();
+
+            for (key, _) in &far_candidates {
+                if self.total_bytes <= target {
+                    break;
+                }
+                let non_degraded_count = self.entries.values().filter(|e| !e.degraded).count();
+                if non_degraded_count <= 1 {
+                    break;
+                }
+                self.degrade(key, ctx);
             }
         }
     }
@@ -2940,7 +2988,7 @@ impl MarkdownRenderer {
         if !distances.is_empty() {
             let mut cache = self.image_textures.borrow_mut();
             cache.update_viewport_distances(distances);
-            cache.enforce_budget(ui.ctx());
+            cache.enforce_budget(ui.ctx(), self.last_viewport_height.get());
         }
 
         // Add a little extra breathing room at the end so
@@ -3142,12 +3190,24 @@ impl MarkdownRenderer {
                         base_scale
                     };
                     let size = egui::vec2((tw * scale).round(), (th * scale).round());
-                    let image = egui::Image::new(&tex).fit_to_exact_size(size);
+                    let image =
+                        egui::Image::new(&tex).fit_to_exact_size(size).sense(egui::Sense::click());
                     let resp = ui.add(image);
                     // Track Y position for viewport-aware cache degradation
                     self.image_doc_y
                         .borrow_mut()
                         .insert(resolved.clone(), resp.rect.center().y);
+
+                    // Click to show image info popup
+                    let popup_id = ui.id().with(("img_info", &resolved));
+                    if resp.clicked() {
+                        ui.memory_mut(|mem| mem.toggle_popup(popup_id));
+                    }
+                    egui::popup::popup_below_widget(ui, popup_id, &resp, |ui| {
+                        ui.set_min_width(220.0);
+                        self.render_image_info_popup(ui, src, &resolved, w, h);
+                    });
+
                     if let Some(t) = title {
                         if !t.is_empty() {
                             if render_action_triggered(resp.hovered(), "image_hover") {
@@ -5703,7 +5763,7 @@ impl MarkdownRenderer {
         self.image_pending.borrow_mut().clear();
         self.image_failures.borrow_mut().clear();
         self.image_doc_y.borrow_mut().clear();
-        self.image_textures.borrow_mut().pending_restore_bytes = 0;
+        self.image_textures.borrow_mut().clear();
     }
 
     /// Returns image cache stats: `(entries, used_mb, max_mb)`.
@@ -5715,21 +5775,12 @@ impl MarkdownRenderer {
         (entries, used_mb, max_mb)
     }
 
-    /// Returns `Some((used_mb, max_mb))` if the image cache is at or above 75%
-    /// capacity, indicating memory pressure.  Returns `None` otherwise.
-    pub fn image_cache_pressure(&self) -> Option<(f32, f32)> {
-        let cache = self.image_textures.borrow();
-        let used = cache.total_bytes;
-        let max = cache.max_bytes;
-        if max > 0 && used * 4 >= max * 3 {
-            // At or above 75%
-            let used_mb = used as f32 / (1024.0 * 1024.0);
-            let max_mb = max as f32 / (1024.0 * 1024.0);
-            Some((used_mb, max_mb))
-        } else {
-            None
-        }
+    /// Returns Mermaid cache stats: (tex_entries, tex_mb, tex_max_mb, svg_entries, svg_mb, svg_max_mb).
+    #[cfg(feature = "mermaid-quickjs")]
+    pub fn mermaid_cache_stats(&self) -> (usize, f32, f32, usize, f32, f32) {
+        self.mermaid.cache_stats()
     }
+
 
     /// Release GPU textures to reduce idle GPU usage (e.g., when minimized).
     /// Textures rebuild lazily on next render. SVG/error caches retained for fast rebuilds.
@@ -5965,6 +6016,50 @@ impl MarkdownRenderer {
             return joined.to_string_lossy().into_owned();
         }
         src.to_string()
+    }
+
+    /// Render image info popup content (filename, dimensions, format, file size, cache usage).
+    fn render_image_info_popup(
+        &self,
+        ui: &mut egui::Ui,
+        src: &str,
+        resolved: &str,
+        w: u32,
+        h: u32,
+    ) {
+        let path = Path::new(resolved);
+        let filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| src.to_string());
+
+        let format = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_uppercase())
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        ui.label(RichText::new(&filename).strong());
+        ui.label(format!("{w} \u{00d7} {h} pixels"));
+        ui.label(format!("Format: {format}"));
+
+        // File size on disk
+        if let Ok(meta) = std::fs::metadata(resolved) {
+            let bytes = meta.len();
+            let label = if bytes >= 1_048_576 {
+                format!("File size: {:.1} MB", bytes as f64 / 1_048_576.0)
+            } else {
+                format!("File size: {:.1} KB", bytes as f64 / 1024.0)
+            };
+            ui.label(label);
+        }
+
+        // Cache memory usage
+        let cache = self.image_textures.borrow();
+        if let Some(entry) = cache.entries.get(resolved) {
+            let mb = entry.byte_size as f64 / 1_048_576.0;
+            let status = if entry.degraded { " (degraded)" } else { "" };
+            ui.label(format!("Cache: {mb:.1} MB{status}"));
+        }
     }
 
     fn get_or_load_image_texture(
@@ -6920,7 +7015,7 @@ mod tests {
             distances.insert("far".to_string(), 5000.0);
             cache.update_viewport_distances(distances);
 
-            cache.enforce_budget(ctx);
+            cache.enforce_budget(ctx, 0.0);
 
             // "far" should be degraded (furthest), others kept
             assert!(cache.entries.get("far").unwrap().degraded, "far should be degraded");
@@ -6956,7 +7051,7 @@ mod tests {
             distances.insert("a".to_string(), 100.0);
             cache.update_viewport_distances(distances);
 
-            cache.enforce_budget(ctx);
+            cache.enforce_budget(ctx, 0.0);
             assert!(!cache.entries.get("a").unwrap().degraded);
         });
     }
@@ -6995,7 +7090,7 @@ mod tests {
             distances.insert("c".to_string(), 500.0); // furthest
             cache.update_viewport_distances(distances);
 
-            cache.enforce_budget(ctx);
+            cache.enforce_budget(ctx, 0.0);
 
             // 1200 - 400(c) + 16 = 816 > 800 → "c" degraded, still over budget.
             // 816 - 400(b) + 16 = 432 ≤ 800 → "b" also degraded, now under budget.
@@ -7041,7 +7136,7 @@ mod tests {
             distances.insert("current".to_string(), 50.0);
             cache.update_viewport_distances(distances);
 
-            cache.enforce_budget(ctx);
+            cache.enforce_budget(ctx, 0.0);
 
             // "current" should survive (it's the only entry with a distance and
             // we keep at least one non-degraded). The orphans should be degraded.
@@ -7054,6 +7149,64 @@ mod tests {
                 || cache.entries.get("old_b").unwrap().degraded;
             assert!(orphan_degraded, "at least one orphan should be degraded");
             assert!(cache.current_bytes() <= 600);
+        });
+    }
+
+    #[test]
+    fn test_enforce_budget_phase3_degrades_far_to_make_room_for_near_degraded() {
+        // Scenario: cache is under budget, but near-viewport degraded entries
+        // can't restore because far non-degraded entries use the space.
+        // Phase 3 should degrade the far entries to create headroom.
+        let mut cache = ImageCache::new(256);
+        cache.max_bytes = 1000;
+
+        with_test_ui(|ctx, _ui| {
+            let make = |name: &str| {
+                let tex = ctx.load_texture(
+                    name,
+                    egui::ColorImage::new([10, 10], Color32::WHITE),
+                    egui::TextureOptions::LINEAR,
+                );
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [10, 10],
+                    modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([10, 10]), // 400
+                    degraded: false,
+                }
+            };
+
+            // "near": degraded entry near viewport (distance=50, in reload zone).
+            let mut near_entry = make("near");
+            near_entry.byte_size = 16;
+            near_entry.degraded = true;
+            cache.insert("near".to_string(), near_entry);
+
+            // "far1" and "far2": full-res entries far from viewport.
+            cache.insert("far1".to_string(), make("far1"));
+            cache.insert("far2".to_string(), make("far2"));
+
+            // total_bytes = 16 + 400 + 400 = 816. Under max_bytes (1000).
+            // But restoring "near" would need 816 - 16 + 400 = 1200 > 1000.
+            assert!(!cache.would_restore_fit("near"), "near shouldn't fit before phase 3");
+
+            let mut distances = HashMap::new();
+            distances.insert("near".to_string(), 50.0);
+            distances.insert("far1".to_string(), 5000.0);
+            distances.insert("far2".to_string(), 6000.0);
+            cache.update_viewport_distances(distances);
+
+            // viewport_height=600 → reload_zone=1200. "near" (50) in zone.
+            // "far1" (5000) and "far2" (6000) outside zone.
+            cache.enforce_budget(ctx, 600.0);
+
+            // Phase 3 should degrade far entries to make room for "near".
+            assert!(
+                cache.entries.get("far1").unwrap().degraded
+                    || cache.entries.get("far2").unwrap().degraded,
+                "at least one far entry should be degraded to make room"
+            );
+            assert!(cache.would_restore_fit("near"), "near should fit after phase 3");
         });
     }
 
@@ -12053,7 +12206,7 @@ contexts:
             // enforce_budget should degrade the furthest entries
             {
                 let mut cache = renderer.image_textures.borrow_mut();
-                cache.enforce_budget(ctx);
+                cache.enforce_budget(ctx, 0.0);
             }
 
             let cache = renderer.image_textures.borrow();

@@ -29,6 +29,53 @@ use std::time::{Duration, Instant};
 use unicode_casefold::UnicodeCaseFold;
 use unicode_normalization::UnicodeNormalization;
 
+/// Returns the working set size of the current process in megabytes.
+fn process_memory_mb() -> Option<f64> {
+    #[cfg(target_os = "windows")]
+    {
+        #[repr(C)]
+        #[allow(non_snake_case)]
+        struct ProcessMemoryCounters {
+            cb: u32,
+            PageFaultCount: u32,
+            PeakWorkingSetSize: usize,
+            WorkingSetSize: usize,
+            QuotaPeakPagedPoolUsage: usize,
+            QuotaPagedPoolUsage: usize,
+            QuotaPeakNonPagedPoolUsage: usize,
+            QuotaNonPagedPoolUsage: usize,
+            PagefileUsage: usize,
+            PeakPagefileUsage: usize,
+        }
+        extern "system" {
+            fn K32GetProcessMemoryInfo(
+                process: isize,
+                ppsmemCounters: *mut ProcessMemoryCounters,
+                cb: u32,
+            ) -> i32;
+            fn GetCurrentProcess() -> isize;
+        }
+        unsafe {
+            let mut counters: ProcessMemoryCounters = std::mem::zeroed();
+            counters.cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
+            if K32GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                &mut counters,
+                counters.cb,
+            ) != 0
+            {
+                Some(counters.WorkingSetSize as f64 / (1024.0 * 1024.0))
+            } else {
+                None
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
 /// Prefix used for application/window titles.
 pub const APP_TITLE_PREFIX: &str = "Markdown Viewer";
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -822,6 +869,8 @@ impl MarkdownViewerApp {
         self.pending_scroll_to_element = Some(0);
         self.renderer.clear_table_layout_cache();
         self.renderer.reset_image_state();
+        #[cfg(feature = "mermaid-quickjs")]
+        self.renderer.clear_mermaid_cache();
 
         match self.renderer.parse(content) {
             Ok(elements) => {
@@ -2359,26 +2408,29 @@ impl MarkdownViewerApp {
             .map(|stats| stats.word_count)
             .unwrap_or(0);
         let char_count = self.current_content.len();
+        let mem = process_memory_mb()
+            .map(|mb| format!(" | Mem: {mb:.0} MB"))
+            .unwrap_or_default();
 
-        let mut candidates = vec![format!("Words: {word_count} | Chars: {char_count}")];
+        let mut candidates = vec![format!("Words: {word_count} | Chars: {char_count}{mem}")];
 
         if let Some(stats) = &self.readability_stats {
             candidates.insert(
                 0,
                 format!(
-                    "Words: {word_count} | Flesch: {:.0} | Chars: {char_count}",
+                    "Words: {word_count} | Flesch: {:.0} | Chars: {char_count}{mem}",
                     stats.flesch_ease
                 ),
             );
         } else if !self.current_content.is_empty() {
             candidates.insert(
                 0,
-                format!("Words: {word_count} | Flesch: ... | Chars: {char_count}"),
+                format!("Words: {word_count} | Flesch: ... | Chars: {char_count}{mem}"),
             );
         }
 
-        candidates.push(format!("Words: {word_count}"));
-        candidates.push(format!("Chars: {char_count}"));
+        candidates.push(format!("Words: {word_count}{mem}"));
+        candidates.push(format!("Chars: {char_count}{mem}"));
         candidates.push(String::new());
         candidates
     }
@@ -2431,15 +2483,6 @@ impl MarkdownViewerApp {
             } else {
                 self.status_message = None;
             }
-        }
-
-        if let Some((used_mb, max_mb)) = self.renderer.image_cache_pressure() {
-            aux_labels.push((
-                format!("Image cache: {used_mb:.0}/{max_mb:.0} MB"),
-                Some(tc.status_cache_pressure),
-                false,
-                None,
-            ));
         }
 
         let aux_width = aux_labels
@@ -2561,6 +2604,19 @@ impl MarkdownViewerApp {
         ui.label(format!(
             "Image cache: {used_mb:.1} / {max_mb:.0} MB, {entries} entries"
         ));
+        #[cfg(feature = "mermaid-quickjs")]
+        {
+            let (tex_n, tex_mb, tex_max, svg_n, svg_mb, svg_max) =
+                self.renderer.mermaid_cache_stats();
+            if tex_n > 0 || svg_n > 0 {
+                ui.label(format!(
+                    "Mermaid textures: {tex_mb:.1} / {tex_max:.0} MB, {tex_n} entries"
+                ));
+                ui.label(format!(
+                    "Mermaid SVGs: {svg_mb:.1} / {svg_max:.0} MB, {svg_n} entries"
+                ));
+            }
+        }
 
         if let Some(stats) = &self.readability_stats {
             ui.separator();
