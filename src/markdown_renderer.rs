@@ -608,11 +608,7 @@ impl ImageCache {
             .entries
             .iter()
             .filter(|(_, e)| !e.degraded)
-            .filter_map(|(k, _)| {
-                self.viewport_distances
-                    .get(k)
-                    .map(|&d| (k.clone(), d))
-            })
+            .filter_map(|(k, _)| self.viewport_distances.get(k).map(|&d| (k.clone(), d)))
             .collect();
         candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -643,10 +639,7 @@ impl ImageCache {
                     .get(k.as_str())
                     .is_some_and(|&d| d < reload_zone)
             })
-            .map(|(_, e)| {
-                ImageCacheEntry::estimate_bytes(e.size)
-                    .saturating_sub(e.byte_size)
-            })
+            .map(|(_, e)| ImageCacheEntry::estimate_bytes(e.size).saturating_sub(e.byte_size))
             .sum();
 
         if needed > 0 {
@@ -654,11 +647,7 @@ impl ImageCache {
             // Re-filter candidates (some may have been degraded in Phase 2).
             let far_candidates: Vec<(String, f32)> = candidates
                 .iter()
-                .filter(|(k, _)| {
-                    self.entries
-                        .get(k)
-                        .is_some_and(|e| !e.degraded)
-                })
+                .filter(|(k, _)| self.entries.get(k).is_some_and(|e| !e.degraded))
                 .filter(|(_, d)| *d >= reload_zone)
                 .cloned()
                 .collect();
@@ -687,9 +676,7 @@ impl ImageCache {
             return false;
         }
         let full_bytes = ImageCacheEntry::estimate_bytes(entry.size);
-        self.total_bytes.saturating_sub(entry.byte_size)
-            + full_bytes
-            + self.pending_restore_bytes
+        self.total_bytes.saturating_sub(entry.byte_size) + full_bytes + self.pending_restore_bytes
             <= self.max_bytes
     }
 
@@ -3190,8 +3177,9 @@ impl MarkdownRenderer {
                         base_scale
                     };
                     let size = egui::vec2((tw * scale).round(), (th * scale).round());
-                    let image =
-                        egui::Image::new(&tex).fit_to_exact_size(size).sense(egui::Sense::click());
+                    let image = egui::Image::new(&tex)
+                        .fit_to_exact_size(size)
+                        .sense(egui::Sense::click());
                     let resp = ui.add(image);
                     // Track Y position for viewport-aware cache degradation
                     self.image_doc_y
@@ -5781,7 +5769,6 @@ impl MarkdownRenderer {
         self.mermaid.cache_stats()
     }
 
-
     /// Release GPU textures to reduce idle GPU usage (e.g., when minimized).
     /// Textures rebuild lazily on next render. SVG/error caches retained for fast rebuilds.
     pub fn release_gpu_textures(&self) {
@@ -6112,8 +6099,7 @@ impl MarkdownRenderer {
                 if entry.degraded {
                     // Cases 2 & 3: entry is degraded — return the placeholder
                     // texture (preserving layout) and decide whether to reload.
-                    let already_pending =
-                        self.image_pending.borrow().contains(cache_key.as_str());
+                    let already_pending = self.image_pending.borrow().contains(cache_key.as_str());
                     let should_reload = if stale {
                         // Case 3: degraded + stale — always reload (skip budget check).
                         !already_pending
@@ -6145,8 +6131,7 @@ impl MarkdownRenderer {
                             path,
                         );
                         if enqueued {
-                            self.image_textures.borrow_mut().pending_restore_bytes +=
-                                restore_bytes;
+                            self.image_textures.borrow_mut().pending_restore_bytes += restore_bytes;
                         }
                     }
                     return result;
@@ -7018,8 +7003,14 @@ mod tests {
             cache.enforce_budget(ctx, 0.0);
 
             // "far" should be degraded (furthest), others kept
-            assert!(cache.entries.get("far").unwrap().degraded, "far should be degraded");
-            assert!(!cache.entries.get("near").unwrap().degraded, "near should survive");
+            assert!(
+                cache.entries.get("far").unwrap().degraded,
+                "far should be degraded"
+            );
+            assert!(
+                !cache.entries.get("near").unwrap().degraded,
+                "near should survive"
+            );
             // total_bytes should be back under budget (800 - 400 + 16 = 416 ≤ 800)
             assert!(cache.current_bytes() <= 800, "should be under budget");
         });
@@ -7094,9 +7085,18 @@ mod tests {
 
             // 1200 - 400(c) + 16 = 816 > 800 → "c" degraded, still over budget.
             // 816 - 400(b) + 16 = 432 ≤ 800 → "b" also degraded, now under budget.
-            assert!(cache.entries.get("c").unwrap().degraded, "c (furthest) should be degraded");
-            assert!(cache.entries.get("b").unwrap().degraded, "b (mid) should also be degraded");
-            assert!(!cache.entries.get("a").unwrap().degraded, "a (nearest) should survive");
+            assert!(
+                cache.entries.get("c").unwrap().degraded,
+                "c (furthest) should be degraded"
+            );
+            assert!(
+                cache.entries.get("b").unwrap().degraded,
+                "b (mid) should also be degraded"
+            );
+            assert!(
+                !cache.entries.get("a").unwrap().degraded,
+                "a (nearest) should survive"
+            );
             assert!(cache.current_bytes() <= 800);
         });
     }
@@ -7188,7 +7188,10 @@ mod tests {
 
             // total_bytes = 16 + 400 + 400 = 816. Under max_bytes (1000).
             // But restoring "near" would need 816 - 16 + 400 = 1200 > 1000.
-            assert!(!cache.would_restore_fit("near"), "near shouldn't fit before phase 3");
+            assert!(
+                !cache.would_restore_fit("near"),
+                "near shouldn't fit before phase 3"
+            );
 
             let mut distances = HashMap::new();
             distances.insert("near".to_string(), 50.0);
@@ -7206,7 +7209,10 @@ mod tests {
                     || cache.entries.get("far2").unwrap().degraded,
                 "at least one far entry should be degraded to make room"
             );
-            assert!(cache.would_restore_fit("near"), "near should fit after phase 3");
+            assert!(
+                cache.would_restore_fit("near"),
+                "near should fit after phase 3"
+            );
         });
     }
 
