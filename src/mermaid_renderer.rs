@@ -564,7 +564,11 @@ pub(crate) struct MermaidRenderer {
     /// When MermaidRenderer is dropped, we join all worker threads to ensure
     /// they exit cleanly and release memory (font database, QuickJS runtime).
     #[cfg(feature = "mermaid-quickjs")]
-    worker_handles: Vec<JoinHandle<()>>,
+    worker_handles: RefCell<Vec<JoinHandle<()>>>,
+    /// Deferred worker spawn: holds channel ends until the first diagram is requested.
+    /// Avoids loading QuickJS + mermaid.min.js when no Mermaid diagrams are used.
+    #[cfg(feature = "mermaid-quickjs")]
+    deferred_spawn: RefCell<Option<(MermaidJobReceiver, MermaidResultSender)>>,
     /// Per-diagram debounce state for resize-aware rendering.
     /// Key: svg_key (u64). Tracks the last-enqueued width bucket
     /// and the time when the width bucket last changed.
@@ -622,8 +626,6 @@ impl MermaidRenderer {
             MermaidResultSender,
             MermaidResultReceiver,
         ) = bounded(Self::MAX_MERMAID_JOBS * 4);
-        #[cfg(feature = "mermaid-quickjs")]
-        let worker_handles = Self::spawn_mermaid_workers(mermaid_job_rx, mermaid_result_tx);
         Self {
             #[cfg(feature = "mermaid-quickjs")]
             mermaid_textures: RefCell::new(TextureCache::new(
@@ -650,7 +652,9 @@ impl MermaidRenderer {
             #[cfg(feature = "mermaid-quickjs")]
             mermaid_result_rx,
             #[cfg(feature = "mermaid-quickjs")]
-            worker_handles,
+            worker_handles: RefCell::new(Vec::new()),
+            #[cfg(feature = "mermaid-quickjs")]
+            deferred_spawn: RefCell::new(Some((mermaid_job_rx, mermaid_result_tx))),
             #[cfg(feature = "mermaid-quickjs")]
             mermaid_width_debounce: RefCell::new(HashMap::new()),
             #[cfg(feature = "mermaid-quickjs")]
@@ -658,6 +662,21 @@ impl MermaidRenderer {
             #[cfg(feature = "mermaid-quickjs")]
             mermaid_wanted_bucket: RefCell::new(HashMap::new()),
         }
+    }
+
+    /// Returns (texture_entries, texture_mb, texture_max_mb, svg_entries, svg_mb, svg_max_mb).
+    #[cfg(feature = "mermaid-quickjs")]
+    pub(crate) fn cache_stats(&self) -> (usize, f32, f32, usize, f32, f32) {
+        let tex = self.mermaid_textures.borrow();
+        let svg = self.mermaid_svg_cache.borrow();
+        (
+            tex.entries.len(),
+            tex.current_bytes as f32 / (1024.0 * 1024.0),
+            tex.max_bytes as f32 / (1024.0 * 1024.0),
+            svg.entries.len(),
+            svg.current_bytes as f32 / (1024.0 * 1024.0),
+            svg.max_bytes as f32 / (1024.0 * 1024.0),
+        )
     }
 
     /// Release GPU textures to reduce idle GPU usage.
@@ -1194,8 +1213,18 @@ impl MermaidRenderer {
         changed
     }
 
+    /// Spawn the Mermaid worker on first use. No-op if already spawned.
+    #[cfg(feature = "mermaid-quickjs")]
+    fn ensure_workers_spawned(&self) {
+        if let Some((job_rx, result_tx)) = self.deferred_spawn.borrow_mut().take() {
+            let handles = Self::spawn_mermaid_workers(job_rx, result_tx);
+            *self.worker_handles.borrow_mut() = handles;
+        }
+    }
+
     #[cfg(feature = "mermaid-quickjs")]
     fn enqueue_mermaid_job(&self, request: MermaidRequest) -> Result<(), MermaidEnqueueError> {
+        self.ensure_workers_spawned();
         let Some(ref tx) = self.mermaid_job_tx else {
             return Err(MermaidEnqueueError::Disconnected);
         };
@@ -1208,10 +1237,10 @@ impl MermaidRenderer {
 
     #[cfg(feature = "mermaid-quickjs")]
     fn mermaid_worker_count() -> usize {
-        let default = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-        default.min(Self::MAX_MERMAID_JOBS.max(1))
+        // One worker is sufficient: Mermaid diagrams render in the background and
+        // typical documents have few diagrams. Each worker loads a QuickJS runtime
+        // with mermaid.min.js (~30-50 MB), so multiple workers waste memory.
+        1
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -1415,9 +1444,12 @@ impl Drop for MermaidRenderer {
         // This signals workers to exit their `for job in worker_rx.iter()` loop.
         drop(self.mermaid_job_tx.take());
 
+        // Also drop deferred spawn channels if workers were never started.
+        self.deferred_spawn.borrow_mut().take();
+
         // Now join all worker threads to ensure they've fully exited
         // and released their resources (font database, QuickJS runtime).
-        for handle in self.worker_handles.drain(..) {
+        for handle in self.worker_handles.borrow_mut().drain(..) {
             let _ = handle.join();
         }
     }
@@ -5378,7 +5410,8 @@ mod tests {
             mermaid_texture_errors: RefCell::new(LruCache::new(4)),
             mermaid_job_tx: job_tx,
             mermaid_result_rx: result_rx,
-            worker_handles: Vec::new(),
+            worker_handles: RefCell::new(Vec::new()),
+            deferred_spawn: RefCell::new(None),
             mermaid_width_debounce: RefCell::new(HashMap::new()),
             mermaid_latest_texture: RefCell::new(HashMap::new()),
             mermaid_wanted_bucket: RefCell::new(HashMap::new()),
