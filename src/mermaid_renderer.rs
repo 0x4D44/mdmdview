@@ -588,10 +588,10 @@ pub(crate) struct MermaidRenderer {
 impl MermaidRenderer {
     #[cfg(feature = "mermaid-quickjs")]
     const MERMAID_TEXTURE_CACHE_CAPACITY: usize = 128;
-    /// Maximum total bytes for texture cache (256MB). Textures at 4096x4096 are 64MB each,
-    /// so 128 max-size textures would use 8GB. Size limit ensures bounded memory usage.
+    /// Maximum total bytes for texture cache (100MB). Textures at 4096x4096 are 64MB each,
+    /// so this comfortably holds several full-res diagrams. Size limit ensures bounded memory.
     #[cfg(feature = "mermaid-quickjs")]
-    const MERMAID_TEXTURE_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
+    const MERMAID_TEXTURE_CACHE_MAX_BYTES: usize = 100 * 1024 * 1024;
     #[cfg(any(test, feature = "mermaid-quickjs"))]
     const MERMAID_WIDTH_BUCKET_STEP: u32 = 32;
     #[cfg(any(test, feature = "mermaid-quickjs"))]

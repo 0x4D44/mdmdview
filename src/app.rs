@@ -2597,7 +2597,7 @@ impl MarkdownViewerApp {
         ui.label(format!("Parsed elements: {}", self.parsed_elements.len()));
         let (entries, used_mb, max_mb) = self.renderer.image_cache_stats();
         ui.label(format!(
-            "Image cache: {used_mb:.1} / {max_mb:.0} MB, {entries} entries"
+            "Image cache: {used_mb:.1} / {max_mb:.0} MB (max), {entries} entries"
         ));
         #[cfg(feature = "mermaid-quickjs")]
         {
@@ -2605,10 +2605,10 @@ impl MarkdownViewerApp {
                 self.renderer.mermaid_cache_stats();
             if tex_n > 0 || svg_n > 0 {
                 ui.label(format!(
-                    "Mermaid textures: {tex_mb:.1} / {tex_max:.0} MB, {tex_n} entries"
+                    "Mermaid textures: {tex_mb:.1} / {tex_max:.0} MB (max), {tex_n} entries"
                 ));
                 ui.label(format!(
-                    "Mermaid SVGs: {svg_mb:.1} / {svg_max:.0} MB, {svg_n} entries"
+                    "Mermaid SVGs: {svg_mb:.1} / {svg_max:.0} MB (max), {svg_n} entries"
                 ));
             }
         }
