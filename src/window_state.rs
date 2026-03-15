@@ -374,14 +374,23 @@ pub fn save_app_settings(settings: &AppSettings) -> std::io::Result<()> {
         }
     }
     if let Some(mut f) = create_config_file("settings.txt")? {
-        writeln!(
-            f,
-            "allow_remote_images={}",
-            settings.allow_remote_images as u8
-        )?;
-        writeln!(f, "dark_mode={}", settings.dark_mode as u8)?;
-        writeln!(f, "mermaid_theme={}", settings.mermaid_theme.as_setting())?;
+        write_app_settings_to(&mut f, settings)?;
     }
+    Ok(())
+}
+
+fn write_app_settings_to(mut writer: impl Write, settings: &AppSettings) -> std::io::Result<()> {
+    writeln!(
+        writer,
+        "allow_remote_images={}",
+        settings.allow_remote_images as u8
+    )?;
+    writeln!(writer, "dark_mode={}", settings.dark_mode as u8)?;
+    writeln!(
+        writer,
+        "mermaid_theme={}",
+        settings.mermaid_theme.as_setting()
+    )?;
     Ok(())
 }
 
@@ -426,6 +435,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     static FORCED_SETTINGS_LOAD: std::cell::RefCell<Option<AppSettings>> =
         const { std::cell::RefCell::new(None) };
+    static FORCED_SETTINGS_SAVE_ERROR: std::cell::RefCell<bool> =
+        const { std::cell::RefCell::new(false) };
 }
 
 #[cfg(all(windows, test))]
@@ -454,7 +465,29 @@ fn load_app_settings_registry() -> Option<AppSettings> {
 
 #[cfg(all(windows, test))]
 fn save_app_settings_registry(_settings: &AppSettings) -> std::io::Result<()> {
+    if take_forced_settings_save_error() {
+        return Err(std::io::Error::other("forced settings registry error"));
+    }
     Ok(())
+}
+
+#[cfg(all(windows, test))]
+fn force_settings_load_once(settings: AppSettings) {
+    FORCED_SETTINGS_LOAD.with(|slot| {
+        *slot.borrow_mut() = Some(settings);
+    });
+}
+
+#[cfg(all(windows, test))]
+fn take_forced_settings_save_error() -> bool {
+    FORCED_SETTINGS_SAVE_ERROR.with(|flag| flag.replace(false))
+}
+
+#[cfg(all(windows, test))]
+fn force_settings_save_error_once() {
+    FORCED_SETTINGS_SAVE_ERROR.with(|flag| {
+        *flag.borrow_mut() = true;
+    });
 }
 
 #[cfg(test)]
@@ -937,6 +970,25 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
+    fn test_load_app_settings_prefers_registry_when_forced() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+        let forced = AppSettings {
+            allow_remote_images: true,
+            dark_mode: false,
+            mermaid_theme: MermaidTheme::Forest,
+        };
+        force_settings_load_once(forced);
+
+        let loaded = load_app_settings();
+        assert!(loaded.allow_remote_images);
+        assert!(!loaded.dark_mode);
+        assert_eq!(loaded.mermaid_theme, MermaidTheme::Forest);
+    }
+
+    #[test]
     fn test_load_app_settings_parses_true_value() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
@@ -1048,6 +1100,24 @@ mod tests {
     }
 
     #[test]
+    fn test_write_app_settings_to_serializes_all_fields() {
+        let mut buffer = Vec::new();
+        let settings = AppSettings {
+            allow_remote_images: true,
+            dark_mode: false,
+            mermaid_theme: MermaidTheme::Forest,
+        };
+
+        write_app_settings_to(&mut buffer, &settings).expect("serialize settings");
+
+        let contents = String::from_utf8(buffer).expect("settings utf8");
+        assert_eq!(
+            contents,
+            "allow_remote_images=1\ndark_mode=0\nmermaid_theme=forest\n"
+        );
+    }
+
+    #[test]
     fn test_save_app_settings_creates_directory() {
         let _lock = env_lock();
         let temp = TempDir::new().expect("temp dir");
@@ -1111,6 +1181,29 @@ mod tests {
         };
         // Should succeed but do nothing
         save_app_settings(&settings).expect("save ok");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_save_app_settings_registry_error_still_writes_file() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard = EnvGuard::set("APPDATA", temp.path().to_string_lossy().as_ref());
+        force_settings_save_error_once();
+
+        let settings = AppSettings {
+            allow_remote_images: true,
+            dark_mode: false,
+            mermaid_theme: MermaidTheme::Neutral,
+        };
+
+        save_app_settings(&settings).expect("save ok");
+
+        let settings_path = temp.path().join("MarkdownView").join("settings.txt");
+        let contents = fs::read_to_string(settings_path).expect("read");
+        assert!(contents.contains("allow_remote_images=1"));
+        assert!(contents.contains("dark_mode=0"));
+        assert!(contents.contains("mermaid_theme=neutral"));
     }
 
     #[test]
@@ -1336,6 +1429,12 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "MermaidTheme::Auto must be resolved before calling theme_name")]
+    fn test_mermaid_theme_name_panics_on_auto() {
+        let _ = MermaidTheme::Auto.theme_name();
+    }
+
+    #[test]
     fn test_mermaid_theme_bg_fill() {
         assert_eq!(MermaidTheme::Dark.bg_fill(), [20, 20, 20, 255]);
         assert_eq!(MermaidTheme::Default.bg_fill(), [255, 255, 255, 255]);
@@ -1344,11 +1443,25 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "MermaidTheme::Auto must be resolved before calling bg_fill")]
+    fn test_mermaid_theme_bg_fill_panics_on_auto() {
+        let _ = MermaidTheme::Auto.bg_fill();
+    }
+
+    #[test]
     fn test_mermaid_theme_journey_text_fill() {
         assert_eq!(MermaidTheme::Dark.journey_text_fill(), "#ccc");
         assert_eq!(MermaidTheme::Default.journey_text_fill(), "#333");
         assert_eq!(MermaidTheme::Forest.journey_text_fill(), "#333");
         assert_eq!(MermaidTheme::Neutral.journey_text_fill(), "#333");
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "MermaidTheme::Auto must be resolved before calling journey_text_fill"
+    )]
+    fn test_mermaid_theme_journey_text_fill_panics_on_auto() {
+        let _ = MermaidTheme::Auto.journey_text_fill();
     }
 
     #[test]

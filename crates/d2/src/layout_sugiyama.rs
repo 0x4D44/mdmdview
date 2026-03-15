@@ -473,6 +473,8 @@ fn reduce_crossings(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::geo::Rect;

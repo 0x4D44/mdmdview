@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 /// Axis-aligned bounding box.
 #[derive(Debug, Clone, Copy)]
+#[allow(clippy::upper_case_acronyms)]
 struct AABB {
     x: f64,
     y: f64,
@@ -392,7 +393,7 @@ fn parse_paths(svg: &str) -> Vec<SvgPath> {
         }
 
         if let Some(d) = extract_attr_str(tag, "d") {
-            let (segments, sample_points) = parse_path_d(&d);
+            let (segments, sample_points) = parse_path_d(d);
             let start_pt = sample_points
                 .first()
                 .copied()
@@ -1012,7 +1013,7 @@ fn d2_conformance_suite() {
         }
     }
 
-    report.push_str(&"\n");
+    report.push('\n');
     report.push_str(&"=".repeat(60));
     report.push_str(&format!(
         "\nSummary: {} fixture(s), {} violation(s), {} render error(s)\n",

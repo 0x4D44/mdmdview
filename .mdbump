@@ -1,6 +1,6 @@
 {
-  "previous_version": "1.13.4",
-  "current_version": "1.14.0",
-  "cargo_toml_hash": "989218618d2c5c454a50ee59eaae4fbae631282ccc5c9cace5ff7c26ad3d0886",
+  "previous_version": "1.14.1",
+  "current_version": "1.14.2",
+  "cargo_toml_hash": "4fdc03f80e6897bd0159e35837e801bc6d3a5b169df561cc45591a11ff8e1208",
   "is_workspace": false
 }

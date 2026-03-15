@@ -445,17 +445,11 @@ impl D2Renderer {
                             .borrow_mut()
                             .insert(result.code_hash, result.texture_key.clone());
                         // Update debounce state
-                        if let Some(width_bucket) =
-                            Self::parse_width_from_texture_key(&result.texture_key)
+                        if let Some(debounce) = Self::debounce_for_texture_key(&result.texture_key)
                         {
-                            self.debounce.borrow_mut().insert(
-                                result.code_hash,
-                                DiagramDebounce {
-                                    last_rasterized_bucket: width_bucket,
-                                    last_seen_bucket: width_bucket,
-                                    bucket_changed_at: None,
-                                },
-                            );
+                            self.debounce
+                                .borrow_mut()
+                                .insert(result.code_hash, debounce);
                         }
                     }
                 }
@@ -579,10 +573,11 @@ impl D2Renderer {
                 // Width changed since last rasterize -- apply trailing-edge debounce
                 if width_bucket != last_seen {
                     // New bucket since last frame -- reset timer
-                    if let Some(d) = self.debounce.borrow_mut().get_mut(&code_hash) {
+                    let changed_at = Instant::now();
+                    self.debounce.borrow_mut().entry(code_hash).and_modify(|d| {
                         d.last_seen_bucket = width_bucket;
-                        d.bucket_changed_at = Some(Instant::now());
-                    }
+                        d.bucket_changed_at = Some(changed_at);
+                    });
                 }
                 let changed_at = self
                     .debounce
@@ -699,6 +694,15 @@ impl D2Renderer {
         key[w_start..w_end].parse().ok()
     }
 
+    fn debounce_for_texture_key(key: &str) -> Option<DiagramDebounce> {
+        let width_bucket = Self::parse_width_from_texture_key(key)?;
+        Some(DiagramDebounce {
+            last_rasterized_bucket: width_bucket,
+            last_seen_bucket: width_bucket,
+            bucket_changed_at: None,
+        })
+    }
+
     /// Check whether a result's width bucket no longer matches what the main
     /// thread currently wants for this diagram. Stale results have their SVG
     /// cached but skip the expensive GPU upload.
@@ -788,8 +792,56 @@ impl Drop for D2Renderer {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    fn test_raw_input(width: f32, height: f32) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(width, height),
+            )),
+            ..Default::default()
+        }
+    }
+
+    fn test_renderer_with_channels(
+        job_tx: Option<JobSender>,
+        result_rx: ResultReceiver,
+    ) -> D2Renderer {
+        D2Renderer {
+            textures: RefCell::new(LruCache::new(4)),
+            svg_cache: RefCell::new(LruCache::new(4)),
+            errors: RefCell::new(LruCache::new(4)),
+            debounce: RefCell::new(HashMap::new()),
+            latest_texture_key: RefCell::new(HashMap::new()),
+            job_tx,
+            result_rx,
+            worker_handle: None,
+            pending: RefCell::new(HashSet::new()),
+            wanted_bucket: RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn insert_test_texture(
+        ui: &mut egui::Ui,
+        renderer: &D2Renderer,
+        key: &str,
+        display_size: [u32; 2],
+    ) {
+        let image = egui::ColorImage::new([2, 2], egui::Color32::WHITE);
+        let texture =
+            ui.ctx()
+                .load_texture(key.to_string(), image, egui::TextureOptions::default());
+        renderer.textures.borrow_mut().insert(
+            key.to_string(),
+            D2TextureEntry {
+                texture,
+                display_size,
+            },
+        );
+    }
 
     #[test]
     fn test_render_simple_diagram() {
@@ -907,6 +959,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_debounce_for_texture_key_builds_entry() {
+        let debounce = D2Renderer::debounce_for_texture_key("d2:0000000000003039:w640:s100:dm0")
+            .expect("debounce entry");
+
+        assert_eq!(debounce.last_rasterized_bucket, 640);
+        assert_eq!(debounce.last_seen_bucket, 640);
+        assert!(debounce.bucket_changed_at.is_none());
+    }
+
+    #[test]
+    fn test_debounce_for_texture_key_invalid_returns_none() {
+        assert!(D2Renderer::debounce_for_texture_key("d2:abc:s100:dm0").is_none());
+    }
+
     // -----------------------------------------------------------------------
     // Async worker and channel tests
     // -----------------------------------------------------------------------
@@ -916,6 +983,742 @@ mod tests {
         let mut db = usvg::fontdb::Database::new();
         db.load_system_fonts();
         Arc::new(db)
+    }
+
+    #[test]
+    fn test_render_block_basic_and_pending_placeholder() {
+        let renderer = D2Renderer::new();
+        let ctx = egui::Context::default();
+        let input = test_raw_input(240.0, 160.0);
+        let code = "a -> b";
+        let mut rendered_first = false;
+        let mut rendered_second = false;
+
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rendered_first = renderer.render_block(ui, code, 1.0, 14.0);
+                rendered_second = renderer.render_block(ui, code, 1.0, 14.0);
+            });
+        });
+
+        assert!(rendered_first);
+        assert!(rendered_second);
+        assert!(renderer.pending.borrow().contains(&hash_str(code)));
+    }
+
+    #[test]
+    fn test_render_block_reports_cached_error() {
+        let (_result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(None, result_rx);
+        let code = "a -> b";
+        let code_hash = hash_str(code);
+        renderer
+            .errors
+            .borrow_mut()
+            .insert(code_hash, "boom".to_string());
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(240.0, 160.0);
+        let mut rendered = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rendered = renderer.render_block(ui, code, 1.0, 14.0);
+            });
+        });
+
+        assert!(rendered);
+        assert!(!renderer.has_pending());
+    }
+
+    #[test]
+    fn test_render_block_enqueues_cached_svg() {
+        let (job_tx, job_rx) = crossbeam_channel::bounded(1);
+        let (_result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+        let code = "a -> b";
+        let code_hash = hash_str(code);
+        renderer.svg_cache.borrow_mut().insert(
+            svg_cache_key(code_hash, false),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>".to_string(),
+        );
+        renderer.svg_cache.borrow_mut().insert(
+            svg_cache_key(code_hash, true),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>".to_string(),
+        );
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(240.0, 160.0);
+        let mut rendered = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rendered = renderer.render_block(ui, code, 1.0, 14.0);
+            });
+        });
+
+        assert!(rendered);
+        let request = job_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("request");
+        assert!(request.svg.is_some());
+        assert!(request.code.is_none());
+        assert!(renderer.pending.borrow().contains(&code_hash));
+    }
+
+    #[test]
+    fn test_render_block_queue_full_keeps_rendering() {
+        let (job_tx, job_rx) = crossbeam_channel::bounded(1);
+        let (_result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(Some(job_tx.clone()), result_rx);
+        job_tx
+            .send(RasterJob {
+                code_hash: 1,
+                texture_key: "d2:full:w224:s100:dm0".to_string(),
+                code: Some("a -> b".to_string()),
+                svg: None,
+                dark_mode: false,
+                width_bucket: 224,
+                scale_bucket: 100,
+            })
+            .expect("fill queue");
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(240.0, 160.0);
+        let mut rendered = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rendered = renderer.render_block(ui, "a -> b", 1.0, 14.0);
+            });
+        });
+
+        assert!(rendered);
+        assert!(!renderer.has_pending());
+        drop(job_rx);
+    }
+
+    #[test]
+    fn test_render_block_disconnected_queue_sets_error() {
+        let (job_tx, job_rx) = crossbeam_channel::bounded::<RasterJob>(1);
+        drop(job_rx);
+        let (_result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+        let code = "a -> b";
+        let code_hash = hash_str(code);
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(240.0, 160.0);
+        let mut rendered = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rendered = renderer.render_block(ui, code, 1.0, 14.0);
+            });
+        });
+
+        assert!(rendered);
+        assert!(renderer.errors.borrow_mut().get(&code_hash).is_some());
+    }
+
+    #[test]
+    fn test_begin_frame_processes_result_and_uses_cached_texture() {
+        let (result_tx, result_rx) = crossbeam_channel::bounded(2);
+        let (job_tx, _job_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+        let code = "a -> b";
+        let code_hash = hash_str(code);
+        renderer.pending.borrow_mut().insert(code_hash);
+        renderer.pending.borrow_mut().insert(999);
+        let result_tx = RefCell::new(Some(result_tx));
+        let texture_key = RefCell::new(String::new());
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(240.0, 160.0);
+        let mut rendered = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let width_bucket = bucket_width(ui.available_width().max(1.0));
+                let key = format!(
+                    "d2:{:016x}:w{}:s{}:dm{}",
+                    code_hash,
+                    width_bucket,
+                    100,
+                    ui.visuals().dark_mode as u8
+                );
+                *texture_key.borrow_mut() = key.clone();
+                renderer.wanted_bucket.borrow_mut().insert(code_hash, width_bucket);
+                if let Some(tx) = result_tx.borrow_mut().take() {
+                    tx.send(RasterResult {
+                        code_hash,
+                        texture_key: key,
+                        dark_mode: ui.visuals().dark_mode,
+                        svg: Some(
+                            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"><rect width=\"1\" height=\"1\" fill=\"red\"/></svg>"
+                                .to_string(),
+                        ),
+                        rgba: Some(vec![255, 0, 0, 255]),
+                        raster_size: Some([1, 1]),
+                        display_size: Some([64, 32]),
+                        error: None,
+                    })
+                    .expect("send result");
+                }
+                renderer.begin_frame(ctx);
+                rendered = renderer.render_block(ui, code, 1.0, 14.0);
+            });
+        });
+
+        assert!(rendered);
+        let texture_key = texture_key.into_inner();
+        assert!(renderer.textures.borrow_mut().get(&texture_key).is_some());
+        assert!(renderer
+            .svg_cache
+            .borrow_mut()
+            .get(&svg_cache_key(code_hash, ctx.style().visuals.dark_mode))
+            .is_some());
+        assert_eq!(
+            renderer.latest_texture_key.borrow().get(&code_hash),
+            Some(&texture_key)
+        );
+        assert!(!renderer.pending.borrow().contains(&code_hash));
+    }
+
+    #[test]
+    fn test_begin_frame_result_missing_raster_fields_skips_texture_upload() {
+        let (result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(None, result_rx);
+        let code_hash = hash_str("a -> b");
+        renderer.pending.borrow_mut().insert(code_hash);
+        result_tx
+            .send(RasterResult {
+                code_hash,
+                texture_key: "d2:missing-fields:w224:s100:dm0".to_string(),
+                dark_mode: false,
+                svg: Some(
+                    "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"></svg>"
+                        .to_string(),
+                ),
+                rgba: None,
+                raster_size: None,
+                display_size: None,
+                error: None,
+            })
+            .expect("send result");
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(240.0, 160.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |_ui| {
+                renderer.begin_frame(ctx);
+            });
+        });
+
+        assert_eq!(renderer.textures.borrow().len(), 0);
+        assert!(!renderer.pending.borrow().contains(&code_hash));
+    }
+
+    #[test]
+    fn test_begin_frame_result_missing_raster_size_skips_texture_upload() {
+        let (result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(None, result_rx);
+        let code_hash = hash_str("a -> tall");
+        renderer.pending.borrow_mut().insert(code_hash);
+        result_tx
+            .send(RasterResult {
+                code_hash,
+                texture_key: "d2:partial-fields:w224:s100:dm0".to_string(),
+                dark_mode: false,
+                svg: Some(
+                    "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"></svg>"
+                        .to_string(),
+                ),
+                rgba: Some(vec![255, 0, 0, 255]),
+                raster_size: None,
+                display_size: Some([64, 32]),
+                error: None,
+            })
+            .expect("send result");
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(240.0, 160.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |_ui| {
+                renderer.begin_frame(ctx);
+            });
+        });
+
+        assert_eq!(renderer.textures.borrow().len(), 0);
+        assert!(!renderer.pending.borrow().contains(&code_hash));
+    }
+
+    #[test]
+    fn test_begin_frame_keeps_polling_when_pending_remains() {
+        let (result_tx, result_rx) = crossbeam_channel::bounded::<RasterResult>(1);
+        let renderer = test_renderer_with_channels(None, result_rx);
+        renderer.pending.borrow_mut().insert(999);
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(240.0, 160.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |_ui| {
+                renderer.begin_frame(ctx);
+            });
+        });
+
+        assert!(renderer.pending.borrow().contains(&999));
+        drop(result_tx);
+    }
+
+    #[test]
+    fn test_begin_frame_caches_error_results() {
+        let (result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(None, result_rx);
+        let code_hash = 7;
+        renderer.pending.borrow_mut().insert(code_hash);
+        result_tx
+            .send(RasterResult {
+                code_hash,
+                texture_key: "d2:error:w224:s100:dm0".to_string(),
+                dark_mode: false,
+                svg: None,
+                rgba: None,
+                raster_size: None,
+                display_size: None,
+                error: Some("boom".to_string()),
+            })
+            .expect("send error");
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(240.0, 160.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |_ui| {
+                renderer.begin_frame(ctx);
+            });
+        });
+
+        assert!(renderer.errors.borrow_mut().get(&code_hash).is_some());
+        assert!(!renderer.pending.borrow().contains(&code_hash));
+    }
+
+    #[test]
+    fn test_begin_frame_discards_stale_result() {
+        let (result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(None, result_rx);
+        let code_hash = 11;
+        renderer.pending.borrow_mut().insert(code_hash);
+        renderer.wanted_bucket.borrow_mut().insert(code_hash, 128);
+        result_tx
+            .send(RasterResult {
+                code_hash,
+                texture_key: "d2:stale:w224:s100:dm0".to_string(),
+                dark_mode: false,
+                svg: Some(
+                    "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"><rect width=\"1\" height=\"1\" fill=\"red\"/></svg>"
+                        .to_string(),
+                ),
+                rgba: Some(vec![255, 0, 0, 255]),
+                raster_size: Some([1, 1]),
+                display_size: Some([64, 32]),
+                error: None,
+            })
+            .expect("send result");
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(240.0, 160.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |_ui| {
+                renderer.begin_frame(ctx);
+            });
+        });
+
+        assert_eq!(renderer.textures.borrow().len(), 0);
+        assert!(renderer
+            .svg_cache
+            .borrow_mut()
+            .get(&svg_cache_key(code_hash, false))
+            .is_some());
+        assert!(!renderer.pending.borrow().contains(&code_hash));
+    }
+
+    #[test]
+    fn test_begin_frame_processes_result_with_unparseable_texture_key() {
+        let (result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(None, result_rx);
+        let code_hash = 19;
+        renderer.pending.borrow_mut().insert(code_hash);
+        renderer.wanted_bucket.borrow_mut().insert(code_hash, 128);
+        result_tx
+            .send(RasterResult {
+                code_hash,
+                texture_key: "d2:not-a-valid-width-key".to_string(),
+                dark_mode: false,
+                svg: Some(
+                    "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 1 1\"><rect width=\"1\" height=\"1\" fill=\"red\"/></svg>"
+                        .to_string(),
+                ),
+                rgba: Some(vec![255, 0, 0, 255]),
+                raster_size: Some([1, 1]),
+                display_size: Some([64, 32]),
+                error: None,
+            })
+            .expect("send result");
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(240.0, 160.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |_ui| {
+                renderer.begin_frame(ctx);
+            });
+        });
+
+        assert!(renderer
+            .textures
+            .borrow_mut()
+            .get(&"d2:not-a-valid-width-key".to_string())
+            .is_some());
+        assert!(renderer.debounce.borrow().get(&code_hash).is_none());
+        assert!(!renderer.pending.borrow().contains(&code_hash));
+    }
+
+    #[test]
+    fn test_begin_frame_disconnected_clears_pending() {
+        let (result_tx, result_rx) = crossbeam_channel::bounded::<RasterResult>(1);
+        drop(result_tx);
+        let renderer = test_renderer_with_channels(None, result_rx);
+        renderer.pending.borrow_mut().insert(1);
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(240.0, 160.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |_ui| {
+                renderer.begin_frame(ctx);
+            });
+        });
+
+        assert!(renderer.pending.borrow().is_empty());
+    }
+
+    #[test]
+    fn test_render_block_debounce_without_stale_texture_enqueues_job() {
+        let (job_tx, job_rx) = crossbeam_channel::bounded(1);
+        let (_result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+        let code = "a -> b";
+        let code_hash = hash_str(code);
+        renderer.debounce.borrow_mut().insert(
+            code_hash,
+            DiagramDebounce {
+                last_rasterized_bucket: 224,
+                last_seen_bucket: 224,
+                bucket_changed_at: Some(Instant::now()),
+            },
+        );
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(96.0, 160.0);
+        let mut rendered = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rendered = renderer.render_block(ui, code, 1.0, 14.0);
+            });
+        });
+
+        assert!(rendered);
+        assert_eq!(job_rx.len(), 1);
+        assert!(renderer.pending.borrow().contains(&code_hash));
+        assert_eq!(
+            renderer
+                .debounce
+                .borrow()
+                .get(&code_hash)
+                .map(|d| d.last_seen_bucket),
+            Some(bucket_width(96.0))
+        );
+    }
+
+    #[test]
+    fn test_render_block_uses_stale_texture_during_debounce() {
+        let (_result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(None, result_rx);
+        let code = "a -> b";
+        let code_hash = hash_str(code);
+        let stale_key = format!("d2:{:016x}:w224:s100:dm0", code_hash);
+        renderer
+            .latest_texture_key
+            .borrow_mut()
+            .insert(code_hash, stale_key.clone());
+        renderer.debounce.borrow_mut().insert(
+            code_hash,
+            DiagramDebounce {
+                last_rasterized_bucket: 224,
+                last_seen_bucket: 224,
+                bucket_changed_at: Some(Instant::now()),
+            },
+        );
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(96.0, 160.0);
+        let mut rendered = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                insert_test_texture(ui, &renderer, &stale_key, [320, 160]);
+                rendered = renderer.render_block(ui, code, 1.0, 14.0);
+            });
+        });
+
+        assert!(rendered);
+        assert!(!renderer.has_pending());
+        assert_eq!(
+            renderer
+                .debounce
+                .borrow()
+                .get(&code_hash)
+                .map(|d| d.last_seen_bucket),
+            Some(bucket_width(96.0))
+        );
+    }
+
+    #[test]
+    fn test_render_block_missing_stale_texture_during_debounce_enqueues_job() {
+        let (job_tx, job_rx) = crossbeam_channel::bounded(1);
+        let (_result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+        let code = "a -> b";
+        let code_hash = hash_str(code);
+        let stale_key = format!("d2:{:016x}:w224:s100:dm0", code_hash);
+        renderer
+            .latest_texture_key
+            .borrow_mut()
+            .insert(code_hash, stale_key);
+        renderer.debounce.borrow_mut().insert(
+            code_hash,
+            DiagramDebounce {
+                last_rasterized_bucket: 224,
+                last_seen_bucket: 224,
+                bucket_changed_at: Some(Instant::now()),
+            },
+        );
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(96.0, 160.0);
+        let mut rendered = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rendered = renderer.render_block(ui, code, 1.0, 14.0);
+            });
+        });
+
+        assert!(rendered);
+        assert_eq!(job_rx.len(), 1);
+        assert!(renderer.pending.borrow().contains(&code_hash));
+    }
+
+    #[test]
+    fn test_render_block_same_bucket_missing_texture_enqueues_job() {
+        let (job_tx, job_rx) = crossbeam_channel::bounded(1);
+        let (_result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+        let code = "a -> b";
+        let code_hash = hash_str(code);
+        let width_bucket = bucket_width(96.0);
+        renderer.debounce.borrow_mut().insert(
+            code_hash,
+            DiagramDebounce {
+                last_rasterized_bucket: width_bucket,
+                last_seen_bucket: width_bucket,
+                bucket_changed_at: None,
+            },
+        );
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(96.0, 160.0);
+        let mut rendered = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rendered = renderer.render_block(ui, code, 1.0, 14.0);
+            });
+        });
+
+        assert!(rendered);
+        assert_eq!(job_rx.len(), 1);
+        assert!(renderer.pending.borrow().contains(&code_hash));
+    }
+
+    #[test]
+    fn test_render_block_missing_timer_same_seen_bucket_enqueues_job() {
+        let (job_tx, job_rx) = crossbeam_channel::bounded(1);
+        let (_result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+        let code = "a -> b";
+        let code_hash = hash_str(code);
+        let width_bucket = bucket_width(96.0);
+        renderer.debounce.borrow_mut().insert(
+            code_hash,
+            DiagramDebounce {
+                last_rasterized_bucket: 224,
+                last_seen_bucket: width_bucket,
+                bucket_changed_at: None,
+            },
+        );
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(96.0, 160.0);
+        let mut rendered = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rendered = renderer.render_block(ui, code, 1.0, 14.0);
+            });
+        });
+
+        assert!(rendered);
+        assert_eq!(job_rx.len(), 1);
+        assert!(renderer.pending.borrow().contains(&code_hash));
+    }
+
+    #[test]
+    fn test_render_block_expired_debounce_enqueues_job() {
+        let (job_tx, job_rx) = crossbeam_channel::bounded(1);
+        let (_result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+        let code = "a -> b";
+        let code_hash = hash_str(code);
+        let width_bucket = bucket_width(96.0);
+        renderer.debounce.borrow_mut().insert(
+            code_hash,
+            DiagramDebounce {
+                last_rasterized_bucket: 224,
+                last_seen_bucket: width_bucket,
+                bucket_changed_at: Some(
+                    Instant::now() - Duration::from_millis(RESIZE_DEBOUNCE_MS + 5),
+                ),
+            },
+        );
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(96.0, 160.0);
+        let mut rendered = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rendered = renderer.render_block(ui, code, 1.0, 14.0);
+            });
+        });
+
+        assert!(rendered);
+        assert_eq!(job_rx.len(), 1);
+        assert!(renderer.pending.borrow().contains(&code_hash));
+    }
+
+    #[test]
+    fn test_show_stale_or_placeholder_ignores_missing_stale_texture() {
+        let (_result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(None, result_rx);
+        let code_hash = hash_str("missing-stale");
+        renderer
+            .latest_texture_key
+            .borrow_mut()
+            .insert(code_hash, "d2:missing:w224:s100:dm0".to_string());
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(240.0, 160.0);
+        let mut rendered = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rendered = renderer.show_stale_or_placeholder(ui, code_hash, 240.0);
+            });
+        });
+
+        assert!(rendered);
+        assert_eq!(renderer.textures.borrow().len(), 0);
+    }
+
+    #[test]
+    fn test_show_stale_or_placeholder_renders_stale_texture() {
+        let (_result_tx, result_rx) = crossbeam_channel::bounded(1);
+        let renderer = test_renderer_with_channels(None, result_rx);
+        let code_hash = hash_str("present-stale");
+        let stale_key = "d2:present:w224:s100:dm0".to_string();
+        renderer
+            .latest_texture_key
+            .borrow_mut()
+            .insert(code_hash, stale_key.clone());
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(240.0, 160.0);
+        let mut rendered = false;
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                insert_test_texture(ui, &renderer, &stale_key, [320, 160]);
+                rendered = renderer.show_stale_or_placeholder(ui, code_hash, 240.0);
+            });
+        });
+
+        assert!(rendered);
+        assert_eq!(renderer.textures.borrow().len(), 1);
+    }
+
+    #[test]
+    fn test_rasterize_svg_uses_base_scale_when_width_bucket_is_zero_and_clamps() {
+        let fontdb = make_fontdb();
+        let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 5000 5000\"><rect width=\"5000\" height=\"5000\" fill=\"red\"/></svg>";
+
+        let output = D2Renderer::rasterize_svg(&fontdb, svg, 0, 100).expect("rasterize");
+
+        assert_eq!(output.display_size, [5000, 5000]);
+        assert!(output.raster_size[0] <= MAX_RASTER_SIDE as usize);
+        assert!(output.raster_size[1] <= MAX_RASTER_SIDE as usize);
+    }
+
+    #[test]
+    fn test_rasterize_svg_clamps_very_large_raster_dimensions() {
+        let fontdb = make_fontdb();
+        let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 10000 8000\"><rect width=\"10000\" height=\"8000\" fill=\"red\"/></svg>";
+
+        let output = D2Renderer::rasterize_svg(&fontdb, svg, 0, 100).expect("rasterize");
+
+        assert_eq!(output.display_size, [10000, 8000]);
+        assert_eq!(output.raster_size[0], MAX_RASTER_SIDE as usize);
+        assert!(output.raster_size[1] <= MAX_RASTER_SIDE as usize);
+    }
+
+    #[test]
+    fn test_rasterize_svg_clamps_very_tall_raster_dimensions() {
+        let fontdb = make_fontdb();
+        let svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 5000\"><rect width=\"100\" height=\"5000\" fill=\"red\"/></svg>";
+
+        let output = D2Renderer::rasterize_svg(&fontdb, svg, 0, 100).expect("rasterize");
+
+        assert_eq!(output.display_size, [100, 5000]);
+        assert!(output.raster_size[0] < MAX_RASTER_SIDE as usize);
+        assert_eq!(output.raster_size[1], MAX_RASTER_SIDE as usize);
+    }
+
+    #[test]
+    fn test_rasterize_svg_invalid_svg_returns_error() {
+        let fontdb = make_fontdb();
+        let err = match D2Renderer::rasterize_svg(&fontdb, "<svg", 224, 100) {
+            Ok(_) => panic!("expected parse error"),
+            Err(err) => err,
+        };
+        assert!(err.contains("SVG parse error"));
+    }
+
+    #[test]
+    fn test_process_job_returns_raster_error_for_invalid_cached_svg() {
+        let fontdb = make_fontdb();
+        let code_hash = hash_str("cached-error");
+        let result = D2Renderer::process_job(
+            &fontdb,
+            RasterJob {
+                code_hash,
+                texture_key: format!("d2:{:016x}:w224:s100:dm0", code_hash),
+                code: None,
+                svg: Some("<svg".to_string()),
+                dark_mode: false,
+                width_bucket: 224,
+                scale_bucket: 100,
+            },
+        );
+
+        assert!(result.error.is_some());
+        assert!(result.svg.is_some());
+        assert!(result.rgba.is_none());
     }
 
     #[test]
@@ -1061,6 +1864,18 @@ mod tests {
         assert!(
             renderer.is_stale_result(&texture_key, 99999),
             "No wanted_bucket entry should be treated as stale"
+        );
+    }
+
+    #[test]
+    fn test_is_stale_result_invalid_texture_key_is_assumed_fresh() {
+        let renderer = D2Renderer::new();
+        let code_hash = 55;
+        renderer.wanted_bucket.borrow_mut().insert(code_hash, 320);
+
+        assert!(
+            !renderer.is_stale_result("d2:malformed", code_hash),
+            "Malformed texture keys should be treated as fresh"
         );
     }
 

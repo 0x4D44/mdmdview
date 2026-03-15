@@ -125,6 +125,7 @@ pub fn apply_dark_mode_visuals(ctx: &egui::Context, dark: bool) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

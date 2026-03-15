@@ -17,6 +17,55 @@
 
 use std::path::Path;
 
+#[cfg(test)]
+thread_local! {
+    static FORCED_CLIPBOARD_COPY_ERROR: std::cell::RefCell<bool> =
+        const { std::cell::RefCell::new(false) };
+    static FORCED_REVEAL_ERROR: std::cell::RefCell<bool> =
+        const { std::cell::RefCell::new(false) };
+}
+
+#[cfg(test)]
+fn take_forced_clipboard_copy_error() -> bool {
+    FORCED_CLIPBOARD_COPY_ERROR.with(|flag| flag.replace(false))
+}
+
+#[cfg(test)]
+fn take_forced_reveal_error() -> bool {
+    FORCED_REVEAL_ERROR.with(|flag| flag.replace(false))
+}
+
+#[cfg(test)]
+pub(crate) fn force_clipboard_copy_error_once() {
+    FORCED_CLIPBOARD_COPY_ERROR.with(|flag| {
+        *flag.borrow_mut() = true;
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn force_reveal_in_file_manager_error_once() {
+    FORCED_REVEAL_ERROR.with(|flag| {
+        *flag.borrow_mut() = true;
+    });
+}
+
+#[cfg(target_os = "windows")]
+fn clean_windows_shell_path(abs_path: &Path) -> String {
+    let path_str = abs_path.to_string_lossy();
+    if let Some(rest) = path_str.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{}", rest)
+    } else if let Some(rest) = path_str.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        path_str.to_string()
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_reveal_arg(abs_path: &Path) -> String {
+    format!("/select,{}", abs_path.display())
+}
+
 /// Place a file on the system clipboard as a file copy (CF_HDROP format on
 /// Windows, osascript on macOS, xclip text/uri-list on Linux).
 ///
@@ -26,17 +75,15 @@ use std::path::Path;
 pub fn clipboard_copy_file(path: &Path) -> anyhow::Result<()> {
     use clipboard_win::{raw, Clipboard};
 
+    #[cfg(test)]
+    if take_forced_clipboard_copy_error() {
+        anyhow::bail!("forced clipboard error");
+    }
+
     let abs_path = path.canonicalize()?;
-    let path_str = abs_path.to_string_lossy();
+    let clean_path = clean_windows_shell_path(&abs_path);
     // Strip \\?\ prefix — Explorer doesn't handle extended-length paths.
     // Also handle UNC: \\?\UNC\server\share -> \\server\share
-    let clean_path = if let Some(rest) = path_str.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{}", rest)
-    } else if let Some(rest) = path_str.strip_prefix(r"\\?\") {
-        rest.to_string()
-    } else {
-        path_str.to_string()
-    };
 
     let _clip = Clipboard::new_attempts(10)
         .map_err(|e| anyhow::anyhow!("Failed to open clipboard: {}", e))?;
@@ -49,6 +96,11 @@ pub fn clipboard_copy_file(path: &Path) -> anyhow::Result<()> {
 /// Place a file on the system clipboard as a file copy (macOS via osascript).
 #[cfg(target_os = "macos")]
 pub fn clipboard_copy_file(path: &Path) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if take_forced_clipboard_copy_error() {
+        anyhow::bail!("forced clipboard error");
+    }
+
     let abs_path = path.canonicalize()?;
     // Escape backslashes and double-quotes for AppleScript string literal
     let escaped = abs_path
@@ -73,6 +125,11 @@ pub fn clipboard_copy_file(path: &Path) -> anyhow::Result<()> {
 /// Place a file on the system clipboard as a file copy (Linux via xclip).
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn clipboard_copy_file(path: &Path) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if take_forced_clipboard_copy_error() {
+        anyhow::bail!("forced clipboard error");
+    }
+
     let abs_path = path.canonicalize()?;
     let uri = format!("file://{}\n", abs_path.display());
     let mut child = std::process::Command::new("xclip")
@@ -97,12 +154,17 @@ pub fn clipboard_copy_file(path: &Path) -> anyhow::Result<()> {
 /// and on Linux `xdg-open <parent-dir>` (since most Linux file managers don't
 /// support selecting a specific file).
 pub fn reveal_in_file_manager(path: &Path) -> anyhow::Result<()> {
+    #[cfg(test)]
+    if take_forced_reveal_error() {
+        anyhow::bail!("forced reveal error");
+    }
+
     let abs_path = path.canonicalize()?;
 
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("explorer")
-            .arg(format!("/select,{}", abs_path.display()))
+            .arg(windows_reveal_arg(&abs_path))
             .spawn()?;
     }
 
@@ -143,5 +205,37 @@ mod tests {
         let path = PathBuf::from("/nonexistent/file.md");
         let result = reveal_in_file_manager(&path);
         assert!(result.is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_clean_windows_shell_path_strips_unc_prefix() {
+        let path = PathBuf::from(r"\\?\UNC\server\share\file.md");
+
+        assert_eq!(clean_windows_shell_path(&path), r"\\server\share\file.md");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_clean_windows_shell_path_strips_device_prefix() {
+        let path = PathBuf::from(r"\\?\C:\Temp\file.md");
+
+        assert_eq!(clean_windows_shell_path(&path), r"C:\Temp\file.md");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_clean_windows_shell_path_keeps_plain_path() {
+        let path = PathBuf::from(r"C:\Temp\file.md");
+
+        assert_eq!(clean_windows_shell_path(&path), r"C:\Temp\file.md");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_windows_reveal_arg_formats_select_switch() {
+        let path = PathBuf::from(r"C:\Temp\file.md");
+
+        assert_eq!(windows_reveal_arg(&path), r"/select,C:\Temp\file.md");
     }
 }

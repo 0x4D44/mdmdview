@@ -1,3 +1,5 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![allow(unexpected_cfgs)]
 //! mdmdview-d2: Native D2 diagram renderer.
 //!
 //! This crate implements a subset of the D2 diagram language

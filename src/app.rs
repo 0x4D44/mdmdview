@@ -92,6 +92,7 @@ thread_local! {
     static FORCED_SCAN_ERROR: RefCell<bool> = const { RefCell::new(false) };
     static FORCED_SCAN_ENTRY_ERROR: RefCell<bool> = const { RefCell::new(false) };
     static FORCED_READ_LOSSY_ERROR: RefCell<bool> = const { RefCell::new(false) };
+    static FORCED_MERMAID_THEME_SELECTION: RefCell<Option<MermaidTheme>> = const { RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -104,6 +105,18 @@ fn app_action_triggered(triggered: bool, action: &'static str) -> bool {
 
 #[cfg(not(test))]
 fn app_action_triggered(triggered: bool, _action: &'static str) -> bool {
+    triggered
+}
+
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+fn mermaid_theme_action_triggered(triggered: bool, variant: MermaidTheme) -> bool {
+    triggered
+        || FORCED_MERMAID_THEME_SELECTION
+            .with(|slot| slot.borrow().is_some_and(|forced| forced == variant))
+}
+
+#[cfg(any(not(test), not(feature = "mermaid-quickjs")))]
+fn mermaid_theme_action_triggered(triggered: bool, _variant: MermaidTheme) -> bool {
     triggered
 }
 
@@ -2034,25 +2047,7 @@ impl MarkdownViewerApp {
         #[cfg(feature = "mermaid-quickjs")]
         ui.menu_button(
             Self::menu_text_with_mnemonic(None, "Mermaid Theme", 'T', alt_pressed, menu_text_color),
-            |ui| {
-                let current = self.settings.mermaid_theme;
-                for variant in MermaidTheme::ALL {
-                    let selected = current == variant;
-                    if ui
-                        .add(egui::SelectableLabel::new(selected, variant.label()))
-                        .clicked()
-                    {
-                        self.settings.mermaid_theme = variant;
-                        let resolved = variant.resolve(self.settings.dark_mode);
-                        self.renderer.set_mermaid_theme(resolved);
-                        self.renderer.clear_mermaid_cache();
-                        if let Err(e) = save_app_settings(&self.settings) {
-                            eprintln!("Failed to save app settings: {e}");
-                        }
-                        ui.close_menu();
-                    }
-                }
-            },
+            |ui| self.render_mermaid_theme_menu_contents(ui),
         );
 
         ui.separator();
@@ -2284,6 +2279,36 @@ impl MarkdownViewerApp {
             }
         }
         let _ = save_app_settings(&self.settings);
+    }
+
+    fn request_theme_toggle(&mut self) {
+        self.theme_toggle_requested = true;
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    fn apply_mermaid_theme_selection(&mut self, variant: MermaidTheme) {
+        self.settings.mermaid_theme = variant;
+        let resolved = variant.resolve(self.settings.dark_mode);
+        self.renderer.set_mermaid_theme(resolved);
+        self.renderer.clear_mermaid_cache();
+        if let Err(e) = save_app_settings(&self.settings) {
+            eprintln!("Failed to save app settings: {e}");
+        }
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    fn render_mermaid_theme_menu_contents(&mut self, ui: &mut egui::Ui) {
+        let current = self.settings.mermaid_theme;
+        for variant in MermaidTheme::ALL {
+            let selected = current == variant;
+            let clicked = ui
+                .add(egui::SelectableLabel::new(selected, variant.label()))
+                .clicked();
+            if mermaid_theme_action_triggered(clicked, variant) {
+                self.apply_mermaid_theme_selection(variant);
+                ui.close_menu();
+            }
+        }
     }
 
     fn status_view_label(&self) -> &'static str {
@@ -2564,8 +2589,11 @@ impl MarkdownViewerApp {
                             } else {
                                 "Light"
                             };
-                            if ui.small_button(label).clicked() {
-                                self.theme_toggle_requested = true;
+                            if app_action_triggered(
+                                ui.small_button(label).clicked(),
+                                "status_theme_toggle",
+                            ) {
+                                self.request_theme_toggle();
                             }
 
                             if !status.is_empty() {
@@ -2601,16 +2629,7 @@ impl MarkdownViewerApp {
         ));
         #[cfg(feature = "mermaid-quickjs")]
         {
-            let (tex_n, tex_mb, tex_max, svg_n, svg_mb, svg_max) =
-                self.renderer.mermaid_cache_stats();
-            if tex_n > 0 || svg_n > 0 {
-                ui.label(format!(
-                    "Mermaid textures: {tex_mb:.1} / {tex_max:.0} MB (max), {tex_n} entries"
-                ));
-                ui.label(format!(
-                    "Mermaid SVGs: {svg_mb:.1} / {svg_max:.0} MB (max), {svg_n} entries"
-                ));
-            }
+            Self::render_mermaid_cache_tooltip(ui, self.renderer.mermaid_cache_stats());
         }
 
         if let Some(stats) = &self.readability_stats {
@@ -2637,6 +2656,19 @@ impl MarkdownViewerApp {
                 "Very Difficult (College graduate)"
             };
             ui.label(format!("Reading Level: {}", interpretation));
+        }
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    fn render_mermaid_cache_tooltip(ui: &mut egui::Ui, stats: (usize, f32, f32, usize, f32, f32)) {
+        let (tex_n, tex_mb, tex_max, svg_n, svg_mb, svg_max) = stats;
+        if tex_n > 0 || svg_n > 0 {
+            ui.label(format!(
+                "Mermaid textures: {tex_mb:.1} / {tex_max:.0} MB (max), {tex_n} entries"
+            ));
+            ui.label(format!(
+                "Mermaid SVGs: {svg_mb:.1} / {svg_max:.0} MB (max), {svg_n} entries"
+            ));
         }
     }
     /// Handle drag-drop events from egui
@@ -3607,6 +3639,29 @@ mod tests {
         }
     }
 
+    struct CurrentDirGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        original: PathBuf,
+    }
+
+    impl CurrentDirGuard {
+        fn set(path: &Path) -> Result<Self> {
+            let lock = env_lock();
+            let original = std::env::current_dir()?;
+            std::env::set_current_dir(path)?;
+            Ok(Self {
+                _lock: lock,
+                original,
+            })
+        }
+    }
+
+    impl Drop for CurrentDirGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
     /// Helper to set platform-appropriate config env var and return expected config subdir.
     fn set_config_env(temp_path: &std::path::Path) -> (EnvGuard, std::path::PathBuf) {
         #[cfg(target_os = "windows")]
@@ -3626,6 +3681,21 @@ mod tests {
             let guard = EnvGuard::set("XDG_CONFIG_HOME", temp_path.to_string_lossy().as_ref());
             let subdir = temp_path.join("mdmdview");
             (guard, subdir)
+        }
+    }
+
+    fn set_config_root_env(path: &std::path::Path) -> EnvGuard {
+        #[cfg(target_os = "windows")]
+        {
+            EnvGuard::set("APPDATA", path.to_string_lossy().as_ref())
+        }
+        #[cfg(target_os = "macos")]
+        {
+            EnvGuard::set("HOME", path.to_string_lossy().as_ref())
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            EnvGuard::set("XDG_CONFIG_HOME", path.to_string_lossy().as_ref())
         }
     }
 
@@ -3717,6 +3787,28 @@ mod tests {
             });
             FORCED_SAVE_PATH.with(|slot| {
                 slot.borrow_mut().take();
+            });
+        }
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    struct ForcedMermaidThemeSelection {
+        previous: Option<MermaidTheme>,
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    impl ForcedMermaidThemeSelection {
+        fn new(theme: MermaidTheme) -> Self {
+            let previous = FORCED_MERMAID_THEME_SELECTION.with(|slot| slot.replace(Some(theme)));
+            Self { previous }
+        }
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    impl Drop for ForcedMermaidThemeSelection {
+        fn drop(&mut self) {
+            FORCED_MERMAID_THEME_SELECTION.with(|slot| {
+                slot.replace(self.previous);
             });
         }
     }
@@ -5022,6 +5114,84 @@ The end.
     }
 
     #[test]
+    fn test_update_impl_applies_deferred_theme_toggle() {
+        let mut app = MarkdownViewerApp::new();
+        let initial = app.settings.dark_mode;
+        app.theme_toggle_requested = true;
+
+        let ctx = egui::Context::default();
+        run_app_frame(&mut app, &ctx, default_input());
+
+        assert_eq!(app.settings.dark_mode, !initial);
+        assert!(!app.theme_toggle_requested);
+    }
+
+    #[test]
+    fn test_update_impl_releases_gpu_textures_when_minimized_and_restores_after() {
+        let mut app = MarkdownViewerApp::new();
+        let ctx = egui::Context::default();
+
+        let mut minimized = default_input();
+        let minimized_vp = minimized
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("root viewport");
+        minimized_vp.minimized = Some(true);
+        run_app_frame(&mut app, &ctx, minimized);
+        assert!(app.gpu_textures_released);
+
+        let mut restored = default_input();
+        let restored_vp = restored
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("root viewport");
+        restored_vp.minimized = Some(false);
+        run_app_frame(&mut app, &ctx, restored);
+        assert!(!app.gpu_textures_released);
+    }
+
+    #[test]
+    fn test_update_impl_minimized_with_released_textures_skips_duplicate_release() {
+        let mut app = MarkdownViewerApp::new();
+        app.gpu_textures_released = true;
+        let ctx = egui::Context::default();
+
+        let mut minimized = default_input();
+        let minimized_vp = minimized
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("root viewport");
+        minimized_vp.minimized = Some(true);
+
+        run_app_frame(&mut app, &ctx, minimized);
+
+        assert!(app.gpu_textures_released);
+    }
+
+    #[test]
+    fn test_update_impl_minimized_with_active_screenshot_keeps_gpu_textures() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp_dir = TempDir::new()?;
+        app.screenshot = Some(ScreenshotState::new(test_screenshot_config(
+            temp_dir.path().join("shot.png"),
+        )));
+        let ctx = egui::Context::default();
+
+        let mut minimized = default_input();
+        let minimized_vp = minimized
+            .viewports
+            .get_mut(&egui::ViewportId::ROOT)
+            .expect("root viewport");
+        minimized_vp.minimized = Some(true);
+
+        run_app_frame(&mut app, &ctx, minimized);
+
+        assert!(!app.gpu_textures_released);
+        assert!(app.screenshot.is_some());
+        Ok(())
+    }
+
+    #[test]
     fn test_update_impl_reload_without_file_sets_error() {
         let mut app = MarkdownViewerApp::new();
         app.reload_requested = true;
@@ -6309,6 +6479,19 @@ The end.
     }
 
     #[test]
+    fn test_render_status_bar_forced_theme_toggle_requests_toggle() {
+        let mut app = MarkdownViewerApp::new();
+
+        let _actions = ForcedAppActions::new(&["status_theme_toggle"]);
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            app.render_status_bar(ctx);
+        });
+
+        assert!(app.theme_toggle_requested);
+    }
+
+    #[test]
     fn test_render_status_bar_table_stats() {
         let mut app = MarkdownViewerApp::new();
         app.current_file = None;
@@ -6351,6 +6534,32 @@ The end.
         assert!(shortened.starts_with("C:\\language"));
         assert!(shortened.contains("..."));
         assert!(shortened.ends_with("2026.02.26 - HLD - Munt.md"));
+    }
+
+    #[test]
+    fn test_middle_ellipsize_short_and_tiny_limits() {
+        assert_eq!(MarkdownViewerApp::middle_ellipsize("short", 10), "short");
+        assert_eq!(MarkdownViewerApp::middle_ellipsize("abcdef", 3), "...");
+        assert_eq!(MarkdownViewerApp::middle_ellipsize("abcdef", 2), "..");
+    }
+
+    #[test]
+    fn test_middle_ellipsize_falls_back_to_balanced_split() {
+        let path = r"C:\very\long\folder\name\that\leaves\filename_too_long.md";
+
+        let shortened = MarkdownViewerApp::middle_ellipsize(path, 18);
+
+        assert!(shortened.starts_with("C:"));
+        assert!(shortened.contains("..."));
+        assert!(shortened.ends_with(".md"));
+    }
+
+    #[test]
+    fn test_middle_ellipsize_handles_trailing_separator_without_filename() {
+        let shortened = MarkdownViewerApp::middle_ellipsize("/very/long/path/", 10);
+
+        assert!(shortened.contains("..."));
+        assert!(shortened.ends_with("th/"));
     }
 
     #[test]
@@ -6767,6 +6976,20 @@ The end.
     }
 
     #[test]
+    fn test_screenshot_state_update_stability_scroll_change_without_layout_change_resets() {
+        let config = test_screenshot_config(PathBuf::from("out.png"));
+        let mut state = ScreenshotState::new(config);
+        state.last_layout_hash = Some(7);
+        state.last_scroll_offset = Some(0.0);
+        state.stable_frames = 3;
+
+        state.update_stability(Some(7), Some(10.0));
+
+        assert_eq!(state.last_layout_hash, Some(7));
+        assert_eq!(state.stable_frames, 0);
+    }
+
+    #[test]
     fn test_toggle_write_mode_captures_cursor() {
         let mut app = MarkdownViewerApp::new();
         app.view_mode = ViewMode::Raw;
@@ -7168,6 +7391,38 @@ The end.
     }
 
     #[test]
+    fn test_fit_middle_ellipsized_label_truncates_when_width_small() {
+        let path = r"C:\very\long\path\to\document.md";
+        let full = format!("File: {path}");
+        let ctx = egui::Context::default();
+        let mut fitted = String::new();
+        let _ = ctx.run(default_input(), |ctx| {
+            CentralPanel::default().show(ctx, |ui| {
+                fitted = MarkdownViewerApp::fit_middle_ellipsized_label(ui, "File: ", path, 10.0);
+            });
+        });
+
+        assert_ne!(fitted, full);
+        assert!(fitted.starts_with("File: "));
+        assert!(fitted.contains("..."));
+    }
+
+    #[test]
+    fn test_fit_middle_ellipsized_label_returns_full_label_when_width_nonpositive() {
+        let path = r"C:\docs\short.md";
+        let full = format!("File: {path}");
+        let ctx = egui::Context::default();
+        let mut fitted = String::new();
+        let _ = ctx.run(default_input(), |ctx| {
+            CentralPanel::default().show(ctx, |ui| {
+                fitted = MarkdownViewerApp::fit_middle_ellipsized_label(ui, "File: ", path, 0.0);
+            });
+        });
+
+        assert_eq!(fitted, full);
+    }
+
+    #[test]
     fn test_persist_window_state_no_change_returns_early() {
         let mut app = MarkdownViewerApp::new();
         app.last_window_pos = Some([10.0, 10.0]);
@@ -7398,13 +7653,16 @@ The end.
     #[test]
     fn test_save_current_document_parentless_path() -> Result<()> {
         let mut app = MarkdownViewerApp::new();
+        let temp_dir = TempDir::new()?;
+        let _cwd = CurrentDirGuard::set(temp_dir.path())?;
         app.current_content = "Saved".to_string();
         let filename = format!("save_parentless_{}.md", std::process::id());
         let _forced = ForcedDialogPaths::new(None, Some(PathBuf::from(&filename)));
 
         app.save_current_document()?;
         assert_eq!(app.current_file, Some(PathBuf::from(&filename)));
-        std::fs::remove_file(&filename)?;
+        let saved = std::fs::read_to_string(temp_dir.path().join(&filename))?;
+        assert_eq!(saved, "Saved");
         Ok(())
     }
 
@@ -7654,6 +7912,41 @@ The end.
     }
 
     #[test]
+    fn test_render_status_bar_expires_old_status_message() {
+        let mut app = MarkdownViewerApp::new();
+        app.status_message = Some((
+            "Expired".to_string(),
+            std::time::Instant::now() - Duration::from_secs(4),
+        ));
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            app.render_status_bar(ctx);
+        });
+
+        assert!(app.status_message.is_none());
+    }
+
+    #[test]
+    fn test_render_status_bar_keeps_recent_status_message() {
+        let mut app = MarkdownViewerApp::new();
+        app.status_message = Some((
+            "Saved".to_string(),
+            std::time::Instant::now() - Duration::from_secs(1),
+        ));
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            app.render_status_bar(ctx);
+        });
+
+        assert_eq!(
+            app.status_message.as_ref().map(|(msg, _)| msg.as_str()),
+            Some("Saved")
+        );
+    }
+
+    #[test]
     fn test_menu_allow_remote_images_toggle() {
         let mut app = MarkdownViewerApp::new();
         let initial = app.settings.allow_remote_images;
@@ -7667,6 +7960,54 @@ The end.
         });
 
         assert_ne!(app.settings.allow_remote_images, initial);
+    }
+
+    #[test]
+    fn test_menu_allow_remote_images_toggle_persists_on_success() -> Result<()> {
+        let _lock = env_lock();
+        let temp_dir = TempDir::new()?;
+        let (_guard, config_dir) = set_config_env(temp_dir.path());
+
+        let mut app = MarkdownViewerApp::new();
+        let _actions = ForcedAppActions::new(&["menu_allow_remote_images"]);
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            CentralPanel::default().show(ctx, |ui| {
+                app.render_view_menu_contents(ui, ctx, false, Color32::WHITE);
+            });
+        });
+
+        let saved = std::fs::read_to_string(config_dir.join("settings.txt"))?;
+        let expected = if app.settings.allow_remote_images {
+            1
+        } else {
+            0
+        };
+        assert!(saved.contains(&format!("allow_remote_images={expected}")));
+        Ok(())
+    }
+
+    #[test]
+    fn test_menu_allow_remote_images_save_error_is_swallowed() -> Result<()> {
+        let _lock = env_lock();
+        let temp_dir = TempDir::new()?;
+        let bad_root = temp_dir.path().join("config-file");
+        std::fs::write(&bad_root, "not a directory")?;
+        let _guard = set_config_root_env(&bad_root);
+
+        let mut app = MarkdownViewerApp::new();
+        let initial = app.settings.allow_remote_images;
+
+        let _actions = ForcedAppActions::new(&["menu_allow_remote_images"]);
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            CentralPanel::default().show(ctx, |ui| {
+                app.render_view_menu_contents(ui, ctx, false, Color32::WHITE);
+            });
+        });
+
+        assert_ne!(app.settings.allow_remote_images, initial);
+        Ok(())
     }
 
     #[test]
@@ -7713,6 +8054,160 @@ The end.
         assert!(!app.settings.dark_mode); // now light
         app.toggle_theme(&ctx);
         assert!(app.settings.dark_mode); // back to dark
+    }
+
+    #[test]
+    fn test_toggle_theme_with_empty_content_skips_reparse() {
+        let mut app = MarkdownViewerApp::new();
+        app.current_content.clear();
+        app.parsed_elements.clear();
+        let ctx = egui::Context::default();
+
+        app.toggle_theme(&ctx);
+
+        assert!(app.parsed_elements.is_empty());
+        assert!(app.error_message.is_none());
+    }
+
+    #[test]
+    fn test_toggle_theme_parse_error_sets_message() {
+        let mut app = MarkdownViewerApp::new();
+        let ctx = egui::Context::default();
+        app.current_content = "# Parse".to_string();
+
+        crate::markdown_renderer::force_parse_error_once();
+        app.toggle_theme(&ctx);
+
+        assert_eq!(
+            app.error_message.as_deref(),
+            Some("Failed to parse markdown: forced parse error")
+        );
+    }
+
+    #[test]
+    fn test_toggle_theme_reparses_non_empty_content_successfully() {
+        let mut app = MarkdownViewerApp::new();
+        let ctx = egui::Context::default();
+        app.current_content = "# Heading\n\nBody".to_string();
+        app.parsed_elements.clear();
+
+        app.toggle_theme(&ctx);
+
+        assert!(!app.parsed_elements.is_empty());
+    }
+
+    #[test]
+    fn test_request_theme_toggle_sets_flag() {
+        let mut app = MarkdownViewerApp::new();
+
+        app.request_theme_toggle();
+
+        assert!(app.theme_toggle_requested);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_mermaid_theme_action_triggered_forced_selection_matches_variant() {
+        assert!(mermaid_theme_action_triggered(true, MermaidTheme::Neutral));
+        assert!(!mermaid_theme_action_triggered(false, MermaidTheme::Forest));
+
+        let _forced = ForcedMermaidThemeSelection::new(MermaidTheme::Forest);
+
+        assert!(mermaid_theme_action_triggered(false, MermaidTheme::Forest));
+        assert!(!mermaid_theme_action_triggered(
+            false,
+            MermaidTheme::Neutral
+        ));
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_render_mermaid_theme_menu_applies_selection_and_persists() -> Result<()> {
+        let _lock = env_lock();
+        let temp_dir = TempDir::new()?;
+        let (_guard, config_dir) = set_config_env(temp_dir.path());
+
+        let mut app = MarkdownViewerApp::new();
+        app.settings.dark_mode = false;
+        app.settings.mermaid_theme = MermaidTheme::Auto;
+
+        let _forced = ForcedMermaidThemeSelection::new(MermaidTheme::Neutral);
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            CentralPanel::default().show(ctx, |ui| {
+                app.render_mermaid_theme_menu_contents(ui);
+            });
+        });
+
+        assert_eq!(app.settings.mermaid_theme, MermaidTheme::Neutral);
+        let saved = std::fs::read_to_string(config_dir.join("settings.txt"))?;
+        assert!(saved.contains("mermaid_theme=neutral"));
+        Ok(())
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_apply_mermaid_theme_selection_save_error_is_swallowed() -> Result<()> {
+        let _lock = env_lock();
+        let temp_dir = TempDir::new()?;
+        let bad_root = temp_dir.path().join("config-file");
+        std::fs::write(&bad_root, "not a directory")?;
+        let _guard = set_config_root_env(&bad_root);
+
+        let mut app = MarkdownViewerApp::new();
+        app.settings.dark_mode = false;
+
+        app.apply_mermaid_theme_selection(MermaidTheme::Forest);
+
+        assert_eq!(app.settings.mermaid_theme, MermaidTheme::Forest);
+        Ok(())
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_render_mermaid_cache_tooltip_with_entries() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            CentralPanel::default().show(ctx, |ui| {
+                MarkdownViewerApp::render_mermaid_cache_tooltip(ui, (2, 1.5, 8.0, 3, 0.5, 4.0));
+            });
+        });
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_render_mermaid_cache_tooltip_with_svg_entries_only() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            CentralPanel::default().show(ctx, |ui| {
+                MarkdownViewerApp::render_mermaid_cache_tooltip(ui, (0, 0.0, 8.0, 1, 0.5, 4.0));
+            });
+        });
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_render_mermaid_cache_tooltip_without_entries() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            CentralPanel::default().show(ctx, |ui| {
+                MarkdownViewerApp::render_mermaid_cache_tooltip(ui, (0, 0.0, 8.0, 0, 0.0, 4.0));
+            });
+        });
+    }
+
+    #[test]
+    fn test_apply_saved_theme_respects_setting() {
+        let mut app = MarkdownViewerApp::new();
+        let ctx = egui::Context::default();
+
+        app.settings.dark_mode = false;
+        app.apply_saved_theme(&ctx);
+        assert!(!ctx.style().visuals.dark_mode);
+
+        app.settings.dark_mode = true;
+        app.apply_saved_theme(&ctx);
+        assert!(ctx.style().visuals.dark_mode);
     }
 
     #[test]
@@ -7806,6 +8301,88 @@ The end.
         assert_ne!(
             app.error_message.as_deref(),
             Some("File no longer exists on disk")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_copy_file_with_existing_file_sets_error_on_shell_failure() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp = NamedTempFile::new()?;
+        std::fs::write(temp.path(), "# Test")?;
+        app.current_file = Some(temp.path().to_path_buf());
+
+        crate::shell_integration::force_clipboard_copy_error_once();
+        app.copy_file_to_clipboard();
+
+        assert_eq!(
+            app.error_message.as_deref(),
+            Some("Failed to copy: forced clipboard error")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_open_folder_with_existing_file_sets_error_on_shell_failure() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp = NamedTempFile::new()?;
+        std::fs::write(temp.path(), "# Test")?;
+        app.current_file = Some(temp.path().to_path_buf());
+
+        crate::shell_integration::force_reveal_in_file_manager_error_once();
+        app.open_containing_folder();
+
+        assert_eq!(
+            app.error_message.as_deref(),
+            Some("Failed to open folder: forced reveal error")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_render_file_menu_copy_file_action_triggers_handler() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp = NamedTempFile::new()?;
+        std::fs::write(temp.path(), "# Test")?;
+        app.current_file = Some(temp.path().to_path_buf());
+        let _actions = ForcedAppActions::new(&["menu_copy_file"]);
+
+        crate::shell_integration::force_clipboard_copy_error_once();
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            CentralPanel::default().show(ctx, |ui| {
+                app.render_file_menu_contents(ui, false, Color32::WHITE);
+            });
+        });
+
+        assert_eq!(
+            app.error_message.as_deref(),
+            Some("Failed to copy: forced clipboard error")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_render_file_menu_open_folder_action_triggers_handler() -> Result<()> {
+        let mut app = MarkdownViewerApp::new();
+        let temp = NamedTempFile::new()?;
+        std::fs::write(temp.path(), "# Test")?;
+        app.current_file = Some(temp.path().to_path_buf());
+        let _actions = ForcedAppActions::new(&["menu_open_folder"]);
+
+        crate::shell_integration::force_reveal_in_file_manager_error_once();
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(default_input(), |ctx| {
+            CentralPanel::default().show(ctx, |ui| {
+                app.render_file_menu_contents(ui, false, Color32::WHITE);
+            });
+        });
+
+        assert_eq!(
+            app.error_message.as_deref(),
+            Some("Failed to open folder: forced reveal error")
         );
         Ok(())
     }

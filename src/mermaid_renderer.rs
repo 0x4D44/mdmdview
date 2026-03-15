@@ -71,12 +71,8 @@ static FORCE_MERMAID_FACE_PARSE_ERROR: std::sync::Mutex<Option<std::thread::Thre
 #[cfg(feature = "mermaid-quickjs")]
 fn mermaid_js_empty() -> bool {
     #[cfg(test)]
-    if let Ok(guard) = MERMAID_JS_EMPTY_OVERRIDE.try_lock() {
-        if let Some(id) = guard.as_ref() {
-            if *id == std::thread::current().id() {
-                return true;
-            }
-        }
+    if current_thread_override_matches(&MERMAID_JS_EMPTY_OVERRIDE) {
+        return true;
     }
     MERMAID_JS_EMPTY
 }
@@ -187,17 +183,57 @@ fn force_mermaid_face_parse_error_once() {
 }
 
 #[cfg(all(test, feature = "mermaid-quickjs"))]
+fn current_thread_override_matches(
+    mutex: &std::sync::Mutex<Option<std::thread::ThreadId>>,
+) -> bool {
+    let current = std::thread::current().id();
+    match mutex.try_lock() {
+        Ok(guard) => guard.as_ref().is_some_and(|id| *id == current),
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned
+            .into_inner()
+            .as_ref()
+            .is_some_and(|id| *id == current),
+        Err(std::sync::TryLockError::WouldBlock) => false,
+    }
+}
+
+#[cfg(all(test, feature = "mermaid-quickjs"))]
+fn take_matching_init_error_stage(
+    mutex: &std::sync::Mutex<Option<(std::thread::ThreadId, usize)>>,
+    stage: usize,
+) -> bool {
+    let current = std::thread::current().id();
+    match mutex.try_lock() {
+        Ok(mut guard) => {
+            if let Some((thread_id, target_stage)) = guard.take() {
+                if thread_id == current && target_stage == stage {
+                    return true;
+                }
+                *guard = Some((thread_id, target_stage));
+            }
+            false
+        }
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+            let mut guard = poisoned.into_inner();
+            if let Some((thread_id, target_stage)) = guard.take() {
+                if thread_id == current && target_stage == stage {
+                    return true;
+                }
+                *guard = Some((thread_id, target_stage));
+            }
+            false
+        }
+        Err(std::sync::TryLockError::WouldBlock) => false,
+    }
+}
+
+#[cfg(all(test, feature = "mermaid-quickjs"))]
 fn maybe_force_mermaid_init_error<T>(
     stage: usize,
     result: rquickjs::Result<T>,
 ) -> rquickjs::Result<T> {
-    if let Ok(mut guard) = FORCE_MERMAID_INIT_ERROR_STAGE.try_lock() {
-        if let Some((thread_id, target_stage)) = guard.take() {
-            if thread_id == std::thread::current().id() && target_stage == stage {
-                return Err(rquickjs::Error::Exception);
-            }
-            *guard = Some((thread_id, target_stage));
-        }
+    if take_matching_init_error_stage(&FORCE_MERMAID_INIT_ERROR_STAGE, stage) {
+        return Err(rquickjs::Error::Exception);
     }
     result
 }
@@ -902,21 +938,21 @@ impl MermaidRenderer {
                         .mermaid_width_debounce
                         .borrow()
                         .get(&svg_key)
-                        .and_then(|d| d.bucket_changed_at)
-                        .unwrap_or_else(|| {
-                            // bucket_changed_at was None but bucket != last_enqueued;
-                            // shouldn't happen but treat as "just changed"
-                            let now = Instant::now();
-                            self.mermaid_width_debounce.borrow_mut().insert(
-                                svg_key,
-                                WidthDebounce {
-                                    last_enqueued_bucket,
-                                    last_seen_bucket: width_bucket,
-                                    bucket_changed_at: Some(now),
-                                },
-                            );
-                            now
-                        });
+                        .and_then(|d| d.bucket_changed_at);
+                    let changed_at = changed_at.unwrap_or_else(|| {
+                        // bucket_changed_at was None but bucket != last_enqueued;
+                        // shouldn't happen but treat as "just changed"
+                        let now = Instant::now();
+                        self.mermaid_width_debounce.borrow_mut().insert(
+                            svg_key,
+                            WidthDebounce {
+                                last_enqueued_bucket,
+                                last_seen_bucket: width_bucket,
+                                bucket_changed_at: Some(now),
+                            },
+                        );
+                        now
+                    });
                     let elapsed = changed_at.elapsed();
                     let debounce_dur = std::time::Duration::from_millis(MERMAID_RESIZE_DEBOUNCE_MS);
                     if elapsed < debounce_dur {
@@ -5368,7 +5404,7 @@ mod tests {
         ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
-            .expect("env lock")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Creates a font database with system fonts loaded, wrapped in Arc.
@@ -5416,6 +5452,118 @@ mod tests {
             mermaid_latest_texture: RefCell::new(HashMap::new()),
             mermaid_wanted_bucket: RefCell::new(HashMap::new()),
         }
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_current_thread_override_matches_handles_poisoned_and_would_block() {
+        let poisoned = std::sync::Mutex::new(Some(std::thread::current().id()));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned.lock().expect("poison source lock");
+            panic!("poison override mutex");
+        }));
+        assert!(current_thread_override_matches(&poisoned));
+        poisoned.clear_poison();
+
+        let blocked = Arc::new(std::sync::Mutex::new(Some(std::thread::current().id())));
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocked_clone = Arc::clone(&blocked);
+        let handle = std::thread::spawn(move || {
+            let _guard = blocked_clone.lock().expect("blocked lock");
+            locked_tx.send(()).expect("locked signal");
+            release_rx.recv().expect("release signal");
+        });
+        locked_rx.recv().expect("wait for lock");
+        assert!(!current_thread_override_matches(&blocked));
+        release_tx.send(()).expect("release thread");
+        handle.join().expect("join blocked thread");
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_take_matching_init_error_stage_handles_poisoned_and_would_block() {
+        let poisoned = std::sync::Mutex::new(Some((std::thread::current().id(), 7usize)));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned.lock().expect("poison source lock");
+            panic!("poison init error mutex");
+        }));
+        assert!(take_matching_init_error_stage(&poisoned, 7));
+        poisoned.clear_poison();
+
+        let blocked = Arc::new(std::sync::Mutex::new(Some((
+            std::thread::current().id(),
+            9usize,
+        ))));
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocked_clone = Arc::clone(&blocked);
+        let handle = std::thread::spawn(move || {
+            let _guard = blocked_clone.lock().expect("blocked lock");
+            locked_tx.send(()).expect("locked signal");
+            release_rx.recv().expect("release signal");
+        });
+        locked_rx.recv().expect("wait for lock");
+        assert!(!take_matching_init_error_stage(&blocked, 9));
+        release_tx.send(()).expect("release thread");
+        handle.join().expect("join blocked thread");
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_take_matching_init_error_stage_poisoned_none_returns_false() {
+        let poisoned = std::sync::Mutex::new(None);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned.lock().expect("poison source lock");
+            panic!("poison empty init error mutex");
+        }));
+
+        assert!(!take_matching_init_error_stage(&poisoned, 7));
+        poisoned.clear_poison();
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_take_matching_init_error_stage_poisoned_mismatch_restores_state() {
+        let current = std::thread::current().id();
+        let poisoned = std::sync::Mutex::new(Some((current, 11usize)));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned.lock().expect("poison source lock");
+            panic!("poison mismatched init error mutex");
+        }));
+
+        assert!(!take_matching_init_error_stage(&poisoned, 7));
+        poisoned.clear_poison();
+        assert_eq!(
+            poisoned.lock().expect("restored lock").take(),
+            Some((current, 11usize))
+        );
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_take_matching_init_error_stage_poisoned_other_thread_restores_state() {
+        let (id_tx, id_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            id_tx
+                .send(std::thread::current().id())
+                .expect("send thread id");
+        });
+        let other_thread = id_rx.recv().expect("receive thread id");
+        handle.join().expect("join thread");
+
+        let poisoned = std::sync::Mutex::new(Some((other_thread, 7usize)));
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned.lock().expect("poison source lock");
+            panic!("poison other-thread init error mutex");
+        }));
+
+        assert!(!take_matching_init_error_stage(&poisoned, 7));
+        poisoned.clear_poison();
+        assert_eq!(
+            poisoned.lock().expect("restored lock").take(),
+            Some((other_thread, 7usize))
+        );
     }
 
     #[test]
@@ -5730,6 +5878,58 @@ mod tests {
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
+    fn test_svg_cache_evict_oldest_missing_entry_branch() {
+        let mut cache = SvgCache::new(2, 1000);
+        cache.insert(1, "a".to_string());
+        cache.order.clear();
+        cache.order.push_back(99);
+
+        cache.evict_oldest();
+
+        assert!(cache.get(&1).is_some());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_svg_cache_evict_oldest_empty_order_noop() {
+        let mut cache = SvgCache::new(2, 1000);
+
+        cache.evict_oldest();
+
+        assert_eq!(cache.current_bytes(), 0);
+        assert!(cache.order.is_empty());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_svg_cache_insert_over_byte_limit_with_empty_order_still_inserts() {
+        let mut cache = SvgCache::new(2, 3);
+        cache.insert(1, "abc".to_string());
+        cache.order.clear();
+
+        cache.insert(2, "d".to_string());
+
+        assert_eq!(cache.get(&2), Some("d".to_string()));
+        assert!(cache.len() >= 1);
+        assert!(cache.current_bytes() >= 1);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_svg_cache_insert_over_count_limit_with_empty_order_still_inserts() {
+        let mut cache = SvgCache::new(1, 1000);
+        cache.insert(1, "a".to_string());
+        cache.order.clear();
+
+        cache.insert(2, "b".to_string());
+
+        assert_eq!(cache.get(&2), Some("b".to_string()));
+        assert!(cache.len() >= 1);
+        assert!(cache.current_bytes() >= 1);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
     fn test_texture_cache_size_based_eviction() {
         let ctx = egui::Context::default();
         // Create a small texture that's 10x10 = 100 pixels = 400 bytes
@@ -5865,6 +6065,42 @@ mod tests {
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
+    fn test_texture_cache_evict_oldest_missing_entry_branch() {
+        let ctx = egui::Context::default();
+        let texture = ctx.load_texture(
+            "missing-entry",
+            egui::ColorImage::new([1, 1], Color32::WHITE),
+            egui::TextureOptions::LINEAR,
+        );
+        let mut cache = TextureCache::new(2, 1024 * 1024);
+        cache.insert(
+            "a".to_string(),
+            MermaidTextureEntry {
+                texture,
+                size: [1, 1],
+            },
+        );
+        cache.order.clear();
+        cache.order.push_back("missing".to_string());
+
+        cache.evict_oldest();
+
+        assert!(cache.get(&"a".to_string()).is_some());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_texture_cache_evict_oldest_empty_order_noop() {
+        let mut cache = TextureCache::new(2, 1024 * 1024);
+
+        cache.evict_oldest();
+
+        assert_eq!(cache.current_bytes(), 0);
+        assert!(cache.order.is_empty());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
     fn test_texture_cache_clear() {
         let ctx = egui::Context::default();
         let tex = ctx.load_texture(
@@ -5897,6 +6133,70 @@ mod tests {
         assert!(cache.get(&"a".to_string()).is_none());
         assert!(cache.get(&"b".to_string()).is_none());
         assert!(cache.get(&"c".to_string()).is_none());
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_texture_cache_insert_over_byte_limit_with_empty_order_still_inserts() {
+        let ctx = egui::Context::default();
+        let texture = ctx.load_texture(
+            "byte_limit_empty_order",
+            egui::ColorImage::new([1, 1], Color32::WHITE),
+            egui::TextureOptions::LINEAR,
+        );
+        let mut cache = TextureCache::new(2, 4);
+        cache.insert(
+            "a".to_string(),
+            MermaidTextureEntry {
+                texture: texture.clone(),
+                size: [1, 1],
+            },
+        );
+        cache.order.clear();
+
+        cache.insert(
+            "b".to_string(),
+            MermaidTextureEntry {
+                texture: texture.clone(),
+                size: [1, 1],
+            },
+        );
+
+        assert!(cache.get(&"b".to_string()).is_some());
+        assert!(cache.len() >= 1);
+        assert!(cache.current_bytes() >= 4);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_texture_cache_insert_over_count_limit_with_empty_order_still_inserts() {
+        let ctx = egui::Context::default();
+        let texture = ctx.load_texture(
+            "count_limit_empty_order",
+            egui::ColorImage::new([1, 1], Color32::WHITE),
+            egui::TextureOptions::LINEAR,
+        );
+        let mut cache = TextureCache::new(1, 1024 * 1024);
+        cache.insert(
+            "a".to_string(),
+            MermaidTextureEntry {
+                texture: texture.clone(),
+                size: [1, 1],
+            },
+        );
+        cache.order.clear();
+
+        cache.insert(
+            "b".to_string(),
+            MermaidTextureEntry {
+                texture,
+                size: [1, 1],
+            },
+        );
+
+        assert!(cache.get(&"b".to_string()).is_some());
+        assert!(cache.len() >= 1);
+        assert!(cache.current_bytes() >= 4);
     }
 
     #[cfg(feature = "mermaid-quickjs")]
@@ -7069,6 +7369,7 @@ mod tests {
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
     fn test_render_block_embedded_missing_js_fallback() {
+        let _lock = env_lock();
         let _empty = MermaidJsEmptyGuard::set(true);
         let (_tx, rx) = bounded(1);
         let renderer = test_renderer_with_channels(None, rx);
@@ -8031,6 +8332,12 @@ mod tests {
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
+    fn test_mermaid_worker_new_nonzero_index_succeeds() {
+        let _worker = MermaidWorker::new(1, test_fontdb()).expect("worker init");
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
     fn test_mermaid_runtime_flag_mismatch_restores() {
         let handle = std::thread::spawn(|| {
             force_mermaid_runtime_error_once();
@@ -8393,6 +8700,11 @@ mod tests {
     }
 
     #[test]
+    fn test_try_parse_html_tag_without_opening_bracket_returns_none() {
+        assert!(MermaidWorker::try_parse_html_tag("plain text").is_none());
+    }
+
+    #[test]
     fn test_try_parse_html_tag_self_closing() {
         let result = MermaidWorker::try_parse_html_tag("<br/>");
         assert!(result.is_some());
@@ -8729,6 +9041,222 @@ mod tests {
 
     #[cfg(feature = "mermaid-quickjs")]
     #[test]
+    fn test_debounce_missing_timer_is_reinitialized() {
+        let (job_tx, job_rx) = bounded(16);
+        let (_result_tx, result_rx) = bounded(16);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+
+        let theme = MermaidTheme::Default;
+        let code = "graph TD; MissingTimer-->Reset;";
+        let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
+
+        renderer.mermaid_width_debounce.borrow_mut().insert(
+            svg_key,
+            WidthDebounce {
+                last_enqueued_bucket: MermaidRenderer::width_bucket(400.0),
+                last_seen_bucket: MermaidRenderer::width_bucket(400.0),
+                bucket_changed_at: None,
+            },
+        );
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(700.0, 300.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+
+        let debounce = renderer.mermaid_width_debounce.borrow();
+        let entry = debounce.get(&svg_key).expect("debounce entry");
+        assert_eq!(entry.last_seen_bucket, MermaidRenderer::width_bucket(700.0));
+        assert!(entry.bucket_changed_at.is_some());
+        assert_eq!(job_rx.len(), 0);
+
+        drop(job_rx);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_debounce_missing_timer_same_seen_bucket_uses_fallback_now() {
+        let (job_tx, job_rx) = bounded(16);
+        let (_result_tx, result_rx) = bounded(16);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+
+        let theme = MermaidTheme::Default;
+        let code = "graph TD; MissingTimerSameSeen-->Reset;";
+        let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
+        let width_bucket = MermaidRenderer::width_bucket(700.0);
+
+        renderer.mermaid_width_debounce.borrow_mut().insert(
+            svg_key,
+            WidthDebounce {
+                last_enqueued_bucket: MermaidRenderer::width_bucket(400.0),
+                last_seen_bucket: width_bucket,
+                bucket_changed_at: None,
+            },
+        );
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(700.0, 300.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+
+        let debounce = renderer.mermaid_width_debounce.borrow();
+        let entry = debounce.get(&svg_key).expect("debounce entry");
+        assert_eq!(entry.last_seen_bucket, width_bucket);
+        assert!(entry.bucket_changed_at.is_some());
+        assert_eq!(job_rx.len(), 0);
+
+        drop(job_rx);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_debounce_missing_timer_prefers_stale_texture_when_available() {
+        let (job_tx, job_rx) = bounded(16);
+        let (_result_tx, result_rx) = bounded(16);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+
+        let theme = MermaidTheme::Default;
+        let code = "graph TD; Stale-->Shown;";
+        let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
+        let ctx = egui::Context::default();
+
+        let input = test_raw_input(400.0, 300.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let width_bucket = MermaidRenderer::width_bucket(ui.available_width());
+                let scale_bucket = MermaidRenderer::scale_bucket(1.0);
+                let texture_key = MermaidRenderer::texture_key(
+                    svg_key,
+                    width_bucket,
+                    scale_bucket,
+                    theme.bg_fill(),
+                );
+                let image = egui::ColorImage::new([2, 2], Color32::WHITE);
+                let texture = ui.ctx().load_texture(
+                    "mermaid-stale-during-debounce",
+                    image,
+                    egui::TextureOptions::default(),
+                );
+
+                renderer.mermaid_textures.borrow_mut().insert(
+                    texture_key.clone(),
+                    MermaidTextureEntry {
+                        texture,
+                        size: [640, 320],
+                    },
+                );
+                renderer
+                    .mermaid_latest_texture
+                    .borrow_mut()
+                    .insert(svg_key, texture_key);
+                renderer.mermaid_width_debounce.borrow_mut().insert(
+                    svg_key,
+                    WidthDebounce {
+                        last_enqueued_bucket: width_bucket,
+                        last_seen_bucket: width_bucket,
+                        bucket_changed_at: None,
+                    },
+                );
+            });
+        });
+
+        let input2 = test_raw_input(700.0, 300.0);
+        let mut rendered = false;
+        let _ = ctx.run(input2, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rendered = renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+
+        assert!(rendered);
+        assert_eq!(job_rx.len(), 0);
+        assert!(renderer
+            .mermaid_width_debounce
+            .borrow()
+            .get(&svg_key)
+            .and_then(|entry| entry.bucket_changed_at)
+            .is_some());
+
+        drop(job_rx);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_debounce_missing_timer_prefers_stale_texture_when_available_and_scales() {
+        let (job_tx, job_rx) = bounded(16);
+        let (_result_tx, result_rx) = bounded(16);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+
+        let theme = MermaidTheme::Default;
+        let code = "graph TD; Wide-->Scaled;";
+        let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
+        let ctx = egui::Context::default();
+
+        let input = test_raw_input(640.0, 300.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let width_bucket = MermaidRenderer::width_bucket(ui.available_width());
+                let texture_key = MermaidRenderer::texture_key(
+                    svg_key,
+                    width_bucket,
+                    MermaidRenderer::scale_bucket(1.0),
+                    theme.bg_fill(),
+                );
+                let texture = ui.ctx().load_texture(
+                    "mermaid-stale-scaled",
+                    egui::ColorImage::new([2, 2], Color32::WHITE),
+                    egui::TextureOptions::default(),
+                );
+                renderer.mermaid_textures.borrow_mut().insert(
+                    texture_key.clone(),
+                    MermaidTextureEntry {
+                        texture,
+                        size: [1024, 512],
+                    },
+                );
+                renderer
+                    .mermaid_latest_texture
+                    .borrow_mut()
+                    .insert(svg_key, texture_key);
+                renderer.mermaid_width_debounce.borrow_mut().insert(
+                    svg_key,
+                    WidthDebounce {
+                        last_enqueued_bucket: width_bucket,
+                        last_seen_bucket: width_bucket,
+                        bucket_changed_at: None,
+                    },
+                );
+            });
+        });
+
+        let input2 = test_raw_input(320.0, 300.0);
+        let mut rendered = false;
+        let _ = ctx.run(input2, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                rendered = renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+
+        assert!(rendered);
+        assert_eq!(job_rx.len(), 0);
+        assert!(renderer
+            .mermaid_width_debounce
+            .borrow()
+            .get(&svg_key)
+            .and_then(|entry| entry.bucket_changed_at)
+            .is_some());
+
+        drop(job_rx);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
     fn test_debounce_suppresses_enqueue_during_resize() {
         let (job_tx, job_rx) = bounded(16);
         let (_result_tx, result_rx) = bounded(16);
@@ -8816,6 +9344,42 @@ mod tests {
             });
         });
         assert_eq!(job_rx.len(), 2); // Now 2 — debounce expired
+
+        drop(job_rx);
+    }
+
+    #[cfg(feature = "mermaid-quickjs")]
+    #[test]
+    fn test_debounce_same_bucket_clears_timer_when_texture_evicted() {
+        let (job_tx, job_rx) = bounded(16);
+        let (_result_tx, result_rx) = bounded(16);
+        let renderer = test_renderer_with_channels(Some(job_tx), result_rx);
+
+        let theme = MermaidTheme::Default;
+        let code = "graph TD; Evicted-->Texture;";
+        let svg_key = hash_str(&format!("{}:{}", theme.theme_name(), code));
+
+        let ctx = egui::Context::default();
+        let input = test_raw_input(400.0, 300.0);
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let width_bucket = MermaidRenderer::width_bucket(ui.available_width());
+                renderer.mermaid_width_debounce.borrow_mut().insert(
+                    svg_key,
+                    WidthDebounce {
+                        last_enqueued_bucket: width_bucket,
+                        last_seen_bucket: width_bucket,
+                        bucket_changed_at: Some(Instant::now()),
+                    },
+                );
+                renderer.render_block(ui, code, 1.0, 14.0, theme);
+            });
+        });
+
+        let debounce = renderer.mermaid_width_debounce.borrow();
+        let entry = debounce.get(&svg_key).expect("debounce entry");
+        assert!(entry.bucket_changed_at.is_none());
+        assert_eq!(job_rx.len(), 1);
 
         drop(job_rx);
     }
@@ -9000,5 +9564,38 @@ mod tests {
         assert_eq!(renderer.mermaid_width_debounce.borrow().len(), 0);
         assert_eq!(renderer.mermaid_latest_texture.borrow().len(), 0);
         assert_eq!(renderer.mermaid_wanted_bucket.borrow().len(), 0);
+    }
+
+    #[test]
+    fn test_convert_text_element_contents_handles_unclosed_opening_tag() {
+        let input = "<svg><text broken";
+        let output = MermaidWorker::convert_text_element_contents(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_convert_text_element_contents_handles_missing_closing_text_tag() {
+        let input = "<svg><text x=\"1\">hello";
+        let output = MermaidWorker::convert_text_element_contents(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_convert_text_element_contents_passthrough_without_html_entities() {
+        let input = "<svg><text x=\"1\">plain</text></svg>";
+        let output = MermaidWorker::convert_text_element_contents(input);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_convert_html_in_text_escapes_self_closing_tag() {
+        let output = MermaidWorker::convert_html_in_text("<i/>");
+        assert_eq!(output, "&lt;i/&gt;");
+    }
+
+    #[test]
+    fn test_convert_html_in_text_escapes_gt_and_amp() {
+        let output = MermaidWorker::convert_html_in_text("a > b & c");
+        assert_eq!(output, "a &gt; b &amp; c");
     }
 }
