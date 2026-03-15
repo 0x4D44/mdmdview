@@ -454,9 +454,29 @@ fn configure_egui_style(ctx: &egui::Context) {
 /// Configure font fallbacks for better symbol coverage.
 /// Adds platform-specific symbol fonts as fallbacks so characters like ✓ ✗ ⚠
 /// render instead of showing tofu boxes.
-fn configure_font_fallbacks(ctx: &egui::Context) {
-    let mut fonts = egui::FontDefinitions::default();
+fn install_symbol_fallback(fonts: &mut egui::FontDefinitions, font_data: Vec<u8>) {
+    let font_name = "symbol_fallback".to_string();
+    fonts
+        .font_data
+        .insert(font_name.clone(), egui::FontData::from_owned(font_data));
 
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+        family.push(font_name.clone());
+    }
+    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        family.push(font_name);
+    }
+}
+
+fn configure_font_fallbacks_from_data(ctx: &egui::Context, font_data: Option<Vec<u8>>) {
+    let mut fonts = egui::FontDefinitions::default();
+    if let Some(font_data) = font_data {
+        install_symbol_fallback(&mut fonts, font_data);
+    }
+    ctx.set_fonts(fonts);
+}
+
+fn configure_font_fallbacks(ctx: &egui::Context) {
     // Platform-specific symbol font paths
     #[cfg(target_os = "windows")]
     let symbol_font_paths = &[
@@ -481,21 +501,7 @@ fn configure_font_fallbacks(ctx: &egui::Context) {
 
     // Load the first available symbol font as fallback
     let font_data = symbol_font_paths.iter().find_map(|p| std::fs::read(p).ok());
-    if let Some(font_data) = font_data {
-        let font_name = "symbol_fallback".to_string();
-        fonts
-            .font_data
-            .insert(font_name.clone(), egui::FontData::from_owned(font_data));
-
-        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-            family.push(font_name.clone());
-        }
-        if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-            family.push(font_name);
-        }
-    }
-
-    ctx.set_fonts(fonts);
+    configure_font_fallbacks_from_data(ctx, font_data);
 }
 
 #[cfg(test)]
@@ -599,6 +605,45 @@ mod tests {
             style.visuals.extreme_bg_color,
             egui::Color32::from_rgb(10, 11, 12)
         );
+    }
+
+    #[test]
+    fn test_install_symbol_fallback_adds_font_to_both_families() {
+        let mut fonts = egui::FontDefinitions::default();
+
+        install_symbol_fallback(&mut fonts, vec![1, 2, 3, 4]);
+
+        assert!(fonts.font_data.contains_key("symbol_fallback"));
+        assert!(fonts
+            .families
+            .get(&egui::FontFamily::Proportional)
+            .is_some_and(|family| family.iter().any(|name| name == "symbol_fallback")));
+        assert!(fonts
+            .families
+            .get(&egui::FontFamily::Monospace)
+            .is_some_and(|family| family.iter().any(|name| name == "symbol_fallback")));
+    }
+
+    #[test]
+    fn test_install_symbol_fallback_handles_missing_families() {
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.families.remove(&egui::FontFamily::Proportional);
+        fonts.families.remove(&egui::FontFamily::Monospace);
+
+        install_symbol_fallback(&mut fonts, vec![5, 6, 7, 8]);
+
+        assert!(fonts.font_data.contains_key("symbol_fallback"));
+        assert!(!fonts.families.contains_key(&egui::FontFamily::Proportional));
+        assert!(!fonts.families.contains_key(&egui::FontFamily::Monospace));
+    }
+
+    #[test]
+    fn test_configure_font_fallbacks_from_data_none_keeps_defaults() {
+        let ctx = egui::Context::default();
+
+        configure_font_fallbacks_from_data(&ctx, None);
+
+        let _ = ctx.style();
     }
 
     #[test]

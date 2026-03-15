@@ -798,6 +798,7 @@ fn xml_escape(s: &str) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -837,8 +838,10 @@ mod tests {
     fn test_light_fill_gets_dark_text_in_dark_mode() {
         // Node with light fill (#d4edda) should get dark text, not the dark-mode default (#e0e0e0).
         let graph = layout_ok("success: OK {\n  style.fill: \"#d4edda\"\n}");
-        let mut options = RenderOptions::default();
-        options.dark_mode = true;
+        let options = RenderOptions {
+            dark_mode: true,
+            ..Default::default()
+        };
         let svg = render(&graph, &options);
 
         // The label "OK" should be rendered with dark text (#171717), not light (#e0e0e0)
@@ -856,8 +859,10 @@ mod tests {
     fn test_dark_fill_gets_light_text_in_light_mode() {
         // Node with dark fill (#155724) should get light text, not the light-mode default (#171717).
         let graph = layout_ok("a: Hello {\n  style.fill: \"#155724\"\n}");
-        let mut options = RenderOptions::default();
-        options.dark_mode = false;
+        let options = RenderOptions {
+            dark_mode: false,
+            ..Default::default()
+        };
         let svg = render(&graph, &options);
 
         // The label should be rendered with light text (#e0e0e0)
@@ -872,8 +877,10 @@ mod tests {
         // When font_color is explicitly set, it should be used regardless of fill.
         let graph =
             layout_ok("a: Hello {\n  style.fill: \"#d4edda\"\n  style.font-color: \"#ff0000\"\n}");
-        let mut options = RenderOptions::default();
-        options.dark_mode = true;
+        let options = RenderOptions {
+            dark_mode: true,
+            ..Default::default()
+        };
         let svg = render(&graph, &options);
 
         assert!(
@@ -886,8 +893,10 @@ mod tests {
     fn test_no_fill_uses_theme_default() {
         // Node with no explicit fill should use theme font_color.
         let graph = layout_ok("a: Hello");
-        let mut options = RenderOptions::default();
-        options.dark_mode = true;
+        let options = RenderOptions {
+            dark_mode: true,
+            ..Default::default()
+        };
         let svg = render(&graph, &options);
 
         // Should use dark-mode theme font color (#e0e0e0)

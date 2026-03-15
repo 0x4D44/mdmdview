@@ -253,6 +253,7 @@ fn normalize_positions(graph: &mut D2Graph) {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use crate::{compile, layout, parse, RenderOptions};
 

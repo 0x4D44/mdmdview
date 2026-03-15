@@ -1376,6 +1376,7 @@ fn effective_direction(graph: &D2Graph, container: NodeIndex) -> Direction {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::RenderOptions;

@@ -6784,6 +6784,51 @@ mod tests {
         out
     }
 
+    fn spawn_http_response_server_with_declared_length(
+        status_line: &str,
+        content_type: &str,
+        declared_len: usize,
+        body: Vec<u8>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let status_line = status_line.to_string();
+        let content_type = content_type.to_string();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut request_buf = [0u8; 1024];
+            let _ = std::io::Read::read(&mut stream, &mut request_buf);
+            let headers = format!(
+                "{status_line}\r\nContent-Length: {}\r\nContent-Type: {content_type}\r\nConnection: close\r\n\r\n",
+                declared_len
+            );
+            std::io::Write::write_all(&mut stream, headers.as_bytes()).expect("write headers");
+            std::io::Write::write_all(&mut stream, &body).expect("write body");
+        });
+        (format!("http://{addr}/image.png"), handle)
+    }
+
+    fn spawn_http_response_server(
+        status_line: &str,
+        content_type: &str,
+        body: Vec<u8>,
+    ) -> (String, std::thread::JoinHandle<()>) {
+        let declared_len = body.len();
+        spawn_http_response_server_with_declared_length(
+            status_line,
+            content_type,
+            declared_len,
+            body,
+        )
+    }
+
+    fn unused_local_url() -> String {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+        format!("http://{addr}/missing.png")
+    }
+
     /// Creates a test ImageCacheEntry with the given pixel size inside a with_test_ui context.
     fn make_test_cache_entry(size: [usize; 2]) -> ImageCacheEntry {
         let mut entry_slot = None;
@@ -6875,6 +6920,19 @@ mod tests {
         cache.order.clear();
         cache.insert("b".to_string(), entry);
         assert!(cache.contains_key("b"));
+    }
+
+    #[test]
+    fn test_lru_cache_insert_empty_order_breaks_without_panic() {
+        let mut cache: LruCache<String, i32> = LruCache::new(1);
+        cache.entries.insert("stale".to_string(), 1);
+        cache.order.clear();
+
+        cache.insert("fresh".to_string(), 2);
+
+        assert_eq!(cache.get(&"fresh".to_string()), Some(2));
+        assert_eq!(cache.get(&"stale".to_string()), Some(1));
+        assert_eq!(cache.order.back(), Some(&"fresh".to_string()));
     }
 
     #[test]
@@ -7212,6 +7270,98 @@ mod tests {
             assert!(
                 cache.would_restore_fit("near"),
                 "near should fit after phase 3"
+            );
+        });
+    }
+
+    #[test]
+    fn test_image_cache_enforce_budget_preserves_last_non_degraded_entry() {
+        let mut cache = ImageCache::new(8);
+        cache.max_bytes = 200;
+
+        with_test_ui(|ctx, _ui| {
+            let make = |name: &str| {
+                let tex = ctx.load_texture(
+                    name,
+                    egui::ColorImage::new([10, 10], Color32::WHITE),
+                    egui::TextureOptions::LINEAR,
+                );
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [10, 10],
+                    modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([10, 10]),
+                    degraded: false,
+                }
+            };
+
+            let mut degraded = make("degraded");
+            degraded.byte_size = 16;
+            degraded.degraded = true;
+            cache.insert("full".to_string(), make("full"));
+            cache.insert("degraded".to_string(), degraded);
+
+            let mut distances = HashMap::new();
+            distances.insert("full".to_string(), 5000.0);
+            distances.insert("degraded".to_string(), 10.0);
+            cache.update_viewport_distances(distances);
+
+            cache.enforce_budget(ctx, 300.0);
+
+            assert!(
+                !cache.entries.get("full").unwrap().degraded,
+                "last full-resolution entry should be preserved"
+            );
+            assert!(cache.current_bytes() > cache.max_bytes);
+        });
+    }
+
+    #[test]
+    fn test_enforce_budget_phase3_preserves_last_far_candidate() {
+        let mut cache = ImageCache::new(8);
+        cache.max_bytes = 500;
+
+        with_test_ui(|ctx, _ui| {
+            let make = |name: &str| {
+                let tex = ctx.load_texture(
+                    name,
+                    egui::ColorImage::new([10, 10], Color32::WHITE),
+                    egui::TextureOptions::LINEAR,
+                );
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [10, 10],
+                    modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([10, 10]),
+                    degraded: false,
+                }
+            };
+
+            let mut near = make("near");
+            near.byte_size = 16;
+            near.degraded = true;
+            cache.insert("near".to_string(), near);
+            cache.insert("far".to_string(), make("far"));
+
+            let mut distances = HashMap::new();
+            distances.insert("near".to_string(), 50.0);
+            distances.insert("far".to_string(), 5000.0);
+            cache.update_viewport_distances(distances);
+
+            assert!(
+                !cache.would_restore_fit("near"),
+                "near image should need headroom before phase 3"
+            );
+
+            cache.enforce_budget(ctx, 600.0);
+
+            assert!(
+                !cache.entries.get("far").unwrap().degraded,
+                "phase 3 should preserve the last far full-resolution entry"
+            );
+            assert!(
+                !cache.would_restore_fit("near"),
+                "without another far candidate, restore should still not fit"
             );
         });
     }
@@ -8105,6 +8255,125 @@ mod tests {
             ImageLoadResult::Failed { ref key, .. } if key == "read-error"
         ));
         Ok(())
+    }
+
+    #[test]
+    fn test_spawn_image_loader_remote_success_reports_loaded() {
+        let (job_tx, job_rx) = bounded(1);
+        let (result_tx, result_rx) = bounded(1);
+        MarkdownRenderer::spawn_image_loader(job_rx, result_tx);
+
+        let (url, handle) =
+            spawn_http_response_server("HTTP/1.1 200 OK", "image/png", tiny_png_bytes());
+        job_tx
+            .send(ImageLoadRequest {
+                key: "remote-ok".to_string(),
+                source: ImageLoadSource::Remote(url),
+                generation: 7,
+            })
+            .expect("send");
+
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("result");
+        handle.join().expect("server join");
+
+        match result {
+            ImageLoadResult::Loaded {
+                key,
+                size,
+                modified,
+                generation,
+                ..
+            } => {
+                assert_eq!(key, "remote-ok");
+                assert_eq!(size, [2, 2]);
+                assert_eq!(generation, 7);
+                assert!(modified.is_none());
+            }
+            _ => panic!("expected loaded result"),
+        }
+    }
+
+    #[test]
+    fn test_spawn_image_loader_remote_invalid_bytes_reports_failed() {
+        let (job_tx, job_rx) = bounded(1);
+        let (result_tx, result_rx) = bounded(1);
+        MarkdownRenderer::spawn_image_loader(job_rx, result_tx);
+
+        let (url, handle) =
+            spawn_http_response_server("HTTP/1.1 200 OK", "image/png", b"not an image".to_vec());
+        job_tx
+            .send(ImageLoadRequest {
+                key: "remote-bad".to_string(),
+                source: ImageLoadSource::Remote(url),
+                generation: 0,
+            })
+            .expect("send");
+
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("result");
+        handle.join().expect("server join");
+
+        assert!(matches!(
+            result,
+            ImageLoadResult::Failed { ref key, .. } if key == "remote-bad"
+        ));
+    }
+
+    #[test]
+    fn test_spawn_image_loader_remote_truncated_body_reports_failed() {
+        let (job_tx, job_rx) = bounded(1);
+        let (result_tx, result_rx) = bounded(1);
+        MarkdownRenderer::spawn_image_loader(job_rx, result_tx);
+
+        let (url, handle) = spawn_http_response_server_with_declared_length(
+            "HTTP/1.1 200 OK",
+            "image/png",
+            tiny_png_bytes().len(),
+            Vec::new(),
+        );
+        job_tx
+            .send(ImageLoadRequest {
+                key: "remote-truncated".to_string(),
+                source: ImageLoadSource::Remote(url),
+                generation: 0,
+            })
+            .expect("send");
+
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("result");
+        handle.join().expect("server join");
+
+        assert!(matches!(
+            result,
+            ImageLoadResult::Failed { ref key, .. } if key == "remote-truncated"
+        ));
+    }
+
+    #[test]
+    fn test_spawn_image_loader_remote_connection_error_reports_failed() {
+        let (job_tx, job_rx) = bounded(1);
+        let (result_tx, result_rx) = bounded(1);
+        MarkdownRenderer::spawn_image_loader(job_rx, result_tx);
+
+        job_tx
+            .send(ImageLoadRequest {
+                key: "remote-missing".to_string(),
+                source: ImageLoadSource::Remote(unused_local_url()),
+                generation: 0,
+            })
+            .expect("send");
+
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("result");
+        assert!(matches!(
+            result,
+            ImageLoadResult::Failed { ref key, .. } if key == "remote-missing"
+        ));
     }
 
     #[test]
@@ -11505,6 +11774,20 @@ fn main() {}
     }
 
     #[test]
+    fn test_get_or_load_image_texture_remote_allowed_loads() {
+        let renderer = MarkdownRenderer::new();
+        renderer.set_allow_remote_images(true);
+        let (url, handle) =
+            spawn_http_response_server("HTTP/1.1 200 OK", "image/png", tiny_png_bytes());
+        with_test_ui(|ctx, ui| {
+            let loaded = wait_for_image(&renderer, ctx, ui, &url);
+            assert!(loaded.is_some());
+        });
+        handle.join().expect("server join");
+        assert!(renderer.image_textures.borrow().contains_key(&url));
+    }
+
+    #[test]
     fn test_get_or_load_image_texture_embedded_cache_hit() {
         let renderer = MarkdownRenderer::new();
         with_test_ui(|ctx, ui| {
@@ -12106,6 +12389,84 @@ contexts:
     }
 
     #[test]
+    fn test_enqueue_degraded_reload_remote_enqueues_request() {
+        let mut renderer = MarkdownRenderer::new();
+        let (tx, rx) = bounded(1);
+        renderer.image_job_tx = tx;
+
+        assert!(renderer.enqueue_degraded_reload(
+            "http://127.0.0.1/test.png",
+            "remote-cache",
+            None,
+            true,
+            Path::new("ignored"),
+        ));
+
+        let request = rx.try_recv().expect("request");
+        assert_eq!(request.key, "remote-cache");
+        assert!(matches!(
+            request.source,
+            ImageLoadSource::Remote(ref url) if url == "http://127.0.0.1/test.png"
+        ));
+        assert!(renderer.image_pending.borrow().contains("remote-cache"));
+    }
+
+    #[test]
+    fn test_enqueue_degraded_reload_missing_file_returns_false() {
+        let renderer = MarkdownRenderer::new();
+        assert!(!renderer.enqueue_degraded_reload(
+            "missing.png",
+            "missing-cache",
+            None,
+            false,
+            Path::new("missing.png"),
+        ));
+    }
+
+    #[test]
+    fn test_enqueue_degraded_reload_embedded_enqueues_request() {
+        let mut renderer = MarkdownRenderer::new();
+        let (tx, rx) = bounded(1);
+        renderer.image_job_tx = tx;
+
+        assert!(renderer.enqueue_degraded_reload(
+            "embedded://img",
+            "embedded-cache",
+            Some(b"png"),
+            false,
+            Path::new("embedded.png"),
+        ));
+
+        let request = rx.try_recv().expect("request");
+        assert_eq!(request.key, "embedded-cache");
+        assert!(matches!(request.source, ImageLoadSource::Embedded(bytes) if bytes == b"png"));
+        assert!(renderer.image_pending.borrow().contains("embedded-cache"));
+    }
+
+    #[test]
+    fn test_enqueue_degraded_reload_queue_full_returns_false() {
+        let mut renderer = MarkdownRenderer::new();
+        let (tx, _rx) = bounded(1);
+        renderer.image_job_tx = tx;
+        renderer
+            .image_job_tx
+            .send(ImageLoadRequest {
+                key: "full".to_string(),
+                source: ImageLoadSource::Embedded(b"png"),
+                generation: 0,
+            })
+            .expect("fill queue");
+
+        assert!(!renderer.enqueue_degraded_reload(
+            "embedded://img",
+            "embedded-cache",
+            Some(b"png"),
+            false,
+            Path::new("embedded.png"),
+        ));
+    }
+
+    #[test]
     fn test_poll_image_results_records_failure() {
         let mut renderer = MarkdownRenderer::new();
         let (result_tx, result_rx) = crossbeam_channel::unbounded::<ImageLoadResult>();
@@ -12128,6 +12489,70 @@ contexts:
             .borrow()
             .contains_key(&"failed.png".to_string()));
         assert!(!renderer.image_pending.borrow().contains("failed.png"));
+    }
+
+    #[test]
+    fn test_poll_image_results_loaded_degraded_entry_clears_pending_restore_bytes() {
+        let mut renderer = MarkdownRenderer::new();
+        let (result_tx, result_rx) = crossbeam_channel::unbounded::<ImageLoadResult>();
+        renderer.image_result_rx = result_rx;
+
+        with_test_ui(|ctx, _ui| {
+            let tex = ctx.load_texture(
+                "reload-entry",
+                egui::ColorImage::new([2, 2], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            renderer.image_textures.borrow_mut().insert(
+                "reload.png".to_string(),
+                ImageCacheEntry {
+                    texture: tex,
+                    size: [10, 10],
+                    modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([2, 2]),
+                    degraded: true,
+                },
+            );
+            renderer.image_textures.borrow_mut().pending_restore_bytes =
+                ImageCacheEntry::estimate_bytes([10, 10]);
+            renderer
+                .image_pending
+                .borrow_mut()
+                .insert("reload.png".to_string());
+
+            result_tx
+                .send(ImageLoadResult::Loaded {
+                    key: "reload.png".to_string(),
+                    image: egui::ColorImage::new([10, 10], Color32::WHITE),
+                    size: [10, 10],
+                    modified: None,
+                    generation: 0,
+                })
+                .expect("send");
+
+            assert!(renderer.poll_image_results(ctx));
+        });
+
+        assert_eq!(renderer.image_textures.borrow().pending_restore_bytes, 0);
+        assert!(!renderer.image_pending.borrow().contains("reload.png"));
+        assert!(renderer
+            .image_textures
+            .borrow()
+            .entries
+            .get("reload.png")
+            .is_some_and(|entry| !entry.degraded));
+    }
+
+    #[test]
+    fn test_poll_image_results_resets_orphaned_pending_restore_bytes() {
+        let renderer = MarkdownRenderer::new();
+        renderer.image_textures.borrow_mut().pending_restore_bytes = 64;
+
+        with_test_ui(|ctx, _ui| {
+            assert!(!renderer.poll_image_results(ctx));
+        });
+
+        assert_eq!(renderer.image_textures.borrow().pending_restore_bytes, 0);
     }
 
     #[test]
@@ -12394,6 +12819,46 @@ contexts:
                 ui.spacing_mut().item_spacing.x = 6.0;
                 ui.set_width(400.0);
                 let table_id = renderer.compute_table_id(&headers, &rows, &[], 16);
+                renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
+            });
+        });
+    }
+
+    #[test]
+    fn test_render_table_tablebuilder_non_scaled_clip_variants() {
+        let renderer = MarkdownRenderer::new();
+        let _forced = ForcedTablePolicies::new(vec![
+            ColumnPolicy::Fixed {
+                width: 80.0,
+                clip: true,
+            },
+            ColumnPolicy::Resizable {
+                min: 60.0,
+                preferred: 140.0,
+                clip: true,
+            },
+            ColumnPolicy::Remainder { clip: true },
+            ColumnPolicy::Auto,
+        ]);
+        let headers = vec![
+            vec![InlineSpan::Text("Fixed".to_string())],
+            vec![InlineSpan::Text("Resizable".to_string())],
+            vec![InlineSpan::Text("Rest".to_string())],
+            vec![InlineSpan::Text("Auto".to_string())],
+        ];
+        let rows = vec![vec![
+            vec![InlineSpan::Text("Alpha".to_string())],
+            vec![InlineSpan::Text("Beta".to_string())],
+            vec![InlineSpan::Text("Gamma".to_string())],
+            vec![InlineSpan::Text("Delta".to_string())],
+        ]];
+
+        with_test_ui(|_, ui| {
+            let layout = *ui.layout();
+            ui.allocate_ui_with_layout(Vec2::new(720.0, 0.0), layout, |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.set_width(720.0);
+                let table_id = renderer.compute_table_id(&headers, &rows, &[], 18);
                 renderer.render_table_tablebuilder(ui, &headers, &rows, &[], table_id);
             });
         });
@@ -13751,6 +14216,21 @@ contexts:
     }
 
     #[test]
+    fn test_render_code_block_highlighted_tokens_with_spaces_and_styles() {
+        let renderer = MarkdownRenderer::new();
+        let highlighted = vec![vec![HighlightedToken {
+            text: "alpha beta".to_string(),
+            color: Color32::WHITE,
+            bold: true,
+            italic: true,
+        }]];
+
+        with_test_ui(|_, ui| {
+            renderer.render_code_block(ui, Some("rust"), "alpha beta", Some(&highlighted));
+        });
+    }
+
+    #[test]
     fn test_render_code_block_highlight_and_fallback() {
         let renderer = MarkdownRenderer::new();
         let code = "fn main() {\n    let value = 1;\n    // comment with  spaces\n    \n}\n";
@@ -14583,6 +15063,93 @@ contexts:
     }
 
     #[test]
+    fn test_clear_image_failure_cache_and_texture_cache_stats() {
+        let renderer = MarkdownRenderer::new();
+        renderer.note_image_failure("failed.png");
+        with_test_ui(|ctx, ui| {
+            let _ = renderer.get_or_make_emoji_texture(ui, "\u{1f600}");
+            let image = ctx.load_texture(
+                "image-cache-stats",
+                egui::ColorImage::new([2, 2], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            renderer.store_image_texture("stats.png", image, [2, 2], None);
+        });
+
+        let (emoji_entries, image_entries) = renderer.texture_cache_stats();
+        assert_eq!(emoji_entries, 1);
+        assert_eq!(image_entries, 1);
+
+        renderer.clear_image_failure_cache();
+        assert!(renderer.image_failures.borrow().entries.is_empty());
+    }
+
+    #[test]
+    fn test_estimate_table_column_widths_remainder_and_auto_use_min_floor() {
+        let renderer = MarkdownRenderer::new();
+        let specs = vec![
+            ColumnSpec::new(0, "Auto", ColumnPolicy::Auto, None),
+            ColumnSpec::new(1, "Rest", ColumnPolicy::Remainder { clip: true }, None),
+        ];
+        let widths = renderer.estimate_table_column_widths(&specs, 80.0, 8.0);
+        assert_eq!(widths.len(), 2);
+        assert!(widths.iter().all(|width| *width >= 1.0));
+    }
+
+    #[test]
+    fn test_render_image_info_popup_handles_missing_extension() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            renderer.render_image_info_popup(ui, "remote image", "C:\\temp\\noext", 64, 32);
+        });
+    }
+
+    #[test]
+    fn test_render_image_info_popup_shows_kb_size_and_degraded_cache() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let temp = tempdir()?;
+        let path = temp.path().join("popup.png");
+        std::fs::write(&path, vec![0_u8; 2048])?;
+        let resolved = path.to_string_lossy().into_owned();
+
+        with_test_ui(|ctx, ui| {
+            let texture = ctx.load_texture(
+                "popup-kb",
+                egui::ColorImage::new([2, 2], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            renderer.image_textures.borrow_mut().insert(
+                resolved.clone(),
+                ImageCacheEntry {
+                    texture,
+                    size: [64, 32],
+                    modified: None,
+                    byte_size: ImageCacheEntry::estimate_bytes([64, 32]),
+                    degraded: true,
+                },
+            );
+            renderer.render_image_info_popup(ui, "popup.png", &resolved, 64, 32);
+        });
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_render_image_info_popup_shows_mb_size() -> Result<()> {
+        let renderer = MarkdownRenderer::new();
+        let temp = tempdir()?;
+        let path = temp.path().join("large.png");
+        std::fs::write(&path, vec![0_u8; 1_200_000])?;
+        let resolved = path.to_string_lossy().into_owned();
+
+        with_test_ui(|_, ui| {
+            renderer.render_image_info_popup(ui, "large.png", &resolved, 64, 32);
+        });
+
+        Ok(())
+    }
+
+    #[test]
     fn test_render_link_with_emoji_characters() {
         let renderer = MarkdownRenderer::new();
         // Create a link whose text contains actual emoji characters (triggers emoji link path)
@@ -14597,6 +15164,16 @@ contexts:
     fn test_render_link_with_mixed_emoji_and_text() {
         let renderer = MarkdownRenderer::new();
         let md = "[Hello 🌍 World](https://example.com)\n";
+        let elements = renderer.parse(md).expect("parse ok");
+        with_test_ui(|_, ui| {
+            renderer.render_to_ui(ui, &elements);
+        });
+    }
+
+    #[test]
+    fn test_render_strong_text_link_without_emoji() {
+        let renderer = MarkdownRenderer::new();
+        let md = "[**Bold launch**](https://example.com)\n";
         let elements = renderer.parse(md).expect("parse ok");
         with_test_ui(|_, ui| {
             renderer.render_to_ui(ui, &elements);
@@ -14619,6 +15196,16 @@ contexts:
         let renderer = MarkdownRenderer::new();
         // Bold link with emoji in text
         let md = "[**🎉 Celebration**](https://example.com)\n";
+        let elements = renderer.parse(md).expect("parse ok");
+        with_test_ui(|_, ui| {
+            renderer.render_to_ui(ui, &elements);
+        });
+    }
+
+    #[test]
+    fn test_render_strong_link_with_mixed_emoji_and_text_buffers() {
+        let renderer = MarkdownRenderer::new();
+        let md = "[**Hello \u{1F680} World**](https://example.com)\n";
         let elements = renderer.parse(md).expect("parse ok");
         with_test_ui(|_, ui| {
             renderer.render_to_ui(ui, &elements);
@@ -15183,6 +15770,16 @@ contexts:
         }
     }
 
+    #[cfg(feature = "pikchr")]
+    #[test]
+    fn test_pikchr_code_block_renders_to_ui() {
+        let renderer = MarkdownRenderer::new();
+        let elements = renderer.parse("```pikchr\nbox \"Hello\"\n```").unwrap();
+        with_test_ui(|_, ui| {
+            renderer.render_to_ui(ui, &elements);
+        });
+    }
+
     #[cfg(feature = "d2")]
     #[test]
     fn test_d2_code_block_parsed() {
@@ -15211,5 +15808,130 @@ contexts:
             }
             _ => panic!("Expected CodeBlock"),
         }
+    }
+
+    #[cfg(feature = "d2")]
+    #[test]
+    fn test_d2_code_block_renders_to_ui() {
+        let renderer = MarkdownRenderer::new();
+        let elements = renderer.parse("```d2\na -> b\n```").unwrap();
+        with_test_ui(|_, ui| {
+            renderer.render_to_ui(ui, &elements);
+        });
+    }
+
+    #[test]
+    fn test_render_clickable_link_direct_strong_without_emoji() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            let _ = renderer.render_clickable_link(ui, "Bold launch", 16.0, true, Color32::WHITE);
+        });
+    }
+
+    #[test]
+    fn test_render_clickable_link_direct_strong_with_mixed_emoji() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            let _ = renderer.render_clickable_link(
+                ui,
+                "Hello \u{1F680} World",
+                16.0,
+                true,
+                Color32::WHITE,
+            );
+        });
+    }
+
+    #[test]
+    fn test_render_clickable_link_direct_emoji_with_trailing_text() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            let (_clicked, _hovered, response) =
+                renderer.render_clickable_link(ui, "\u{1F680} launch", 16.0, false, Color32::WHITE);
+            assert!(response.is_some());
+        });
+    }
+
+    #[test]
+    fn test_emoji_key_for_grapheme_uses_fallback_for_vs16_symbol() {
+        let renderer = MarkdownRenderer::new();
+        assert_eq!(
+            renderer.emoji_key_for_grapheme("\u{1F680}\u{FE0F}"),
+            Some("\u{1F680}".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_or_make_emoji_texture_uses_procedural_fallback_for_uncatalogued_symbol() {
+        let renderer = MarkdownRenderer::new();
+        with_test_ui(|_, ui| {
+            let _ = renderer.get_or_make_emoji_texture(ui, "\u{1F6E0}");
+        });
+    }
+
+    #[test]
+    fn test_generate_emoji_image_covers_arrow_and_person_palette_branches() {
+        let renderer = MarkdownRenderer::new();
+        let arrow = renderer.generate_emoji_image("\u{27A1}", 8);
+        let wave = renderer.generate_emoji_image("\u{1F44B}", 8);
+        assert_eq!(arrow.size, [8, 8]);
+        assert_eq!(wave.size, [8, 8]);
+    }
+
+    #[test]
+    fn test_estimate_table_row_widths_returns_existing_widths_when_no_remaining_space() {
+        let renderer = MarkdownRenderer::new();
+        let specs = vec![
+            ColumnSpec::new(
+                0,
+                "Name",
+                ColumnPolicy::Fixed {
+                    width: 80.0,
+                    clip: false,
+                },
+                None,
+            ),
+            ColumnSpec::new(1, "Notes", ColumnPolicy::Remainder { clip: false }, None),
+        ];
+        let resolved = vec![80.0, 40.0];
+        let adjusted = resolved.clone();
+
+        let widths = renderer
+            .estimate_table_row_widths(&specs, &resolved, &adjusted, 40.0, 8.0, false, false);
+
+        assert_eq!(widths, adjusted);
+    }
+
+    #[test]
+    fn test_get_or_load_image_texture_degraded_pending_skips_reload() {
+        let renderer = MarkdownRenderer::new();
+        let temp = tempdir().expect("tempdir");
+        let image_path = temp.path().join("pending.png");
+        std::fs::write(&image_path, tiny_png_bytes()).expect("write image");
+        let resolved = image_path.to_string_lossy().into_owned();
+        let modified = MarkdownRenderer::disk_image_timestamp(&image_path);
+
+        with_test_ui(|ctx, ui| {
+            let texture = ctx.load_texture(
+                "pending-degraded",
+                egui::ColorImage::new([2, 2], Color32::WHITE),
+                egui::TextureOptions::LINEAR,
+            );
+            renderer.image_textures.borrow_mut().insert(
+                resolved.clone(),
+                ImageCacheEntry {
+                    texture,
+                    size: [64, 32],
+                    modified,
+                    byte_size: ImageCacheEntry::estimate_bytes([2, 2]),
+                    degraded: true,
+                },
+            );
+            renderer.image_pending.borrow_mut().insert(resolved.clone());
+
+            let result = renderer.get_or_load_image_texture(ui, &resolved);
+            assert!(result.is_some());
+            assert!(renderer.image_pending.borrow().contains(&resolved));
+        });
     }
 }
