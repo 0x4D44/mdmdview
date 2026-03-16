@@ -1725,34 +1725,73 @@ impl MermaidWorker {
     const MEMORY_LIMIT_BYTES: usize = 256 * 1024 * 1024; // 256MB (reduced from 2GB)
     const STACK_LIMIT_BYTES: usize = 4 * 1024 * 1024;
 
-    // DOMPurify expects a real browser DOM; stub sanitize for the QuickJS shim.
+    // Mermaid.js assumes a real browser DOM, but we run it in headless QuickJS.
+    // Each patch below stubs or fixes a specific DOM dependency so the JS can
+    // execute without a browser environment.
     fn patch_mermaid_js(js: &str) -> String {
+        // DOMPurify stub: Mermaid calls DOMPurify.sanitize() to strip XSS from
+        // rendered SVG. In headless QuickJS there is no real DOM to sanitize
+        // against, so we replace it with a pass-through that returns the input
+        // HTML unchanged and provides the expected hook/flag API surface.
         const TARGET: &str = "var hD=wRe();";
         const PATCH: &str =
             "var hD=wRe();if(!hD||typeof hD.sanitize!==\"function\"||typeof hD.addHook!==\"function\"||typeof hD.removeHook!==\"function\"||typeof hD.removeHooks!==\"function\"||hD.isSupported===false){hD={sanitize:function(html){return String(html);},addHook:function(){},removeHook:function(){},removeHooks:function(){},removeAllHooks:function(){},isSupported:true};}";
+
+        // D3 EnterNode prototype fallbacks: The original methods call
+        // this._parent.insertBefore / querySelector unconditionally, which
+        // crashes when _parent is null (headless DOM). The patch null-guards
+        // each call and falls back to document.body or returns a safe default.
         const D3_TARGET: &str = "FY.prototype={constructor:FY,appendChild:function(i){return this._parent.insertBefore(i,this._next)},insertBefore:function(i,s){return this._parent.insertBefore(i,s)},querySelector:function(i){return this._parent.querySelector(i)},querySelectorAll:function(i){return this._parent.querySelectorAll(i)}};";
         const D3_PATCH: &str = "FY.prototype={constructor:FY,appendChild:function(i){var p=this._parent||((typeof document!==\"undefined\"&&document.body)?document.body:null);return p?p.insertBefore(i,this._next):i},insertBefore:function(i,s){var p=this._parent||((typeof document!==\"undefined\"&&document.body)?document.body:null);return p?p.insertBefore(i,s):i},querySelector:function(i){var p=this._parent||((typeof document!==\"undefined\"&&document.body)?document.body:null);return p&&p.querySelector?p.querySelector(i):null},querySelectorAll:function(i){var p=this._parent||((typeof document!==\"undefined\"&&document.body)?document.body:null);return p&&p.querySelectorAll?p.querySelectorAll(i):[]}};";
+
+        // D3 EnterNode constructor null-guard: The constructor reads
+        // i.ownerDocument and i.namespaceURI, which throws when `i` (the
+        // parent DOM node) is null. The patch defaults `i` to document.body
+        // and safely resolves both properties.
         const D3_CTOR_TARGET: &str =
             "function FY(i,s){this.ownerDocument=i.ownerDocument,this.namespaceURI=i.namespaceURI,this._next=null,this._parent=i,this.__data__=s}";
         const D3_CTOR_PATCH: &str =
             "function FY(i,s){i=i||((typeof document!==\"undefined\"&&document.body)?document.body:null);this.ownerDocument=i&&i.ownerDocument?i.ownerDocument:(typeof document!==\"undefined\"?document:null);this.namespaceURI=i&&i.namespaceURI?i.namespaceURI:null;this._next=null;this._parent=i;this.__data__=s}";
+
+        // Text wrap .text() fallback: Mermaid's label-wrapping code calls
+        // u.text() on a D3 selection that may not have the method in our
+        // shim. The patch falls back to u.textContent when .text() is
+        // unavailable, preventing a "not a function" crash.
         const TEXT_WRAP_TARGET: &str = "u.text().split(/(\\s+|<br>)/).reverse()";
         const TEXT_WRAP_PATCH: &str = concat!(
             "String(typeof u.text===\"function\"?u.text():(u.textContent||\"\"))",
             ".split(/(\\s+|<br>)/).reverse()"
         );
+
+        // Mindmap layout swap (standalone): Replaces cose-bilkent (which
+        // requires a WebWorker-capable environment) with breadthfirst, a
+        // synchronous Cytoscape layout that works in QuickJS.
         const MINDMAP_LAYOUT_TARGET: &str =
             "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run()";
         const MINDMAP_LAYOUT_PATCH: &str =
             "p.layout({name:\"breadthfirst\",directed:!0,spacingFactor:1.4,animate:!1}).run()";
+
+        // Mindmap layout swap (with ready callback): Same cose-bilkent →
+        // breadthfirst replacement, but also strips the p.ready() wrapper
+        // which relies on async timing unavailable in QuickJS.
         const MINDMAP_READY_TARGET: &str =
             "p.layout({name:\"cose-bilkent\",quality:\"proof\",styleEnabled:!1,animate:!1}).run(),p.ready(v=>{Xe.info(\"Ready\",v),u(p)})";
         const MINDMAP_READY_PATCH: &str =
             "p.layout({name:\"breadthfirst\",directed:!0,spacingFactor:1.4,animate:!1}).run(),u(p)";
+
+        // Mindmap Cytoscape stub: Replaces the real Cytoscape constructor
+        // (which expects a DOM container) with a lightweight stub injected
+        // into the QuickJS global scope that provides the minimal graph API
+        // surface Mermaid's mindmap renderer needs.
         const MINDMAP_CYTO_TARGET: &str =
             "p=fWe({container:document.getElementById(\"cy\"),style:[{selector:\"edge\",style:{\"curve-style\":\"bezier\"}}]});";
         const MINDMAP_CYTO_PATCH: &str =
             "p=__mdmdview_cytoscape_stub({container:document.getElementById(\"cy\")});";
+
+        // Timeline getBBox overflow fix: The timeline diagram subtracts a
+        // padding value (v) from the bounding-box width, which can go
+        // negative when the box is small. The patch clamps the adjusted
+        // width to zero to prevent layout overflow.
         const TIMELINE_BOUNDS_TARGET: &str = "const se=_.node().getBBox();";
         const TIMELINE_BOUNDS_PATCH: &str = concat!(
             "const se=_.node().getBBox();",

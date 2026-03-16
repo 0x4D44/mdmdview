@@ -17,6 +17,7 @@ pub mod window_state;
 
 #[cfg(feature = "d2")]
 pub(crate) mod d2_renderer;
+pub(crate) mod diagram_common;
 pub(crate) mod image_decode;
 pub(crate) mod lru_cache;
 pub(crate) mod mermaid_renderer;

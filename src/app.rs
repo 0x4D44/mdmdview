@@ -55,6 +55,13 @@ fn process_memory_mb() -> Option<f64> {
             ) -> i32;
             fn GetCurrentProcess() -> isize;
         }
+        // SAFETY: `ProcessMemoryCounters` is a plain-old-data #[repr(C)] struct
+        // containing only integer fields (u32 and usize). Zero-initializing it is
+        // valid because zero is a legal value for every field. We then set `cb` to
+        // the struct size as required by the Win32 API contract before passing a
+        // mutable pointer to `K32GetProcessMemoryInfo`. `GetCurrentProcess()`
+        // returns a pseudo-handle (-1) that is always valid and does not need to
+        // be closed.
         unsafe {
             let mut counters: ProcessMemoryCounters = std::mem::zeroed();
             counters.cb = std::mem::size_of::<ProcessMemoryCounters>() as u32;
@@ -1286,9 +1293,11 @@ impl MarkdownViewerApp {
         // Limit history size
         if self.history.len() > self.max_history {
             self.history.remove(0);
-        } else {
-            self.history_index = self.history.len();
         }
+        // Always point past the last entry (one-past-the-end convention).
+        // When the cap fires, remove(0) shrinks len by 1, which is exactly
+        // the adjustment needed, but setting unconditionally is clearer.
+        self.history_index = self.history.len();
     }
 
     /// Navigate back in history

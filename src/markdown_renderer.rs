@@ -784,6 +784,43 @@ impl Default for MarkdownRenderer {
     }
 }
 
+/// Bundles all intermediate layout results computed from column specs, widths,
+/// Computed layout parameters for a single table render pass: column specs,
+/// resolved widths, flex distribution results, hscroll decision, and the final
+/// egui `Column` layout. Produced by `compute_table_layout_plan` and consumed
+/// by the render closure and `finalize_table_pass`.
+struct TableLayoutPlan {
+    column_specs: Vec<ColumnSpec>,
+    column_aligns: Vec<Align>,
+    column_layout: Vec<Column>,
+    resolved_widths: Vec<f32>,
+    adjusted_widths: Vec<f32>,
+    natural_widths: Vec<f32>,
+    min_floor: f32,
+    column_spacing: f32,
+    viewport_width: f32,
+    available_for_columns: f32,
+    content_width: f32,
+    effective_width: f32,
+    content_fits: bool,
+    use_hscroll: bool,
+    scaled_down: bool,
+}
+
+/// Bundles post-render geometry tracking variables collected during the
+/// header/body callbacks. Passed to `finalize_table_pass` for divider
+/// painting and metrics updates.
+struct TableGeometry {
+    header_rect: Option<egui::Rect>,
+    body_rect: Option<egui::Rect>,
+    body_layout_rect: Option<egui::Rect>,
+    header_clip_rect: Option<egui::Rect>,
+    body_clip_rect: Option<egui::Rect>,
+    column_widths: Vec<f32>,
+    measured_header_height: f32,
+    height_change: bool,
+}
+
 impl MarkdownRenderer {
     #[cfg_attr(not(test), allow(dead_code))]
     fn cell_fragments<'a>(&'a self, spans: &'a [InlineSpan]) -> Vec<CellFragment<'a>> {
@@ -4480,14 +4517,118 @@ impl MarkdownRenderer {
         }
     }
 
-    fn render_table_tablebuilder(
+    /// Build the `Vec<Column>` layout from column specs and widths.
+    ///
+    /// Three modes depending on scroll/fit state:
+    /// - **hscroll**: columns use their native policy from `ColumnSpec::as_column()`.
+    /// - **content-fit**: columns sized to natural content width, all resizable.
+    /// - **viewport-fill**: columns use adjusted widths with policy-specific logic.
+    ///
+    /// This is a pure function with no `&self` — it only transforms the inputs.
+    fn build_table_column_layout(
+        column_specs: &[ColumnSpec],
+        natural_widths: &[f32],
+        adjusted_widths: &[f32],
+        min_floor: f32,
+        use_hscroll: bool,
+        content_fits: bool,
+        scaled_down: bool,
+    ) -> Vec<Column> {
+        if use_hscroll {
+            column_specs.iter().map(|spec| spec.as_column()).collect()
+        } else if content_fits {
+            // CONTENT-FIT MODE — columns sized to content, no Remainder expansion.
+            column_specs
+                .iter()
+                .enumerate()
+                .map(|(idx, spec)| {
+                    let width = natural_widths
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(min_floor)
+                        .max(1.0);
+                    let clip = match spec.policy {
+                        ColumnPolicy::Fixed { clip, .. } => clip,
+                        ColumnPolicy::Resizable { clip, .. } => clip,
+                        ColumnPolicy::Remainder { clip } => clip,
+                        ColumnPolicy::Auto => false,
+                    };
+                    let mut col = Column::initial(width)
+                        .at_least(min_floor.min(width))
+                        .resizable(true);
+                    if clip {
+                        col = col.clip(true);
+                    }
+                    col
+                })
+                .collect()
+        } else {
+            // VIEWPORT-FILL MODE — existing policy logic unchanged.
+            column_specs
+                .iter()
+                .enumerate()
+                .map(|(idx, spec)| {
+                    let width = adjusted_widths
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(min_floor)
+                        .max(1.0);
+                    match spec.policy {
+                        ColumnPolicy::Fixed { width, clip } => {
+                            let mut col = Column::exact(width);
+                            if clip {
+                                col = col.clip(true);
+                            }
+                            col
+                        }
+                        ColumnPolicy::Resizable { min, clip, .. } => {
+                            let mut col = Column::initial(width)
+                                .at_least(min.min(width))
+                                .resizable(true);
+                            if clip {
+                                col = col.clip(true);
+                            }
+                            col
+                        }
+                        ColumnPolicy::Remainder { clip } => {
+                            let mut col = if scaled_down {
+                                Column::initial(width).at_least(min_floor.min(width))
+                            } else {
+                                Column::remainder().at_least(min_floor)
+                            };
+                            if clip {
+                                col = col.clip(true);
+                            }
+                            col
+                        }
+                        ColumnPolicy::Auto => {
+                            if scaled_down {
+                                Column::initial(width).at_least(min_floor.min(width))
+                            } else {
+                                Column::auto_with_initial_suggestion(width).at_least(min_floor)
+                            }
+                        }
+                    }
+                })
+                .collect()
+        }
+    }
+
+    /// Compute the full table layout plan from column specs, widths, and
+    /// viewport constraints. This covers stages 1-4: column stats, spec
+    /// derivation, width resolution, natural width estimation, viewport
+    /// fitting, and column layout construction.
+    ///
+    /// Takes `&egui::Ui` (read-only) — only needs `ui.spacing()`,
+    /// `ui.available_width()`, etc.
+    fn compute_table_layout_plan(
         &self,
-        ui: &mut egui::Ui,
+        ui: &egui::Ui,
         headers: &[Vec<InlineSpan>],
         rows: &[Vec<Vec<InlineSpan>>],
         alignments: &[Alignment],
         table_id: u64,
-    ) {
+    ) -> TableLayoutPlan {
         let column_stats = self.column_stats_for_table(table_id, headers, rows, alignments);
         let ctx =
             TableColumnContext::new(headers, rows, &column_stats, self.font_sizes.body, table_id);
@@ -4577,84 +4718,198 @@ impl MarkdownRenderer {
                 scaled_down = true;
             }
         }
-        let column_layout: Vec<Column> = if use_hscroll {
-            column_specs.iter().map(|spec| spec.as_column()).collect()
-        } else if content_fits {
-            // CONTENT-FIT MODE — columns sized to content, no Remainder expansion.
-            column_specs
-                .iter()
-                .enumerate()
-                .map(|(idx, spec)| {
-                    let width = natural_widths
-                        .get(idx)
-                        .copied()
-                        .unwrap_or(min_floor)
-                        .max(1.0);
-                    let clip = match spec.policy {
-                        ColumnPolicy::Fixed { clip, .. } => clip,
-                        ColumnPolicy::Resizable { clip, .. } => clip,
-                        ColumnPolicy::Remainder { clip } => clip,
-                        ColumnPolicy::Auto => false,
-                    };
-                    let mut col = Column::initial(width)
-                        .at_least(min_floor.min(width))
-                        .resizable(true);
-                    if clip {
-                        col = col.clip(true);
-                    }
-                    col
-                })
-                .collect()
-        } else {
-            // VIEWPORT-FILL MODE — existing policy logic unchanged.
-            column_specs
-                .iter()
-                .enumerate()
-                .map(|(idx, spec)| {
-                    let width = adjusted_widths
-                        .get(idx)
-                        .copied()
-                        .unwrap_or(min_floor)
-                        .max(1.0);
-                    match spec.policy {
-                        ColumnPolicy::Fixed { width, clip } => {
-                            let mut col = Column::exact(width);
-                            if clip {
-                                col = col.clip(true);
-                            }
-                            col
-                        }
-                        ColumnPolicy::Resizable { min, clip, .. } => {
-                            let mut col = Column::initial(width)
-                                .at_least(min.min(width))
-                                .resizable(true);
-                            if clip {
-                                col = col.clip(true);
-                            }
-                            col
-                        }
-                        ColumnPolicy::Remainder { clip } => {
-                            let mut col = if scaled_down {
-                                Column::initial(width).at_least(min_floor.min(width))
-                            } else {
-                                Column::remainder().at_least(min_floor)
-                            };
-                            if clip {
-                                col = col.clip(true);
-                            }
-                            col
-                        }
-                        ColumnPolicy::Auto => {
-                            if scaled_down {
-                                Column::initial(width).at_least(min_floor.min(width))
-                            } else {
-                                Column::auto_with_initial_suggestion(width).at_least(min_floor)
-                            }
-                        }
-                    }
-                })
-                .collect()
+        let column_layout = Self::build_table_column_layout(
+            &column_specs,
+            &natural_widths,
+            &adjusted_widths,
+            min_floor,
+            use_hscroll,
+            content_fits,
+            scaled_down,
+        );
+
+        TableLayoutPlan {
+            column_specs,
+            column_aligns,
+            column_layout,
+            resolved_widths,
+            adjusted_widths,
+            natural_widths,
+            min_floor,
+            column_spacing,
+            viewport_width,
+            available_for_columns,
+            content_width,
+            effective_width,
+            content_fits,
+            use_hscroll,
+            scaled_down,
+        }
+    }
+
+    /// Estimate header and uniform row heights for a table pass.
+    ///
+    /// Runs the height estimation logic: begins the per-pass bookkeeping,
+    /// computes header height (from cache or font-based estimation), and
+    /// calculates a uniform row height across all body rows. Returns
+    /// `(header_height, uniform_row_height)`.
+    fn estimate_table_pass_heights(
+        &self,
+        ui: &egui::Ui,
+        plan: &TableLayoutPlan,
+        headers: &[Vec<InlineSpan>],
+        rows: &[Vec<Vec<InlineSpan>>],
+        table_id: u64,
+    ) -> (f32, f32) {
+        let needs_estimate = {
+            let metrics = self.table_metrics.borrow();
+            metrics
+                .entry(table_id)
+                .is_none_or(|entry| entry.rows.is_empty())
         };
+        self.begin_table_pass(table_id, rows.len());
+
+        let cached_header_height = self
+            .table_metrics
+            .borrow()
+            .entry(table_id)
+            .and_then(|entry| entry.header_height());
+        // Rough header height estimation using equally divided width; refines on next frame via cache.
+        let header_height = cached_header_height.unwrap_or_else(|| {
+            let mut estimate = self.row_height_fallback();
+            let column_count = plan.column_specs.len().max(1);
+            let approx_width = (ui.available_width() / column_count as f32)
+                .max(self.font_sizes.body * 6.0)
+                .max(48.0);
+            let style = ui.style().clone();
+            estimate = headers
+                .iter()
+                .enumerate()
+                .map(|(ci, spans)| {
+                    let halign = plan.column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
+                    let build =
+                        self.cached_layout_job(&style, None, ci, spans, approx_width, true, halign);
+                    ui.fonts(|f| f.layout_job(build.job.clone()).size().y + 6.0)
+                })
+                .fold(estimate, |acc, h| acc.max(h));
+            estimate.min(self.row_height_fallback() * 3.0)
+        });
+
+        let fallback_row_height = self.row_height_fallback();
+
+        // Use uniform row height to avoid scroll issues with heterogeneous_rows.
+        // Calculate the maximum height across all rows for consistency.
+        let uniform_row_height = if needs_estimate {
+            let approx_widths = if plan.content_fits {
+                // Content-fit mode: use natural widths directly.
+                // These are the actual widths columns will render at.
+                plan.natural_widths.clone()
+            } else {
+                self.estimate_table_row_widths(
+                    &plan.column_specs,
+                    &plan.resolved_widths,
+                    &plan.adjusted_widths,
+                    plan.available_for_columns,
+                    plan.min_floor,
+                    plan.use_hscroll,
+                    plan.scaled_down,
+                )
+            };
+            let style = ui.style().clone();
+            let mut max_height = fallback_row_height;
+            for row in rows.iter() {
+                let estimate = self.estimate_table_row_height(
+                    ui,
+                    &style,
+                    row,
+                    &plan.column_aligns,
+                    &approx_widths,
+                    fallback_row_height,
+                );
+                max_height = max_height.max(estimate);
+            }
+            // Cache as uniform height for all rows
+            for idx in 0..rows.len() {
+                self.update_row_height(table_id, idx, max_height);
+            }
+            max_height
+        } else {
+            // Use cached max height from previous frames
+            (0..rows.len())
+                .filter_map(|idx| {
+                    self.table_metrics
+                        .borrow()
+                        .entry(table_id)
+                        .and_then(|e| e.row(idx))
+                        .map(|r| r.max_height)
+                })
+                .fold(fallback_row_height, f32::max)
+        };
+
+        (header_height, uniform_row_height)
+    }
+
+    /// Finalize a table rendering pass: restore spacing, update metrics caches,
+    /// record resolved widths, persist resizable widths, and paint dividers.
+    #[allow(clippy::too_many_arguments)]
+    fn finalize_table_pass(
+        &self,
+        ui: &mut egui::Ui,
+        plan: &TableLayoutPlan,
+        table_id: u64,
+        header_height: f32,
+        outer_painter: &Painter,
+        outer_visuals: &Visuals,
+        outer_ctx: &Context,
+        prev_spacing: egui::Vec2,
+        geometry: TableGeometry,
+    ) {
+        ui.spacing_mut().item_spacing = prev_spacing;
+
+        if self.update_header_height(table_id, geometry.measured_header_height) {
+            ui.ctx().request_repaint();
+        }
+
+        let (rect, clip_rect) = self.resolve_table_rects(
+            geometry.header_rect,
+            geometry.body_rect,
+            geometry.body_layout_rect,
+            geometry.header_clip_rect,
+            geometry.body_clip_rect,
+            &geometry.column_widths,
+            plan.column_spacing,
+        );
+        let frame_id = outer_ctx.frame_nr();
+        let change = self.record_resolved_widths(table_id, frame_id, &geometry.column_widths);
+        self.persist_resizable_widths(table_id, &plan.column_specs, &geometry.column_widths);
+        self.handle_width_change(outer_ctx, table_id, change);
+        // Use outer_painter (captured before TableBuilder) to ensure
+        // dividers paint on top of both header and body.
+        self.paint_table_dividers(
+            outer_painter,
+            outer_visuals,
+            rect,
+            clip_rect,
+            &geometry.column_widths,
+            header_height,
+            plan.column_spacing,
+            prev_spacing.y,
+            !plan.content_fits,
+        );
+        if geometry.height_change {
+            ui.ctx().request_repaint();
+        }
+    }
+
+    fn render_table_tablebuilder(
+        &self,
+        ui: &mut egui::Ui,
+        headers: &[Vec<InlineSpan>],
+        rows: &[Vec<Vec<InlineSpan>>],
+        alignments: &[Alignment],
+        table_id: u64,
+    ) {
+        let plan = self.compute_table_layout_plan(ui, headers, rows, alignments, table_id);
 
         let render_table = |ui: &mut egui::Ui, max_width: f32| {
             let width_bucket = max_width.round() as i32;
@@ -4662,102 +4917,16 @@ impl MarkdownRenderer {
                 let layout = *ui.layout();
                 ui.allocate_ui_with_layout(Vec2::new(max_width, 0.0), layout, |ui| {
                     ui.set_width(max_width);
-                    let needs_estimate = {
-                        let metrics = self.table_metrics.borrow();
-                        metrics
-                            .entry(table_id)
-                            .is_none_or(|entry| entry.rows.is_empty())
-                    };
-                    self.begin_table_pass(table_id, rows.len());
 
-                    let prev_spacing = ui.spacing().item_spacing;
-                    if (prev_spacing.x - column_spacing).abs() > f32::EPSILON {
-                        ui.spacing_mut().item_spacing.x = column_spacing;
-                    }
-
-                    let cached_header_height = self
-                        .table_metrics
-                        .borrow()
-                        .entry(table_id)
-                        .and_then(|entry| entry.header_height());
-                    // Rough header height estimation using equally divided width; refines on next frame via cache.
-                    let header_height = cached_header_height.unwrap_or_else(|| {
-                        let mut estimate = self.row_height_fallback();
-                        let column_count = column_specs.len().max(1);
-                        let approx_width = (ui.available_width() / column_count as f32)
-                            .max(self.font_sizes.body * 6.0)
-                            .max(48.0);
-                        let style = ui.style().clone();
-                        estimate = headers
-                            .iter()
-                            .enumerate()
-                            .map(|(ci, spans)| {
-                                let halign = column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
-                                let build = self.cached_layout_job(
-                                    &style,
-                                    None,
-                                    ci,
-                                    spans,
-                                    approx_width,
-                                    true,
-                                    halign,
-                                );
-                                ui.fonts(|f| f.layout_job(build.job.clone()).size().y + 6.0)
-                            })
-                            .fold(estimate, |acc, h| acc.max(h));
-                        estimate.min(self.row_height_fallback() * 3.0)
-                    });
+                    let (header_height, uniform_row_height) =
+                        self.estimate_table_pass_heights(ui, &plan, headers, rows, table_id);
 
                     let fallback_row_height = self.row_height_fallback();
 
-                    // Use uniform row height to avoid scroll issues with heterogeneous_rows.
-                    // Calculate the maximum height across all rows for consistency.
-                    let uniform_row_height = if needs_estimate {
-                        let approx_widths = if content_fits {
-                            // Content-fit mode: use natural widths directly.
-                            // These are the actual widths columns will render at.
-                            natural_widths.clone()
-                        } else {
-                            self.estimate_table_row_widths(
-                                &column_specs,
-                                &resolved_widths,
-                                &adjusted_widths,
-                                available_for_columns,
-                                min_floor,
-                                use_hscroll,
-                                scaled_down,
-                            )
-                        };
-                        let style = ui.style().clone();
-                        let mut max_height = fallback_row_height;
-                        for row in rows.iter() {
-                            let estimate = self.estimate_table_row_height(
-                                ui,
-                                &style,
-                                row,
-                                &column_aligns,
-                                &approx_widths,
-                                fallback_row_height,
-                            );
-                            max_height = max_height.max(estimate);
-                        }
-                        // Cache as uniform height for all rows
-                        for idx in 0..rows.len() {
-                            self.update_row_height(table_id, idx, max_height);
-                        }
-                        max_height
-                    } else {
-                        // Use cached max height from previous frames
-                        (0..rows.len())
-                            .filter_map(|idx| {
-                                self.table_metrics
-                                    .borrow()
-                                    .entry(table_id)
-                                    .and_then(|e| e.row(idx))
-                                    .map(|r| r.max_height)
-                            })
-                            .fold(fallback_row_height, f32::max)
-                    };
+                    let prev_spacing = ui.spacing().item_spacing;
+                    if (prev_spacing.x - plan.column_spacing).abs() > f32::EPSILON {
+                        ui.spacing_mut().item_spacing.x = plan.column_spacing;
+                    }
 
                     // Capture painter from outer UI BEFORE TableBuilder to ensure dividers
                     // paint on top of both header and body (fixes header divider visibility).
@@ -4766,26 +4935,17 @@ impl MarkdownRenderer {
                     let outer_ctx = ui.ctx().clone();
 
                     let mut table = TableBuilder::new(ui).striped(true).vscroll(false);
-                    for column in &column_layout {
+                    for column in &plan.column_layout {
                         table = table.column(*column);
                     }
 
                     // Use RefCell to allow capturing widths from body closure.
-                    // BUG FIX: Previously captured ui.min_rect().width() which is the cell *content* width.
-                    // Now we capture body.widths() which gives the actual *allocated* column widths.
-                    // See: https://docs.rs/egui_extras/latest/egui_extras/struct.TableBody.html#method.widths
                     let column_widths: RefCell<Vec<f32>> =
-                        RefCell::new(vec![0.0f32; column_specs.len()]);
+                        RefCell::new(vec![0.0f32; plan.column_specs.len()]);
                     // Track header and body rects separately for accurate table bounds calculation.
-                    // The header rect captures the header row bounds, body_rect captures body row bounds.
-                    // These are combined after rendering to get the full table rect.
                     let mut header_rect: Option<egui::Rect> = None;
                     let mut body_rect: Option<egui::Rect> = None;
-                    // body_layout_rect captures the allocated layout region from body.max_rect(),
-                    // which is more accurate than union of cell min_rects for table width.
                     let body_layout_rect: RefCell<Option<egui::Rect>> = RefCell::new(None);
-                    // Track clip rects separately for header and body, then union them.
-                    // This ensures dividers respect scroll boundaries for both regions.
                     let mut header_clip_rect: Option<egui::Rect> = None;
                     let body_clip_rect: RefCell<Option<egui::Rect>> = RefCell::new(None);
 
@@ -4793,22 +4953,20 @@ impl MarkdownRenderer {
                     let header_height_actual = Cell::new(0.0f32);
                     table
                         .header(header_height, |mut header| {
-                            for (ci, _) in column_specs.iter().enumerate() {
+                            for ci in 0..plan.column_specs.len() {
                                 header.col(|ui| {
                                     let width = ui.available_width().max(1.0);
                                     let spans =
                                         headers.get(ci).map(|v| v.as_slice()).unwrap_or(&[]);
                                     let halign =
-                                        column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
+                                        plan.column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
                                     let cell_height = self.render_overhauled_cell(
                                         ui, spans, width, true, None, ci, halign,
                                     );
                                     header_height_actual
                                         .set(header_height_actual.get().max(cell_height));
-                                    // NOTE: Use ui.max_rect() (allocated cell bounds), not ui.min_rect()
-                                    // (content bounds). The allocated rect matches what egui uses for
-                                    // striped backgrounds, ensuring the border aligns with the stripe extent.
-                                    // Column widths are captured separately from body.widths() below.
+                                    // Use max_rect() (allocated cell bounds), not min_rect()
+                                    // (content bounds), so borders align with stripe extent.
                                     Self::extend_table_rect(&mut header_rect, ui.max_rect());
                                     if header_clip_rect.is_none() {
                                         header_clip_rect = Some(ui.clip_rect());
@@ -4817,20 +4975,17 @@ impl MarkdownRenderer {
                             }
                         })
                         .body(|body| {
-                            // Capture the actual allocated column widths from the table layout system.
+                            // Capture actual allocated column widths (body.widths()),
+                            // not cell content widths (ui.min_rect().width()).
                             *column_widths.borrow_mut() = body.widths().to_vec();
-
-                            // Capture body's layout rect for accurate table width calculation.
                             *body_layout_rect.borrow_mut() = Some(body.max_rect());
 
-                            // Use uniform row height to avoid scroll calculation issues.
-                            // The rows() method renders all rows without virtualization issues.
                             let row_count = rows.len();
                             body.rows(uniform_row_height, row_count, |mut row| {
                                 let idx = row.index();
                                 let row_cells = rows.get(idx);
                                 let mut actual_row_height = fallback_row_height;
-                                for (ci, _) in column_specs.iter().enumerate() {
+                                for ci in 0..plan.column_specs.len() {
                                     let mut cell_height = fallback_row_height;
                                     row.col(|ui| {
                                         let width = ui.available_width().max(1.0);
@@ -4838,8 +4993,11 @@ impl MarkdownRenderer {
                                             .and_then(|cells| cells.get(ci))
                                             .map(|cell| cell.as_slice())
                                             .unwrap_or(&[]);
-                                        let halign =
-                                            column_aligns.get(ci).copied().unwrap_or(Align::LEFT);
+                                        let halign = plan
+                                            .column_aligns
+                                            .get(ci)
+                                            .copied()
+                                            .unwrap_or(Align::LEFT);
                                         cell_height = self.render_overhauled_cell(
                                             ui,
                                             spans,
@@ -4849,7 +5007,7 @@ impl MarkdownRenderer {
                                             ci,
                                             halign,
                                         );
-                                        // Use max_rect() for allocated bounds; see header comment above.
+                                        // max_rect() for allocated bounds; see header comment.
                                         Self::extend_table_rect(&mut body_rect, ui.max_rect());
                                         if body_clip_rect.borrow().is_none() {
                                             *body_clip_rect.borrow_mut() = Some(ui.clip_rect());
@@ -4867,63 +5025,44 @@ impl MarkdownRenderer {
                             });
                         });
 
-                    ui.spacing_mut().item_spacing = prev_spacing;
-
-                    // Extract column widths from RefCell for use in divider painting
-                    let widths = column_widths.into_inner();
-                    let layout_rect = body_layout_rect.into_inner();
-                    let body_clip = body_clip_rect.into_inner();
-                    let measured_header_height = header_height_actual.get();
-                    if self.update_header_height(table_id, measured_header_height) {
-                        ui.ctx().request_repaint();
-                    }
-
-                    let (rect, clip_rect) = self.resolve_table_rects(
+                    let geometry = TableGeometry {
                         header_rect,
                         body_rect,
-                        layout_rect,
+                        body_layout_rect: body_layout_rect.into_inner(),
                         header_clip_rect,
-                        body_clip,
-                        &widths,
-                        column_spacing,
-                    );
-                    let frame_id = outer_ctx.frame_nr();
-                    let change = self.record_resolved_widths(table_id, frame_id, &widths);
-                    self.persist_resizable_widths(table_id, &column_specs, &widths);
-                    self.handle_width_change(&outer_ctx, table_id, change);
-                    // Use outer_painter (captured before TableBuilder) to ensure
-                    // dividers paint on top of both header and body.
-                    self.paint_table_dividers(
+                        body_clip_rect: body_clip_rect.into_inner(),
+                        column_widths: column_widths.into_inner(),
+                        measured_header_height: header_height_actual.get(),
+                        height_change,
+                    };
+                    self.finalize_table_pass(
+                        ui,
+                        &plan,
+                        table_id,
+                        header_height,
                         &outer_painter,
                         &outer_visuals,
-                        rect,
-                        clip_rect,
-                        &widths,
-                        header_height,
-                        column_spacing,
-                        prev_spacing.y,
-                        !content_fits,
+                        &outer_ctx,
+                        prev_spacing,
+                        geometry,
                     );
-                    if height_change {
-                        ui.ctx().request_repaint();
-                    }
                 });
             });
         };
 
-        if use_hscroll {
+        if plan.use_hscroll {
             egui::ScrollArea::horizontal()
                 .id_source(("md_table_hscroll_overhaul", table_id))
                 .auto_shrink([false, true])
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
                 .show(ui, |ui| {
-                    ui.set_min_width(content_width);
-                    render_table(ui, content_width);
+                    ui.set_min_width(plan.content_width);
+                    render_table(ui, plan.content_width);
                 });
-        } else if content_fits {
-            render_table(ui, effective_width);
+        } else if plan.content_fits {
+            render_table(ui, plan.effective_width);
         } else {
-            render_table(ui, viewport_width);
+            render_table(ui, plan.viewport_width);
         }
     }
 
