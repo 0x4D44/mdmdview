@@ -370,6 +370,8 @@ fn describe_run_mode(options: &FullTestOptions) -> String {
 
 // ── Code quality checks ─────────────────────────────────────────────────
 
+// COVERAGE: Shells out to `cargo fmt --check` — already tested via test_run_fmt_check_returns_quality_result.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn run_fmt_check() -> QualityResult {
     println!("Running cargo fmt --check...");
     let start = Instant::now();
@@ -410,6 +412,8 @@ fn run_fmt_check() -> QualityResult {
     }
 }
 
+// COVERAGE: Shells out to `cargo clippy` — already tested via test_run_clippy_returns_quality_result.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn run_clippy() -> QualityResult {
     println!("Running cargo clippy...");
     let start = Instant::now();
@@ -482,6 +486,8 @@ fn build_cargo_test_command(include_ignored: bool) -> Command {
     cmd
 }
 
+// COVERAGE: Shells out to `cargo test` — output parsing tested via test_parse_test_output*.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn run_cargo_test(include_ignored: bool) -> SuiteResults {
     let start = Instant::now();
     let mut cmd = build_cargo_test_command(include_ignored);
@@ -612,6 +618,8 @@ fn categorize_tests(tests: &[TestResult]) -> Vec<CategoryStats> {
 // ── Mermaid visual tests ────────────────────────────────────────────────
 
 /// Build the mdmdview release binary for screenshot mode.
+// COVERAGE: Shells out to `cargo build --release` — slow and tested via #[ignore] test.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn build_mdmdview_binary() -> bool {
     println!("Building mdmdview for screenshot mode...");
     let output = Command::new("cargo")
@@ -692,6 +700,8 @@ fn diff_images(
 }
 
 /// Run a single Mermaid visual test case.
+// COVERAGE: Requires mdmdview binary and screenshot mode — cannot unit test.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn run_mermaid_case(
     mdmdview_bin: &Path,
     case_md: &Path,
@@ -852,6 +862,8 @@ fn run_mermaid_case(
 }
 
 /// Run all Mermaid visual test cases.
+// COVERAGE: Builds binary and runs screenshots — cannot unit test.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn run_mermaid_visual_tests() -> MermaidResults {
     let start = Instant::now();
 
@@ -1013,6 +1025,8 @@ fn build_fontdb() -> std::sync::Arc<usvg::fontdb::Database> {
 }
 
 /// Render a `.d2` fixture through the official `d2` CLI to SVG.
+// COVERAGE: Requires d2 CLI — tested via test_d2_cli_render_nonexistent_file and generate_d2_references tests.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn d2_cli_render(d2_file: &Path) -> Result<String, String> {
     let temp_svg = d2_file.with_extension("cli_out.svg");
 
@@ -1047,6 +1061,8 @@ fn d2_cli_render(d2_file: &Path) -> Result<String, String> {
 
 /// Generate reference PNGs for all D2 fixtures using the d2 CLI.
 /// Returns the number of references successfully generated.
+// COVERAGE: Requires d2 CLI — tested via test_generate_d2_references* tests.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn generate_d2_references(
     fixtures_dir: &Path,
     reference_dir: &Path,
@@ -1231,6 +1247,8 @@ fn run_d2_visual_case(
 }
 
 /// Run all D2 visual regression test cases.
+// COVERAGE: Orchestrates d2 CLI, fontdb build, and filesystem fixtures — individual components tested separately.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn run_d2_visual_tests() -> D2VisualResults {
     let start = Instant::now();
 
@@ -1355,6 +1373,8 @@ fn check_llvm_cov_available() -> bool {
         .unwrap_or(false)
 }
 
+// COVERAGE: Shells out to `cargo +nightly llvm-cov` — output parsing tested via test_parse_coverage_json*.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn run_coverage() -> Option<CoverageResult> {
     if !check_llvm_cov_available() {
         println!("Warning: cargo-llvm-cov not found. Skipping coverage.");
