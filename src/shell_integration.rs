@@ -95,6 +95,8 @@ pub fn clipboard_copy_file(path: &Path) -> anyhow::Result<()> {
 
 /// Place a file on the system clipboard as a file copy (macOS via osascript).
 #[cfg(target_os = "macos")]
+// COVERAGE: macOS-only — cannot run on Windows build targets.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn clipboard_copy_file(path: &Path) -> anyhow::Result<()> {
     #[cfg(test)]
     if take_forced_clipboard_copy_error() {
@@ -124,6 +126,8 @@ pub fn clipboard_copy_file(path: &Path) -> anyhow::Result<()> {
 
 /// Place a file on the system clipboard as a file copy (Linux via xclip).
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+// COVERAGE: Linux-only — cannot run on Windows build targets.
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn clipboard_copy_file(path: &Path) -> anyhow::Result<()> {
     #[cfg(test)]
     if take_forced_clipboard_copy_error() {
