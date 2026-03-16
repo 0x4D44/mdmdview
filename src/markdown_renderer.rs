@@ -16073,4 +16073,213 @@ contexts:
             assert!(renderer.image_pending.borrow().contains(&resolved));
         });
     }
+
+    // -----------------------------------------------------------------------
+    // build_table_column_layout — viewport-fill mode coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_table_column_layout_viewport_fill_fixed_with_clip() {
+        // Viewport-fill mode: use_hscroll=false, content_fits=false, scaled_down=false
+        // Tests ColumnPolicy::Fixed { clip: true } branch at line 4579-4580
+        let specs = vec![ColumnSpec::new(
+            0,
+            "col0",
+            ColumnPolicy::Fixed {
+                width: 100.0,
+                clip: true,
+            },
+            None,
+        )];
+        let natural = vec![100.0];
+        let adjusted = vec![100.0];
+        let cols = MarkdownRenderer::build_table_column_layout(
+            &specs, &natural, &adjusted, 30.0, false, false, false,
+        );
+        assert_eq!(cols.len(), 1);
+    }
+
+    #[test]
+    fn test_build_table_column_layout_viewport_fill_resizable_with_clip() {
+        // Tests ColumnPolicy::Resizable { clip: true } branch at line 4588-4589
+        let specs = vec![ColumnSpec::new(
+            0,
+            "col0",
+            ColumnPolicy::Resizable {
+                min: 50.0,
+                preferred: 150.0,
+                clip: true,
+            },
+            None,
+        )];
+        let natural = vec![150.0];
+        let adjusted = vec![150.0];
+        let cols = MarkdownRenderer::build_table_column_layout(
+            &specs, &natural, &adjusted, 30.0, false, false, false,
+        );
+        assert_eq!(cols.len(), 1);
+    }
+
+    #[test]
+    fn test_build_table_column_layout_viewport_fill_remainder_not_scaled_down() {
+        // Tests ColumnPolicy::Remainder { clip: false } with scaled_down=false
+        // Exercises Column::remainder() path at line 4597
+        let specs = vec![ColumnSpec::new(
+            0,
+            "col0",
+            ColumnPolicy::Remainder { clip: false },
+            None,
+        )];
+        let natural = vec![200.0];
+        let adjusted = vec![200.0];
+        let cols = MarkdownRenderer::build_table_column_layout(
+            &specs, &natural, &adjusted, 30.0, false, false, false,
+        );
+        assert_eq!(cols.len(), 1);
+    }
+
+    #[test]
+    fn test_build_table_column_layout_viewport_fill_remainder_with_clip() {
+        // Tests ColumnPolicy::Remainder { clip: true } with scaled_down=false
+        // Exercises clip(true) path at line 4599-4600
+        let specs = vec![ColumnSpec::new(
+            0,
+            "col0",
+            ColumnPolicy::Remainder { clip: true },
+            None,
+        )];
+        let natural = vec![200.0];
+        let adjusted = vec![200.0];
+        let cols = MarkdownRenderer::build_table_column_layout(
+            &specs, &natural, &adjusted, 30.0, false, false, false,
+        );
+        assert_eq!(cols.len(), 1);
+    }
+
+    #[test]
+    fn test_build_table_column_layout_viewport_fill_auto_not_scaled_down() {
+        // Tests ColumnPolicy::Auto with scaled_down=false
+        // Exercises Column::auto_with_initial_suggestion() path at line 4608
+        let specs = vec![ColumnSpec::new(0, "col0", ColumnPolicy::Auto, None)];
+        let natural = vec![120.0];
+        let adjusted = vec![120.0];
+        let cols = MarkdownRenderer::build_table_column_layout(
+            &specs, &natural, &adjusted, 30.0, false, false, false,
+        );
+        assert_eq!(cols.len(), 1);
+    }
+
+    #[test]
+    fn test_build_table_column_layout_viewport_fill_remainder_scaled_down() {
+        // Tests ColumnPolicy::Remainder { clip: false } with scaled_down=true
+        // Exercises Column::initial(width) path at line 4594-4595
+        let specs = vec![ColumnSpec::new(
+            0,
+            "col0",
+            ColumnPolicy::Remainder { clip: false },
+            None,
+        )];
+        let natural = vec![200.0];
+        let adjusted = vec![100.0];
+        let cols = MarkdownRenderer::build_table_column_layout(
+            &specs, &natural, &adjusted, 30.0, false, false, true,
+        );
+        assert_eq!(cols.len(), 1);
+    }
+
+    #[test]
+    fn test_build_table_column_layout_viewport_fill_auto_scaled_down() {
+        // Tests ColumnPolicy::Auto with scaled_down=true
+        // Exercises Column::initial(width) path at line 4606
+        let specs = vec![ColumnSpec::new(0, "col0", ColumnPolicy::Auto, None)];
+        let natural = vec![120.0];
+        let adjusted = vec![80.0];
+        let cols = MarkdownRenderer::build_table_column_layout(
+            &specs, &natural, &adjusted, 30.0, false, false, true,
+        );
+        assert_eq!(cols.len(), 1);
+    }
+
+    #[test]
+    fn test_build_table_column_layout_content_fit_mode_with_clip() {
+        // Content-fit mode: use_hscroll=false, content_fits=true
+        // Tests the clip branch at lines 4559-4560
+        let specs = vec![
+            ColumnSpec::new(
+                0,
+                "col0",
+                ColumnPolicy::Fixed {
+                    width: 80.0,
+                    clip: true,
+                },
+                None,
+            ),
+            ColumnSpec::new(
+                1,
+                "col1",
+                ColumnPolicy::Resizable {
+                    min: 50.0,
+                    preferred: 100.0,
+                    clip: true,
+                },
+                None,
+            ),
+            ColumnSpec::new(2, "col2", ColumnPolicy::Remainder { clip: true }, None),
+        ];
+        let natural = vec![80.0, 100.0, 200.0];
+        let adjusted = vec![80.0, 100.0, 200.0];
+        let cols = MarkdownRenderer::build_table_column_layout(
+            &specs, &natural, &adjusted, 30.0, false, true, false,
+        );
+        assert_eq!(cols.len(), 3);
+    }
+
+    #[test]
+    fn test_build_table_column_layout_hscroll_mode() {
+        // hscroll mode delegates to ColumnSpec::as_column()
+        let specs = vec![
+            ColumnSpec::new(0, "col0", ColumnPolicy::Auto, None),
+            ColumnSpec::new(1, "col1", ColumnPolicy::Remainder { clip: false }, None),
+        ];
+        let natural = vec![100.0, 200.0];
+        let adjusted = vec![100.0, 200.0];
+        let cols = MarkdownRenderer::build_table_column_layout(
+            &specs, &natural, &adjusted, 30.0, true, false, false,
+        );
+        assert_eq!(cols.len(), 2);
+    }
+
+    #[test]
+    fn test_build_table_column_layout_viewport_fill_all_policies_mixed() {
+        // Mix all four policies in viewport-fill mode, not scaled down
+        let specs = vec![
+            ColumnSpec::new(
+                0,
+                "fixed",
+                ColumnPolicy::Fixed {
+                    width: 60.0,
+                    clip: true,
+                },
+                None,
+            ),
+            ColumnSpec::new(
+                1,
+                "resizable",
+                ColumnPolicy::Resizable {
+                    min: 40.0,
+                    preferred: 120.0,
+                    clip: true,
+                },
+                None,
+            ),
+            ColumnSpec::new(2, "remainder", ColumnPolicy::Remainder { clip: true }, None),
+            ColumnSpec::new(3, "auto", ColumnPolicy::Auto, None),
+        ];
+        let natural = vec![60.0, 120.0, 200.0, 90.0];
+        let adjusted = vec![60.0, 120.0, 200.0, 90.0];
+        let cols = MarkdownRenderer::build_table_column_layout(
+            &specs, &natural, &adjusted, 30.0, false, false, false,
+        );
+        assert_eq!(cols.len(), 4);
+    }
 }

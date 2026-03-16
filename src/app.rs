@@ -8395,4 +8395,21 @@ The end.
         );
         Ok(())
     }
+
+    #[test]
+    fn test_process_memory_mb_returns_some_on_windows() {
+        // On Windows, K32GetProcessMemoryInfo should always succeed for the
+        // current process, so process_memory_mb() should return Some.
+        #[cfg(target_os = "windows")]
+        {
+            let mem = process_memory_mb();
+            assert!(mem.is_some(), "process_memory_mb should succeed on Windows");
+            assert!(mem.unwrap() > 0.0, "working set should be positive");
+        }
+        // On non-Windows, the function returns None unconditionally.
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(process_memory_mb().is_none());
+        }
+    }
 }

@@ -2064,4 +2064,62 @@ mod tests {
         let dummy = result_rx.try_recv().unwrap();
         assert_eq!(dummy.code_hash, 0);
     }
+
+    // -----------------------------------------------------------------------
+    // process_job: render_source_to_svg error path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_process_job_returns_error_when_render_source_fails() {
+        fn failing_render(_code: &str, _dark_mode: bool) -> Result<String, String> {
+            Err("source render failed".to_string())
+        }
+
+        let fontdb = make_fontdb();
+        let code_hash = hash_str("bad-source");
+        let result = process_job(
+            &fontdb,
+            RasterJob {
+                code_hash,
+                texture_key: format!("test:{:016x}:w640:s100:dm0", code_hash),
+                code: Some("bad-source".to_string()),
+                svg: None,
+                dark_mode: false,
+                width_bucket: 640,
+                scale_bucket: 100,
+            },
+            failing_render,
+            2.0,
+            None,
+        );
+
+        assert!(result.error.is_some());
+        assert_eq!(result.error.as_deref(), Some("source render failed"));
+        assert!(
+            result.svg.is_none(),
+            "SVG should be None when source render fails"
+        );
+        assert!(result.rgba.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // rasterize_svg: svg_preprocessor Some path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rasterize_svg_with_preprocessor() {
+        fn add_fill(svg: &str) -> String {
+            svg.replace("/>", " fill=\"blue\"/>")
+        }
+
+        let fontdb = make_fontdb();
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 50"><rect width="100" height="50"/></svg>"#;
+
+        let output = rasterize_svg(&fontdb, svg, 640, 100, 2.0, Some(add_fill)).expect("rasterize");
+
+        assert!(output.raster_size[0] > 0);
+        assert!(output.raster_size[1] > 0);
+        assert!(output.display_size[0] > 0);
+        assert!(output.display_size[1] > 0);
+    }
 }
