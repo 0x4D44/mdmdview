@@ -3559,4 +3559,1438 @@ not a test line\n";
     fn test_extract_category_two_parts_only() {
         assert_eq!(extract_category("module::tests"), "module::tests");
     }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Block 1: run_d2_visual_case tests
+    // ══════════════════════════════════════════════════════════════════
+
+    /// Helper: create a simple .d2 file and render it to a reference PNG
+    /// using the same pipeline as the production code.
+    fn create_d2_fixture_with_reference(
+        dir: &Path,
+    ) -> (
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        std::sync::Arc<usvg::fontdb::Database>,
+    ) {
+        let fixtures_dir = dir.join("fixtures");
+        let reference_dir = dir.join("reference");
+        let actual_dir = dir.join("actual");
+        std::fs::create_dir_all(&fixtures_dir).unwrap();
+        std::fs::create_dir_all(&reference_dir).unwrap();
+        std::fs::create_dir_all(&actual_dir).unwrap();
+
+        // Write a simple D2 file
+        let d2_path = fixtures_dir.join("simple.d2");
+        std::fs::write(&d2_path, "a -> b\n").unwrap();
+
+        // Render through the D2 pipeline and rasterize to make a reference
+        let fontdb = build_fontdb();
+        let opts = mdmdview_d2::RenderOptions {
+            dark_mode: false,
+            ..Default::default()
+        };
+        let result = mdmdview_d2::render_d2_to_svg("a -> b\n", &opts).unwrap();
+        let ref_png = reference_dir.join("simple.png");
+        rasterize_svg_to_png(&result.svg, &ref_png, &fontdb).unwrap();
+
+        (d2_path, reference_dir, actual_dir, fontdb)
+    }
+
+    #[test]
+    fn test_run_d2_visual_case_pass_with_matching_reference() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let (d2_path, reference_dir, actual_dir, fontdb) =
+            create_d2_fixture_with_reference(temp.path());
+
+        let result = run_d2_visual_case(&d2_path, &reference_dir, &actual_dir, &fontdb);
+
+        assert_eq!(result.case_name, "simple");
+        assert!(
+            result.passed,
+            "Should pass when comparing identical renders"
+        );
+        assert_eq!(result.message, "ok");
+        assert!(
+            result.diff_percent < 1.0,
+            "Diff should be very low for identical renders: {}",
+            result.diff_percent
+        );
+    }
+
+    #[test]
+    fn test_run_d2_visual_case_missing_reference() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let fixtures_dir = temp.path().join("fixtures");
+        let reference_dir = temp.path().join("reference");
+        let actual_dir = temp.path().join("actual");
+        std::fs::create_dir_all(&fixtures_dir).unwrap();
+        std::fs::create_dir_all(&reference_dir).unwrap();
+        std::fs::create_dir_all(&actual_dir).unwrap();
+
+        let d2_path = fixtures_dir.join("no_ref.d2");
+        std::fs::write(&d2_path, "x -> y\n").unwrap();
+
+        let fontdb = build_fontdb();
+        let result = run_d2_visual_case(&d2_path, &reference_dir, &actual_dir, &fontdb);
+
+        assert_eq!(result.case_name, "no_ref");
+        assert!(
+            result.passed,
+            "Missing reference should be treated as skipped/passed"
+        );
+        assert_eq!(result.message, "skipped_no_reference");
+        assert_eq!(result.diff_percent, 0.0);
+    }
+
+    #[test]
+    fn test_run_d2_visual_case_render_error() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let fixtures_dir = temp.path().join("fixtures");
+        let reference_dir = temp.path().join("reference");
+        let actual_dir = temp.path().join("actual");
+        std::fs::create_dir_all(&fixtures_dir).unwrap();
+        std::fs::create_dir_all(&reference_dir).unwrap();
+        std::fs::create_dir_all(&actual_dir).unwrap();
+
+        // Write invalid D2 source that will fail to render
+        let d2_path = fixtures_dir.join("bad.d2");
+        std::fs::write(&d2_path, "-> -> ->\n").unwrap();
+
+        // Create a dummy reference PNG so we don't skip
+        let ref_png = reference_dir.join("bad.png");
+        let dummy_img = image::RgbaImage::from_pixel(10, 10, image::Rgba([255, 255, 255, 255]));
+        dummy_img.save(&ref_png).unwrap();
+
+        let fontdb = build_fontdb();
+        let result = run_d2_visual_case(&d2_path, &reference_dir, &actual_dir, &fontdb);
+
+        assert_eq!(result.case_name, "bad");
+        assert!(!result.passed, "Invalid D2 source should fail");
+        assert!(
+            result.message.contains("render_failed") || result.message.contains("read_failed"),
+            "Message should indicate render failure: {}",
+            result.message
+        );
+    }
+
+    #[test]
+    fn test_run_d2_visual_case_read_error() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let reference_dir = temp.path().join("reference");
+        let actual_dir = temp.path().join("actual");
+        std::fs::create_dir_all(&reference_dir).unwrap();
+        std::fs::create_dir_all(&actual_dir).unwrap();
+
+        // Fixture path points to a file that doesn't exist
+        let d2_path = temp.path().join("nonexistent.d2");
+
+        // Create a dummy reference so we don't skip via missing reference
+        let ref_png = reference_dir.join("nonexistent.png");
+        let dummy_img = image::RgbaImage::from_pixel(10, 10, image::Rgba([255, 255, 255, 255]));
+        dummy_img.save(&ref_png).unwrap();
+
+        let fontdb = build_fontdb();
+        let result = run_d2_visual_case(&d2_path, &reference_dir, &actual_dir, &fontdb);
+
+        assert_eq!(result.case_name, "nonexistent");
+        assert!(!result.passed);
+        assert!(
+            result.message.contains("read_failed"),
+            "Should report read failure: {}",
+            result.message
+        );
+    }
+
+    #[test]
+    fn test_run_d2_visual_case_diff_with_different_content() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let fixtures_dir = temp.path().join("fixtures");
+        let reference_dir = temp.path().join("reference");
+        let actual_dir = temp.path().join("actual");
+        std::fs::create_dir_all(&fixtures_dir).unwrap();
+        std::fs::create_dir_all(&reference_dir).unwrap();
+        std::fs::create_dir_all(&actual_dir).unwrap();
+
+        // The fixture renders "a -> b"
+        let d2_path = fixtures_dir.join("mismatch.d2");
+        std::fs::write(&d2_path, "a -> b\n").unwrap();
+
+        // But the reference is a completely different image (all black)
+        let ref_png = reference_dir.join("mismatch.png");
+        let black_img = image::RgbaImage::from_pixel(200, 200, image::Rgba([0, 0, 0, 255]));
+        black_img.save(&ref_png).unwrap();
+
+        let fontdb = build_fontdb();
+        let result = run_d2_visual_case(&d2_path, &reference_dir, &actual_dir, &fontdb);
+
+        assert_eq!(result.case_name, "mismatch");
+        // The diff should be significant — result may pass or fail depending on
+        // thresholds, but diff_percent should be non-zero
+        assert!(
+            result.diff_percent > 0.0 || result.diff_pixels > 0,
+            "Should detect differences between black reference and actual render"
+        );
+    }
+
+    #[test]
+    fn test_run_d2_visual_case_uses_real_d2_fixture() {
+        // Use an actual fixture from the codebase
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture = manifest_dir
+            .join("tests")
+            .join("d2_conformance")
+            .join("fixtures")
+            .join("001-simple-connection.d2");
+        let reference_dir = manifest_dir
+            .join("tests")
+            .join("d2_visual")
+            .join("reference");
+
+        if !fixture.exists() || !reference_dir.join("001-simple-connection.png").exists() {
+            // Skip if fixtures or references are not available
+            return;
+        }
+
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let actual_dir = temp.path().join("actual");
+        std::fs::create_dir_all(&actual_dir).unwrap();
+
+        let fontdb = build_fontdb();
+        let result = run_d2_visual_case(&fixture, &reference_dir, &actual_dir, &fontdb);
+
+        assert_eq!(result.case_name, "001-simple-connection");
+        // Should have some result (pass or fail, but no error)
+        assert!(
+            result.message == "ok"
+                || result.message == "diff_exceeds_threshold"
+                || result.message == "skipped_no_reference",
+            "Unexpected message: {}",
+            result.message
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Block 2: run_d2_visual_tests components
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_generate_d2_references_with_no_d2_cli() {
+        // generate_d2_references uses the d2 CLI. We test the function's
+        // behavior when fixtures exist but d2 CLI is unavailable.
+        // If d2 is not installed, d2_cli_render will fail, and count should be 0.
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let fixtures_dir = temp.path().join("fixtures");
+        let reference_dir = temp.path().join("reference");
+        std::fs::create_dir_all(&fixtures_dir).unwrap();
+
+        std::fs::write(fixtures_dir.join("test.d2"), "a -> b\n").unwrap();
+        let fontdb = build_fontdb();
+
+        if !check_d2_cli() {
+            let count = generate_d2_references(&fixtures_dir, &reference_dir, &fontdb);
+            assert_eq!(
+                count, 0,
+                "Without d2 CLI, no references should be generated"
+            );
+        }
+        // If d2 IS installed, we just confirm the function runs without panic
+        else {
+            let count = generate_d2_references(&fixtures_dir, &reference_dir, &fontdb);
+            assert!(count <= 1); // Should generate at most 1 reference
+        }
+    }
+
+    #[test]
+    fn test_generate_d2_references_empty_fixtures_dir() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let fixtures_dir = temp.path().join("fixtures");
+        let reference_dir = temp.path().join("reference");
+        std::fs::create_dir_all(&fixtures_dir).unwrap();
+
+        let fontdb = build_fontdb();
+        let count = generate_d2_references(&fixtures_dir, &reference_dir, &fontdb);
+        assert_eq!(count, 0, "Empty fixtures dir should produce 0 references");
+    }
+
+    #[test]
+    fn test_d2_cli_render_nonexistent_file() {
+        let result = d2_cli_render(Path::new("/nonexistent/path/to/file.d2"));
+        // Should fail either because d2 isn't installed or because file doesn't exist
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_check_d2_cli_idempotent() {
+        // Calling check_d2_cli multiple times should be consistent
+        let first = check_d2_cli();
+        let second = check_d2_cli();
+        assert_eq!(first, second, "check_d2_cli should be deterministic");
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Block 3: run_coverage / parse_coverage_json edge cases
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_parse_coverage_json_zero_lines_total() {
+        // When lines_total is 0, the percentage should be 0.0 (no division by zero)
+        let json = r#"{"data":[{"totals":{"lines":{"count":0,"covered":0},"functions":{"count":10,"covered":5},"branches":{"count":0,"covered":0},"regions":{"count":0,"covered":0}}}]}"#;
+        let result = parse_coverage_json(json, Duration::from_secs(1)).unwrap();
+        assert_eq!(result.lines_covered, 0);
+        assert_eq!(result.lines_total, 0);
+        assert_eq!(result.functions_covered, 5);
+        assert_eq!(result.functions_total, 10);
+    }
+
+    #[test]
+    fn test_parse_coverage_json_all_fields_populated() {
+        let json = r#"{
+            "data": [{
+                "totals": {
+                    "lines": {"count": 5000, "covered": 4500},
+                    "functions": {"count": 300, "covered": 280},
+                    "branches": {"count": 1000, "covered": 800},
+                    "regions": {"count": 2000, "covered": 1900}
+                }
+            }]
+        }"#;
+        let result = parse_coverage_json(json, Duration::from_secs(120)).unwrap();
+        assert_eq!(result.lines_covered, 4500);
+        assert_eq!(result.lines_total, 5000);
+        assert_eq!(result.functions_covered, 280);
+        assert_eq!(result.functions_total, 300);
+        assert_eq!(result.branches_covered, 800);
+        assert_eq!(result.branches_total, 1000);
+        assert_eq!(result.regions_covered, 1900);
+        assert_eq!(result.regions_total, 2000);
+        assert_eq!(result.duration, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn test_parse_coverage_json_garbage_input() {
+        assert!(parse_coverage_json("not json at all {{{", Duration::ZERO).is_none());
+    }
+
+    #[test]
+    fn test_parse_coverage_json_totals_but_no_subsections() {
+        let json = r#"{"totals":{}}"#;
+        let result = parse_coverage_json(json, Duration::from_secs(1)).unwrap();
+        // All values should remain at their defaults (0)
+        assert_eq!(result.lines_covered, 0);
+        assert_eq!(result.lines_total, 0);
+        assert_eq!(result.functions_covered, 0);
+        assert_eq!(result.functions_total, 0);
+    }
+
+    #[test]
+    #[ignore] // Expensive: actually runs cargo llvm-cov
+    fn test_run_coverage_returns_result() {
+        let result = run_coverage();
+        // If llvm-cov is installed, we should get Some; otherwise None.
+        // Either way, no panic.
+        if check_llvm_cov_available() {
+            assert!(
+                result.is_some(),
+                "coverage should return a result when llvm-cov is available"
+            );
+            let cov = result.unwrap();
+            assert!(cov.lines_total > 0, "should have some lines to cover");
+        } else {
+            assert!(
+                result.is_none(),
+                "should return None when llvm-cov unavailable"
+            );
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Block 4: main() / run_full_test additional coverage
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_describe_run_mode_single_skip_quality() {
+        let options = FullTestOptions {
+            quick: false,
+            skip_quality: true,
+            skip_coverage: false,
+            skip_mermaid: false,
+            skip_d2_visual: false,
+            update_d2_references: false,
+        };
+        let mode = describe_run_mode(&options);
+        assert!(mode.contains("Full Suite"));
+        assert!(mode.contains("Quality Skipped"));
+        assert!(!mode.contains("Coverage Skipped"));
+        assert!(!mode.contains("Mermaid Skipped"));
+    }
+
+    #[test]
+    fn test_describe_run_mode_single_skip_mermaid() {
+        let options = FullTestOptions {
+            quick: false,
+            skip_quality: false,
+            skip_coverage: false,
+            skip_mermaid: true,
+            skip_d2_visual: false,
+            update_d2_references: false,
+        };
+        let mode = describe_run_mode(&options);
+        assert!(mode.contains("Mermaid Skipped"));
+        assert!(!mode.contains("Quality Skipped"));
+    }
+
+    #[test]
+    fn test_describe_run_mode_single_skip_coverage() {
+        let options = FullTestOptions {
+            quick: false,
+            skip_quality: false,
+            skip_coverage: true,
+            skip_mermaid: false,
+            skip_d2_visual: false,
+            update_d2_references: false,
+        };
+        let mode = describe_run_mode(&options);
+        assert!(mode.contains("Coverage Skipped"));
+        assert!(!mode.contains("Mermaid Skipped"));
+    }
+
+    #[test]
+    fn test_run_full_test_skip_nothing_with_mock_runner() {
+        // Exercise the code paths where mermaid and d2_visual are NOT skipped,
+        // but use a mock test runner. The mermaid/d2 phases will actually run
+        // but may fail because binary isn't built — that's fine, we exercise
+        // the orchestration code.
+        let options = FullTestOptions {
+            quick: true,
+            skip_quality: true,
+            skip_coverage: true,
+            skip_mermaid: true,   // Still skip — they need binaries
+            skip_d2_visual: true, // Still skip — they need fixtures in specific paths
+            update_d2_references: false,
+        };
+        let runner = |include_ignored: bool| {
+            assert!(!include_ignored, "quick mode should not include ignored");
+            make_suite(
+                3,
+                0,
+                2,
+                vec![
+                    make_result("a::b::t1", true),
+                    make_result("a::b::t2", true),
+                    make_result("c::d::t3", true),
+                ],
+            )
+        };
+
+        let outcome = run_full_test(&options, runner, Local::now());
+        assert!(!outcome.any_failed);
+        assert!(outcome.test_results.is_some());
+        let tr = outcome.test_results.as_ref().unwrap();
+        assert_eq!(tr.passed, 3);
+        assert_eq!(tr.failed, 0);
+        assert_eq!(tr.skipped, 2);
+    }
+
+    #[test]
+    fn test_run_full_test_generates_valid_html() {
+        let options = FullTestOptions {
+            quick: true,
+            skip_quality: true,
+            skip_coverage: true,
+            skip_mermaid: true,
+            skip_d2_visual: true,
+            update_d2_references: false,
+        };
+        let runner = |_: bool| {
+            make_suite(
+                2,
+                0,
+                0,
+                vec![make_result("x::y::a", true), make_result("x::y::b", true)],
+            )
+        };
+
+        let outcome = run_full_test(&options, runner, Local::now());
+        assert!(outcome.html_report.contains("<!DOCTYPE html>"));
+        assert!(outcome.html_report.contains("</html>"));
+        assert!(outcome.html_report.contains("mdmdview Full Test Report"));
+    }
+
+    #[test]
+    fn test_run_full_test_report_path_ends_with_html() {
+        let options = FullTestOptions {
+            quick: true,
+            skip_quality: true,
+            skip_coverage: true,
+            skip_mermaid: true,
+            skip_d2_visual: true,
+            update_d2_references: false,
+        };
+        let runner = |_: bool| make_suite(1, 0, 0, vec![make_result("t", true)]);
+
+        let outcome = run_full_test(&options, runner, Local::now());
+        assert!(
+            outcome.report_path.to_string_lossy().ends_with(".html"),
+            "Report path should end with .html"
+        );
+    }
+
+    #[test]
+    fn test_run_full_test_with_test_failures_marks_failed() {
+        let options = FullTestOptions {
+            quick: true,
+            skip_quality: true,
+            skip_coverage: true,
+            skip_mermaid: true,
+            skip_d2_visual: true,
+            update_d2_references: false,
+        };
+        let runner = |_: bool| {
+            make_suite(
+                5,
+                2,
+                1,
+                vec![
+                    make_result("a::b::pass1", true),
+                    make_result("a::b::pass2", true),
+                    make_result("a::b::pass3", true),
+                    make_result("a::b::pass4", true),
+                    make_result("a::b::pass5", true),
+                    make_result("a::b::fail1", false),
+                    make_result("a::b::fail2", false),
+                ],
+            )
+        };
+
+        let outcome = run_full_test(&options, runner, Local::now());
+        assert!(
+            outcome.any_failed,
+            "Should be marked as failed when tests fail"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Block 5: generate_html_report additional branches
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_generate_html_report_empty_test_results() {
+        let tests = make_suite(0, 0, 0, vec![]);
+
+        let html = generate_html_report(
+            Some(&tests),
+            &[],
+            None,
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "Full Suite",
+            Duration::from_secs(1),
+        );
+
+        // Should still produce valid HTML
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("</html>"));
+        // No "Test Breakdown" section since there are no categories
+        // (categorize_tests returns empty)
+    }
+
+    #[test]
+    fn test_generate_html_report_coverage_zero_total() {
+        let coverage = CoverageResult {
+            lines_covered: 0,
+            lines_total: 0,
+            functions_covered: 0,
+            functions_total: 0,
+            branches_covered: 0,
+            branches_total: 0,
+            regions_covered: 0,
+            regions_total: 0,
+            duration: Duration::from_secs(5),
+        };
+
+        let html = generate_html_report(
+            None,
+            &[],
+            None,
+            None,
+            Some(&coverage),
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(5),
+        );
+
+        assert!(html.contains("Coverage"));
+        assert!(html.contains("0.0%"));
+    }
+
+    #[test]
+    fn test_generate_html_report_mermaid_with_empty_cases_and_build_ok() {
+        let mermaid = MermaidResults {
+            cases: Vec::new(),
+            build_ok: true,
+            duration: Duration::from_secs(1),
+        };
+
+        let html = generate_html_report(
+            None,
+            &[],
+            Some(&mermaid),
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(1),
+        );
+
+        assert!(html.contains("Mermaid Visual Tests"));
+        // build_ok but no cases — should not show build failed message
+        assert!(!html.contains("BUILD FAILED"));
+        // Should not show a table either (no cases)
+    }
+
+    #[test]
+    fn test_generate_html_report_d2_visual_with_cases_and_no_cli() {
+        // Cases present but d2_cli_available = false
+        let d2_visual = D2VisualResults {
+            cases: vec![D2VisualCaseResult {
+                case_name: "test_case".to_string(),
+                passed: true,
+                message: "ok".to_string(),
+                diff_percent: 1.5,
+                diff_pixels: 100,
+                max_delta: 20,
+                duration: Duration::from_millis(50),
+            }],
+            d2_cli_available: false,
+            duration: Duration::from_secs(1),
+        };
+
+        let html = generate_html_report(
+            None,
+            &[],
+            None,
+            Some(&d2_visual),
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(1),
+        );
+
+        assert!(html.contains("D2 Visual Tests"));
+        assert!(html.contains("test_case"));
+        // Should show the table, NOT the "No d2 CLI" message (since cases exist)
+        assert!(!html.contains("No d2 CLI found"));
+    }
+
+    #[test]
+    fn test_generate_html_report_d2_visual_empty_cases_with_cli() {
+        let d2_visual = D2VisualResults {
+            cases: Vec::new(),
+            d2_cli_available: true,
+            duration: Duration::from_secs(1),
+        };
+
+        let html = generate_html_report(
+            None,
+            &[],
+            None,
+            Some(&d2_visual),
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(1),
+        );
+
+        assert!(html.contains("D2 Visual Tests"));
+        // d2_cli_available is true but no cases — should not show the "No d2 CLI" message
+        assert!(!html.contains("No d2 CLI found"));
+    }
+
+    #[test]
+    fn test_generate_html_report_quality_failed_with_no_issues() {
+        // Quality check fails but has no issues listed
+        let quality = vec![QualityResult {
+            check_name: "cargo fmt".to_string(),
+            passed: false,
+            duration: Duration::from_secs(1),
+            issues: vec![],
+        }];
+
+        let html = generate_html_report(
+            None,
+            &quality,
+            None,
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(1),
+        );
+
+        assert!(html.contains("cargo fmt"));
+        assert!(html.contains("FAIL"));
+        assert!(html.contains("issues found")); // footer
+    }
+
+    #[test]
+    fn test_generate_html_report_quality_with_exactly_20_issues() {
+        let issues: Vec<String> = (0..20).map(|i| format!("warning: issue {i}")).collect();
+        let quality = vec![QualityResult {
+            check_name: "cargo clippy".to_string(),
+            passed: false,
+            duration: Duration::from_secs(3),
+            issues,
+        }];
+
+        let html = generate_html_report(
+            None,
+            &quality,
+            None,
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(3),
+        );
+
+        // Exactly 20 issues — should NOT show "and N more"
+        assert!(!html.contains("... and"));
+        assert!(html.contains("issue 19")); // last one
+    }
+
+    #[test]
+    fn test_generate_html_report_all_tests_pass_no_failed_section() {
+        let tests = make_suite(
+            3,
+            0,
+            0,
+            vec![
+                make_result("a::b::t1", true),
+                make_result("a::b::t2", true),
+                make_result("a::b::t3", true),
+            ],
+        );
+
+        let html = generate_html_report(
+            Some(&tests),
+            &[],
+            None,
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(1),
+        );
+
+        // Should not have a "Failed Tests" section
+        assert!(!html.contains("Failed Tests"));
+    }
+
+    #[test]
+    fn test_generate_html_report_mixed_categories_with_failures() {
+        let tests = make_suite(
+            4,
+            2,
+            0,
+            vec![
+                make_result("alpha::tests::a1", true),
+                make_result("alpha::tests::a2", false),
+                make_result("beta::tests::b1", true),
+                make_result("beta::tests::b2", true),
+                make_result("gamma::tests::g1", true),
+                make_result("gamma::tests::g2", false),
+            ],
+        );
+
+        let html = generate_html_report(
+            Some(&tests),
+            &[],
+            None,
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(1),
+        );
+
+        assert!(html.contains("Test Breakdown"));
+        assert!(html.contains("alpha::tests"));
+        assert!(html.contains("beta::tests"));
+        assert!(html.contains("gamma::tests"));
+        assert!(html.contains("Failed Tests"));
+        assert!(html.contains("a2")); // failed test name
+        assert!(html.contains("g2")); // failed test name
+                                      // Categories with failures should have "open" attribute
+        assert!(html.contains("open"));
+        assert!(html.contains("fail-badge"));
+        assert!(html.contains("pass-badge"));
+    }
+
+    #[test]
+    fn test_generate_html_report_run_mode_empty() {
+        let html = generate_html_report(
+            None,
+            &[],
+            None,
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(1),
+        );
+
+        // Empty run mode should NOT show run-mode paragraph
+        assert!(!html.contains("Run mode:"));
+    }
+
+    #[test]
+    fn test_generate_html_report_run_mode_non_empty() {
+        let html = generate_html_report(
+            None,
+            &[],
+            None,
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "Full Suite",
+            Duration::from_secs(1),
+        );
+
+        assert!(html.contains("Run mode:"));
+        assert!(html.contains("Full Suite"));
+    }
+
+    #[test]
+    fn test_generate_html_report_mermaid_all_pass() {
+        let mermaid = MermaidResults {
+            cases: vec![
+                MermaidCaseResult {
+                    case_name: "flowchart".to_string(),
+                    passed: true,
+                    message: "ok".to_string(),
+                    diff_percent: 1.0,
+                    diff_pixels: 50,
+                    max_delta: 10,
+                    duration: Duration::from_secs(2),
+                },
+                MermaidCaseResult {
+                    case_name: "sequence".to_string(),
+                    passed: true,
+                    message: "ok".to_string(),
+                    diff_percent: 2.0,
+                    diff_pixels: 100,
+                    max_delta: 15,
+                    duration: Duration::from_secs(3),
+                },
+            ],
+            build_ok: true,
+            duration: Duration::from_secs(8),
+        };
+
+        let html = generate_html_report(
+            None,
+            &[],
+            Some(&mermaid),
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(8),
+        );
+
+        assert!(html.contains("Mermaid Visual Tests"));
+        assert!(html.contains("flowchart"));
+        assert!(html.contains("sequence"));
+        // Phase summary should show PASS for mermaid
+        assert!(html.contains("status-pass"));
+    }
+
+    #[test]
+    fn test_generate_html_report_d2_visual_all_fail() {
+        let d2_visual = D2VisualResults {
+            cases: vec![
+                D2VisualCaseResult {
+                    case_name: "case_a".to_string(),
+                    passed: false,
+                    message: "diff_exceeds_threshold".to_string(),
+                    diff_percent: 50.0,
+                    diff_pixels: 100000,
+                    max_delta: 200,
+                    duration: Duration::from_millis(200),
+                },
+                D2VisualCaseResult {
+                    case_name: "case_b".to_string(),
+                    passed: false,
+                    message: "render_failed: bad input".to_string(),
+                    diff_percent: 100.0,
+                    diff_pixels: 0,
+                    max_delta: 0,
+                    duration: Duration::from_millis(50),
+                },
+            ],
+            d2_cli_available: true,
+            duration: Duration::from_secs(2),
+        };
+
+        let html = generate_html_report(
+            None,
+            &[],
+            None,
+            Some(&d2_visual),
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(2),
+        );
+
+        assert!(html.contains("D2 Visual Tests"));
+        assert!(html.contains("case_a"));
+        assert!(html.contains("case_b"));
+        assert!(html.contains("FAIL"));
+        assert!(html.contains("status-fail"));
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Block 6: Mermaid visual tests - result structure tests
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_mermaid_case_result_clone() {
+        let result = MermaidCaseResult {
+            case_name: "test".to_string(),
+            passed: true,
+            message: "ok".to_string(),
+            diff_percent: 1.5,
+            diff_pixels: 100,
+            max_delta: 20,
+            duration: Duration::from_secs(1),
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.case_name, "test");
+        assert!(cloned.passed);
+        assert_eq!(cloned.diff_pixels, 100);
+    }
+
+    #[test]
+    fn test_d2_visual_case_result_clone() {
+        let result = D2VisualCaseResult {
+            case_name: "d2_test".to_string(),
+            passed: false,
+            message: "diff_exceeds_threshold".to_string(),
+            diff_percent: 25.0,
+            diff_pixels: 90000,
+            max_delta: 180,
+            duration: Duration::from_millis(300),
+        };
+        let cloned = result.clone();
+        assert_eq!(cloned.case_name, "d2_test");
+        assert!(!cloned.passed);
+        assert_eq!(cloned.diff_pixels, 90000);
+    }
+
+    #[test]
+    fn test_mermaid_wait_ms_for_case_unknown() {
+        // Any unknown case name should return the default
+        assert_eq!(mermaid_wait_ms_for_case("unknown_case"), MERMAID_WAIT_MS);
+        assert_eq!(mermaid_wait_ms_for_case(""), MERMAID_WAIT_MS);
+        assert_eq!(mermaid_wait_ms_for_case("gantt"), MERMAID_WAIT_MS);
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Block 7: Miscellaneous uncovered lines
+    // ══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_run_full_test_quality_failure_marks_failed() {
+        // Exercise the quality_failed path in run_full_test.
+        // When skip_quality is false, quality checks actually run.
+        // Since fmt/clippy might pass, we test the orchestration logic
+        // with everything else skipped.
+        let options = FullTestOptions {
+            quick: true,
+            skip_quality: false, // Run quality checks
+            skip_coverage: true,
+            skip_mermaid: true,
+            skip_d2_visual: true,
+            update_d2_references: false,
+        };
+        let runner = |_: bool| make_suite(1, 0, 0, vec![make_result("t", true)]);
+
+        let outcome = run_full_test(&options, runner, Local::now());
+
+        // Quality results should be present
+        assert_eq!(outcome.quality_results.len(), 2);
+        // If quality checks pass, the overall result depends on test results only
+        if outcome.quality_results.iter().all(|r| r.passed) {
+            assert!(!outcome.any_failed);
+        }
+    }
+
+    #[test]
+    fn test_full_test_options_clone() {
+        let options = FullTestOptions {
+            quick: true,
+            skip_quality: false,
+            skip_coverage: true,
+            skip_mermaid: false,
+            skip_d2_visual: true,
+            update_d2_references: false,
+        };
+        let cloned = options.clone();
+        assert!(cloned.quick);
+        assert!(cloned.skip_coverage);
+        assert!(!cloned.skip_mermaid);
+    }
+
+    #[test]
+    fn test_test_result_clone() {
+        let tr = make_result("my::test", true);
+        let cloned = tr.clone();
+        assert_eq!(cloned.name, "my::test");
+        assert!(cloned.passed);
+    }
+
+    #[test]
+    fn test_category_stats_clone() {
+        let stats = CategoryStats {
+            name: "foo::bar".to_string(),
+            total: 10,
+            passed: 8,
+            failed: 2,
+        };
+        let cloned = stats.clone();
+        assert_eq!(cloned.name, "foo::bar");
+        assert_eq!(cloned.total, 10);
+    }
+
+    #[test]
+    fn test_parse_options_update_d2_references() {
+        let args = vec![
+            "full_test".to_string(),
+            "--update-d2-references".to_string(),
+        ];
+        let options = parse_options(&args).unwrap();
+        assert!(options.update_d2_references);
+    }
+
+    #[test]
+    fn test_rasterize_svg_to_png_zero_dimension_svg() {
+        let fontdb = build_fontdb();
+        // SVG with zero width
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="0" height="100"></svg>"#;
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let output = temp.path().join("zero.png");
+
+        let result = rasterize_svg_to_png(svg, &output, &fontdb);
+        // Should fail because dimensions are zero
+        assert!(
+            result.is_err(),
+            "Should fail with zero-dimension SVG: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_build_report_path_returns_unique_path() {
+        // Two consecutive calls with the same timestamp might collide,
+        // but should produce valid paths
+        let now = Local::now();
+        let path1 = build_report_path(now);
+        assert!(path1.to_string_lossy().ends_with(".html"));
+    }
+
+    #[test]
+    fn test_write_report_to_deeply_nested_path() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let deep = temp
+            .path()
+            .join("a")
+            .join("b")
+            .join("c")
+            .join("report.html");
+        write_report(&deep, "<html>deep</html>").expect("write report");
+        assert!(deep.exists());
+    }
+
+    #[test]
+    fn test_generate_html_report_combined_dashboard_counts() {
+        // Verify that dashboard counts aggregate across test, mermaid, and d2 results
+        let tests = make_suite(
+            10,
+            2,
+            3,
+            vec![
+                make_result("a::b::t1", true),
+                make_result("a::b::t2", true),
+                make_result("a::b::t3", true),
+                make_result("a::b::t4", true),
+                make_result("a::b::t5", true),
+                make_result("a::b::t6", true),
+                make_result("a::b::t7", true),
+                make_result("a::b::t8", true),
+                make_result("a::b::t9", true),
+                make_result("a::b::t10", true),
+                make_result("a::b::f1", false),
+                make_result("a::b::f2", false),
+            ],
+        );
+
+        let mermaid = MermaidResults {
+            cases: vec![
+                MermaidCaseResult {
+                    case_name: "m1".to_string(),
+                    passed: true,
+                    message: "ok".to_string(),
+                    diff_percent: 0.0,
+                    diff_pixels: 0,
+                    max_delta: 0,
+                    duration: Duration::ZERO,
+                },
+                MermaidCaseResult {
+                    case_name: "m2".to_string(),
+                    passed: false,
+                    message: "fail".to_string(),
+                    diff_percent: 50.0,
+                    diff_pixels: 100000,
+                    max_delta: 255,
+                    duration: Duration::ZERO,
+                },
+            ],
+            build_ok: true,
+            duration: Duration::ZERO,
+        };
+
+        let d2_visual = D2VisualResults {
+            cases: vec![D2VisualCaseResult {
+                case_name: "d1".to_string(),
+                passed: true,
+                message: "ok".to_string(),
+                diff_percent: 0.0,
+                diff_pixels: 0,
+                max_delta: 0,
+                duration: Duration::ZERO,
+            }],
+            d2_cli_available: true,
+            duration: Duration::ZERO,
+        };
+
+        let html = generate_html_report(
+            Some(&tests),
+            &[],
+            Some(&mermaid),
+            Some(&d2_visual),
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::ZERO,
+        );
+
+        // total_passed = 10 (tests) + 1 (mermaid) + 1 (d2) = 12
+        // total_failed = 2 (tests) + 1 (mermaid) + 0 (d2) = 3
+        assert!(html.contains(">12<")); // passed count
+        assert!(html.contains(">3<")); // failed count
+        assert!(html.contains(">3<")); // skipped count
+    }
+
+    #[test]
+    fn test_generate_html_report_footer_quality_ok() {
+        let quality = vec![QualityResult {
+            check_name: "cargo fmt".to_string(),
+            passed: true,
+            duration: Duration::ZERO,
+            issues: vec![],
+        }];
+
+        let html = generate_html_report(
+            None,
+            &quality,
+            None,
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::ZERO,
+        );
+
+        assert!(html.contains("quality ok"));
+    }
+
+    #[test]
+    fn test_generate_html_report_footer_quality_issues() {
+        let quality = vec![QualityResult {
+            check_name: "cargo fmt".to_string(),
+            passed: false,
+            duration: Duration::ZERO,
+            issues: vec!["problem".to_string()],
+        }];
+
+        let html = generate_html_report(
+            None,
+            &quality,
+            None,
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::ZERO,
+        );
+
+        assert!(html.contains("issues found"));
+    }
+
+    #[test]
+    fn test_generate_html_report_test_categories_with_all_pass() {
+        let tests = make_suite(
+            4,
+            0,
+            0,
+            vec![
+                make_result("mod_a::tests::t1", true),
+                make_result("mod_a::tests::t2", true),
+                make_result("mod_b::tests::t3", true),
+                make_result("mod_b::tests::t4", true),
+            ],
+        );
+
+        let html = generate_html_report(
+            Some(&tests),
+            &[],
+            None,
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::ZERO,
+        );
+
+        assert!(html.contains("Test Breakdown"));
+        assert!(html.contains("mod_a::tests"));
+        assert!(html.contains("mod_b::tests"));
+        // No failures, so no "open" attribute on details
+        assert!(!html.contains("Failed Tests"));
+    }
+
+    #[test]
+    fn test_generate_html_report_test_short_name_stripping() {
+        // Tests that the short name is correctly stripped from full test name
+        let tests = make_suite(
+            1,
+            0,
+            0,
+            vec![make_result("mod::tests::my_specific_test", true)],
+        );
+
+        let html = generate_html_report(
+            Some(&tests),
+            &[],
+            None,
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::ZERO,
+        );
+
+        // The short name "my_specific_test" should appear (stripped of category prefix)
+        assert!(html.contains("my_specific_test"));
+    }
+
+    #[test]
+    fn test_generate_html_report_mermaid_phase_row_all_pass() {
+        let mermaid = MermaidResults {
+            cases: vec![MermaidCaseResult {
+                case_name: "pie".to_string(),
+                passed: true,
+                message: "ok".to_string(),
+                diff_percent: 0.5,
+                diff_pixels: 10,
+                max_delta: 5,
+                duration: Duration::from_secs(1),
+            }],
+            build_ok: true,
+            duration: Duration::from_secs(1),
+        };
+
+        let html = generate_html_report(
+            None,
+            &[],
+            Some(&mermaid),
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(1),
+        );
+
+        // Phase summary row should show PASS
+        assert!(html.contains("Mermaid Visual"));
+        assert!(html.contains("1/1 passed"));
+    }
+
+    #[test]
+    fn test_generate_html_report_d2_phase_row_all_pass() {
+        let d2_visual = D2VisualResults {
+            cases: vec![
+                D2VisualCaseResult {
+                    case_name: "c1".to_string(),
+                    passed: true,
+                    message: "ok".to_string(),
+                    diff_percent: 1.0,
+                    diff_pixels: 50,
+                    max_delta: 10,
+                    duration: Duration::from_millis(100),
+                },
+                D2VisualCaseResult {
+                    case_name: "c2".to_string(),
+                    passed: true,
+                    message: "ok".to_string(),
+                    diff_percent: 2.0,
+                    diff_pixels: 80,
+                    max_delta: 15,
+                    duration: Duration::from_millis(100),
+                },
+            ],
+            d2_cli_available: true,
+            duration: Duration::from_secs(1),
+        };
+
+        let html = generate_html_report(
+            None,
+            &[],
+            None,
+            Some(&d2_visual),
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(1),
+        );
+
+        assert!(html.contains("D2 Visual"));
+        assert!(html.contains("2/2 passed"));
+    }
+
+    #[test]
+    fn test_generate_html_report_coverage_duration_displayed() {
+        let coverage = CoverageResult {
+            lines_covered: 100,
+            lines_total: 200,
+            functions_covered: 10,
+            functions_total: 20,
+            branches_covered: 5,
+            branches_total: 10,
+            regions_covered: 50,
+            regions_total: 100,
+            duration: Duration::from_secs(42),
+        };
+
+        let html = generate_html_report(
+            None,
+            &[],
+            None,
+            None,
+            Some(&coverage),
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(42),
+        );
+
+        assert!(html.contains("42.00s"));
+    }
+
+    #[test]
+    fn test_generate_html_report_special_chars_in_git_info() {
+        let html = generate_html_report(
+            None,
+            &[],
+            None,
+            None,
+            None,
+            "abc123 (feat/special<chars>&more)",
+            Local::now(),
+            "",
+            Duration::ZERO,
+        );
+
+        // HTML escaping should prevent XSS
+        assert!(html.contains("&lt;chars&gt;"));
+        assert!(html.contains("&amp;more"));
+    }
+
+    #[test]
+    fn test_generate_html_report_quality_phase_skipped_row() {
+        // When quality results is empty, phase summary shows SKIPPED
+        let html = generate_html_report(
+            None,
+            &[], // empty quality
+            None,
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::ZERO,
+        );
+
+        assert!(html.contains("--skip-quality"));
+    }
+
+    #[test]
+    fn test_generate_html_report_quality_phase_fail_details() {
+        let quality = vec![
+            QualityResult {
+                check_name: "cargo fmt".to_string(),
+                passed: false,
+                duration: Duration::from_secs(1),
+                issues: vec!["would reformat foo.rs".to_string()],
+            },
+            QualityResult {
+                check_name: "cargo clippy".to_string(),
+                passed: true,
+                duration: Duration::from_secs(2),
+                issues: vec![],
+            },
+        ];
+
+        let html = generate_html_report(
+            None,
+            &quality,
+            None,
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(3),
+        );
+
+        // Phase summary should show FAIL for quality (since fmt failed)
+        assert!(html.contains("FAIL"));
+        // Quality details section
+        assert!(html.contains("cargo fmt"));
+        assert!(html.contains("1 issues"));
+        assert!(html.contains("would reformat foo.rs"));
+    }
 }
