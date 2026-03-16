@@ -307,38 +307,42 @@ pub fn derive_column_specs(ctx: &TableColumnContext) -> Vec<ColumnSpec> {
     specs
 }
 
-fn header_text(spans: &[InlineSpan]) -> String {
+/// Concatenate the text content of inline spans, separated by spaces.
+/// When `trim_fragments` is true, each span's text is trimmed before appending.
+fn collect_span_text(spans: &[InlineSpan], trim_fragments: bool) -> String {
     let mut text = String::new();
     for span in spans {
-        match span {
+        let fragment = match span {
             InlineSpan::Text(t)
             | InlineSpan::Strong(t)
             | InlineSpan::Emphasis(t)
             | InlineSpan::Strikethrough(t)
-            | InlineSpan::Code(t) => {
-                if !text.is_empty() {
-                    text.push(' ');
-                }
-                text.push_str(t.trim());
-            }
-            InlineSpan::Link { text: t, .. } => {
-                if !text.is_empty() {
-                    text.push(' ');
-                }
-                text.push_str(t.trim());
-            }
-            InlineSpan::Image { alt, .. } => {
-                if !text.is_empty() {
-                    text.push(' ');
-                }
-                text.push_str(alt.trim());
-            }
+            | InlineSpan::Code(t) => t.as_str(),
+            InlineSpan::Link { text: t, .. } => t.as_str(),
+            InlineSpan::Image { alt, .. } => alt.as_str(),
+        };
+        let fragment = if trim_fragments {
+            fragment.trim()
+        } else {
+            fragment
+        };
+        if fragment.is_empty() {
+            continue;
         }
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(fragment);
     }
-    if text.trim().is_empty() {
+    text
+}
+
+fn header_text(spans: &[InlineSpan]) -> String {
+    let result = collect_span_text(spans, true);
+    if result.trim().is_empty() {
         "Column".to_string()
     } else {
-        text.trim().to_string()
+        result.trim().to_string()
     }
 }
 
@@ -541,34 +545,7 @@ fn accumulate_stats_for_cell(spans: &[InlineSpan], stat: &mut ColumnStat) {
 }
 
 pub(crate) fn spans_to_text(spans: &[InlineSpan]) -> String {
-    let mut text = String::new();
-    for span in spans {
-        match span {
-            InlineSpan::Text(t)
-            | InlineSpan::Code(t)
-            | InlineSpan::Strong(t)
-            | InlineSpan::Emphasis(t)
-            | InlineSpan::Strikethrough(t) => {
-                if !text.is_empty() {
-                    text.push(' ');
-                }
-                text.push_str(t);
-            }
-            InlineSpan::Link { text: t, .. } => {
-                if !text.is_empty() {
-                    text.push(' ');
-                }
-                text.push_str(t);
-            }
-            InlineSpan::Image { alt, .. } => {
-                if !text.is_empty() {
-                    text.push(' ');
-                }
-                text.push_str(alt);
-            }
-        }
-    }
-    text.trim().to_string()
+    collect_span_text(spans, false).trim().to_string()
 }
 
 #[cfg(test)]
