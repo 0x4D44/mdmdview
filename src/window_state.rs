@@ -1480,6 +1480,32 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "windows")]
+    fn test_config_dir_falls_back_to_xdg_when_appdata_unset() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard_appdata = EnvGuard::unset("APPDATA");
+        let _guard_xdg = EnvGuard::set("XDG_CONFIG_HOME", temp.path().to_string_lossy().as_ref());
+        let _guard_home = EnvGuard::unset("HOME");
+
+        let dir = config_dir().expect("should resolve via XDG_CONFIG_HOME");
+        assert!(dir.ends_with("mdmdview"));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_config_dir_falls_back_to_home_when_appdata_and_xdg_unset() {
+        let _lock = env_lock();
+        let temp = TempDir::new().expect("temp dir");
+        let _guard_appdata = EnvGuard::unset("APPDATA");
+        let _guard_xdg = EnvGuard::unset("XDG_CONFIG_HOME");
+        let _guard_home = EnvGuard::set("HOME", temp.path().to_string_lossy().as_ref());
+
+        let dir = config_dir().expect("should resolve via HOME");
+        assert!(dir.ends_with(".config/mdmdview") || dir.ends_with(".config\\mdmdview"));
+    }
+
+    #[test]
     fn test_mermaid_theme_from_setting_case_insensitive() {
         assert_eq!(MermaidTheme::from_setting("DARK"), MermaidTheme::Dark);
         assert_eq!(MermaidTheme::from_setting("Forest"), MermaidTheme::Forest);

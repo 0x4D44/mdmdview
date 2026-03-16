@@ -2969,4 +2969,594 @@ not a test line\n";
     fn test_mermaid_wait_ms_mindmap() {
         assert_eq!(mermaid_wait_ms_for_case("mindmap"), 12_000);
     }
+
+    // ── Priority tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_set_low_priority_does_not_panic() {
+        // set_low_priority() calls OS-specific APIs; just verify it doesn't crash.
+        set_low_priority();
+    }
+
+    // ── print_help tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_print_help_does_not_panic() {
+        // print_help() writes to stdout; just verify it completes without error.
+        print_help();
+    }
+
+    // ── get_git_info tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_get_git_info_returns_non_empty() {
+        let info = get_git_info();
+        assert!(!info.is_empty(), "git info should not be empty");
+    }
+
+    #[test]
+    fn test_get_git_info_contains_parenthesized_branch() {
+        let info = get_git_info();
+        // Format is "hash (branch)" — must contain parentheses
+        assert!(
+            info.contains('(') && info.contains(')'),
+            "git info should contain branch in parentheses, got: {info}"
+        );
+    }
+
+    // ── check_d2_cli tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_check_d2_cli_returns_bool() {
+        // We don't know if d2 is installed, but the function must return cleanly.
+        let _available: bool = check_d2_cli();
+    }
+
+    // ── check_llvm_cov_available tests ──────────────────────────────
+
+    #[test]
+    fn test_check_llvm_cov_available_returns_bool() {
+        let _available: bool = check_llvm_cov_available();
+    }
+
+    // ── build_fontdb tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_build_fontdb_returns_valid_db() {
+        let db = build_fontdb();
+        // The Arc should be valid and the database should have loaded system fonts.
+        // On any modern system, at least one font family should be available.
+        assert!(
+            db.faces().count() > 0,
+            "fontdb should contain at least one font face"
+        );
+    }
+
+    // ── rasterize_svg_to_png tests ──────────────────────────────────
+
+    #[test]
+    fn test_rasterize_svg_to_png_valid_svg() {
+        let fontdb = build_fontdb();
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="red"/></svg>"#;
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let output = temp.path().join("test.png");
+
+        let result = rasterize_svg_to_png(svg, &output, &fontdb);
+        assert!(
+            result.is_ok(),
+            "rasterize_svg_to_png should succeed for valid SVG: {result:?}"
+        );
+        assert!(output.exists(), "PNG file should be created");
+
+        // Verify PNG magic bytes
+        let data = std::fs::read(&output).expect("read PNG");
+        assert!(data.len() > 8, "PNG file should have content");
+        assert_eq!(
+            &data[..4],
+            &[0x89, 0x50, 0x4E, 0x47],
+            "should start with PNG magic bytes"
+        );
+    }
+
+    #[test]
+    fn test_rasterize_svg_to_png_invalid_svg() {
+        let fontdb = build_fontdb();
+        let svg = "this is not valid SVG at all";
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let output = temp.path().join("bad.png");
+
+        let result = rasterize_svg_to_png(svg, &output, &fontdb);
+        assert!(
+            result.is_err(),
+            "rasterize_svg_to_png should fail for invalid SVG"
+        );
+        let err_msg = result.unwrap_err();
+        assert!(
+            err_msg.contains("usvg parse failed"),
+            "error should mention usvg parse failure, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_rasterize_svg_to_png_dimensions_preserved() {
+        let fontdb = build_fontdb();
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="50" height="30"><rect width="50" height="30" fill="blue"/></svg>"#;
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let output = temp.path().join("sized.png");
+
+        rasterize_svg_to_png(svg, &output, &fontdb).expect("rasterize");
+        let img = image::open(&output).expect("open PNG");
+        assert_eq!(img.width(), 50);
+        assert_eq!(img.height(), 30);
+    }
+
+    // ── run_fmt_check tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_run_fmt_check_returns_quality_result() {
+        let result = run_fmt_check();
+        assert_eq!(result.check_name, "cargo fmt");
+        // Duration should be non-zero (it actually ran the command)
+        assert!(
+            result.duration.as_nanos() > 0,
+            "fmt check should have measurable duration"
+        );
+    }
+
+    // ── run_clippy tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_run_clippy_returns_quality_result() {
+        let result = run_clippy();
+        assert_eq!(result.check_name, "cargo clippy");
+        assert!(
+            result.duration.as_nanos() > 0,
+            "clippy check should have measurable duration"
+        );
+    }
+
+    // ── build_cargo_test_command edge cases ─────────────────────────
+
+    #[test]
+    fn test_build_cargo_test_command_has_test_threads_1() {
+        let cmd = build_cargo_test_command(false);
+        assert!(
+            cmd.get_args().any(|a| a == "--test-threads=1"),
+            "command should include --test-threads=1"
+        );
+    }
+
+    #[test]
+    fn test_build_cargo_test_command_program_is_cargo() {
+        let cmd = build_cargo_test_command(false);
+        assert_eq!(
+            cmd.get_program(),
+            "cargo",
+            "command program should be cargo"
+        );
+    }
+
+    // ── build_mdmdview_binary tests ─────────────────────────────────
+
+    #[test]
+    #[ignore]
+    fn test_build_mdmdview_binary_succeeds() {
+        // This test is expensive (runs cargo build --release).
+        let result = build_mdmdview_binary();
+        assert!(result, "mdmdview release build should succeed");
+    }
+
+    // ── HTML report with D2 visual results containing failures ──────
+
+    #[test]
+    fn test_generate_html_report_d2_visual_no_cli_no_cases() {
+        let d2_visual = D2VisualResults {
+            cases: Vec::new(),
+            d2_cli_available: false,
+            duration: Duration::from_secs(1),
+        };
+
+        let html = generate_html_report(
+            None,
+            &[],
+            None,
+            Some(&d2_visual),
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(1),
+        );
+
+        assert!(html.contains("D2 Visual Tests"));
+        assert!(html.contains("No d2 CLI found"));
+        // Phase summary should show SKIPPED for D2
+        assert!(html.contains("No d2 CLI and no references"));
+    }
+
+    #[test]
+    fn test_generate_html_report_all_phases_present() {
+        let tests = make_suite(
+            5,
+            0,
+            1,
+            vec![
+                make_result("mod::tests::a", true),
+                make_result("mod::tests::b", true),
+                make_result("mod::tests::c", true),
+                make_result("mod::tests::d", true),
+                make_result("mod::tests::e", true),
+            ],
+        );
+        let quality = vec![
+            QualityResult {
+                check_name: "cargo fmt".to_string(),
+                passed: true,
+                duration: Duration::from_secs(1),
+                issues: vec![],
+            },
+            QualityResult {
+                check_name: "cargo clippy".to_string(),
+                passed: true,
+                duration: Duration::from_secs(2),
+                issues: vec![],
+            },
+        ];
+        let mermaid = MermaidResults {
+            cases: vec![MermaidCaseResult {
+                case_name: "flowchart".to_string(),
+                passed: true,
+                message: "ok".to_string(),
+                diff_percent: 1.0,
+                diff_pixels: 100,
+                max_delta: 30,
+                duration: Duration::from_secs(3),
+            }],
+            build_ok: true,
+            duration: Duration::from_secs(5),
+        };
+        let d2_visual = D2VisualResults {
+            cases: vec![D2VisualCaseResult {
+                case_name: "simple".to_string(),
+                passed: true,
+                message: "ok".to_string(),
+                diff_percent: 2.0,
+                diff_pixels: 200,
+                max_delta: 20,
+                duration: Duration::from_millis(100),
+            }],
+            d2_cli_available: true,
+            duration: Duration::from_secs(2),
+        };
+        let coverage = CoverageResult {
+            lines_covered: 900,
+            lines_total: 1000,
+            functions_covered: 95,
+            functions_total: 100,
+            branches_covered: 60,
+            branches_total: 80,
+            regions_covered: 450,
+            regions_total: 500,
+            duration: Duration::from_secs(30),
+        };
+
+        let html = generate_html_report(
+            Some(&tests),
+            &quality,
+            Some(&mermaid),
+            Some(&d2_visual),
+            Some(&coverage),
+            "def456 (develop)",
+            Local::now(),
+            "Full Suite",
+            Duration::from_secs(60),
+        );
+
+        // All major sections should be present
+        assert!(html.contains("Phase Summary"));
+        assert!(html.contains("Code Quality"));
+        assert!(html.contains("Test Breakdown"));
+        assert!(html.contains("Mermaid Visual Tests"));
+        assert!(html.contains("D2 Visual Tests"));
+        assert!(html.contains("Coverage"));
+        assert!(html.contains("def456 (develop)"));
+        assert!(html.contains("Full Suite"));
+        // Quality should show PASS
+        assert!(html.contains("quality ok"));
+    }
+
+    #[test]
+    fn test_generate_html_report_skipped_phases() {
+        // No test results, no quality, no mermaid, no d2, no coverage
+        let html = generate_html_report(
+            None,
+            &[],
+            None,
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "Quick (excluding ignored) | Quality Skipped | Mermaid Skipped | D2 Visual Skipped | Coverage Skipped",
+            Duration::from_secs(1),
+        );
+
+        assert!(html.contains("Quality Skipped"));
+        assert!(html.contains("--skip-quality"));
+        assert!(html.contains("--skip-mermaid"));
+        assert!(html.contains("--skip-d2-visual"));
+        assert!(html.contains("--skip-coverage"));
+    }
+
+    #[test]
+    fn test_generate_html_report_quality_issues_truncated() {
+        // Quality result with >20 issues to test truncation
+        let issues: Vec<String> = (0..25)
+            .map(|i| format!("warning: issue number {i}"))
+            .collect();
+        let quality = vec![QualityResult {
+            check_name: "cargo clippy".to_string(),
+            passed: false,
+            duration: Duration::from_secs(3),
+            issues,
+        }];
+
+        let html = generate_html_report(
+            None,
+            &quality,
+            None,
+            None,
+            None,
+            "abc (main)",
+            Local::now(),
+            "",
+            Duration::from_secs(3),
+        );
+
+        assert!(html.contains("... and 5 more"));
+        assert!(html.contains("issues found")); // footer
+    }
+
+    // ── run_full_test with quality enabled ──────────────────────────
+
+    #[test]
+    fn test_run_full_test_with_quality_skip_everything_else() {
+        // Enable quality checks (they will actually run cargo fmt and clippy)
+        // but skip everything expensive
+        let options = FullTestOptions {
+            quick: true,
+            skip_quality: false, // actually run quality
+            skip_coverage: true,
+            skip_mermaid: true,
+            skip_d2_visual: true,
+            update_d2_references: false,
+        };
+        let runner = |_include_ignored: bool| make_suite(1, 0, 0, vec![make_result("t", true)]);
+
+        let outcome = run_full_test(&options, runner, Local::now());
+
+        // Quality results should be populated
+        assert_eq!(outcome.quality_results.len(), 2);
+        assert_eq!(outcome.quality_results[0].check_name, "cargo fmt");
+        assert_eq!(outcome.quality_results[1].check_name, "cargo clippy");
+    }
+
+    // ── describe_run_mode edge cases ────────────────────────────────
+
+    #[test]
+    fn test_describe_run_mode_quick_only() {
+        let options = FullTestOptions {
+            quick: true,
+            skip_quality: false,
+            skip_coverage: false,
+            skip_mermaid: false,
+            skip_d2_visual: false,
+            update_d2_references: false,
+        };
+        let mode = describe_run_mode(&options);
+        assert!(mode.contains("Quick"));
+        assert!(!mode.contains("Full Suite"));
+        assert!(!mode.contains("Skipped"));
+    }
+
+    #[test]
+    fn test_describe_run_mode_d2_visual_skipped() {
+        let options = FullTestOptions {
+            quick: false,
+            skip_quality: false,
+            skip_coverage: false,
+            skip_mermaid: false,
+            skip_d2_visual: true,
+            update_d2_references: false,
+        };
+        let mode = describe_run_mode(&options);
+        assert!(mode.contains("D2 Visual Skipped"));
+    }
+
+    // ── parse_coverage_json edge cases ──────────────────────────────
+
+    #[test]
+    fn test_parse_coverage_json_partial_data() {
+        // Only lines section present, missing functions/branches/regions
+        let json = r#"{"data":[{"totals":{"lines":{"count":500,"covered":250}}}]}"#;
+        let result = parse_coverage_json(json, Duration::from_secs(1)).unwrap();
+        assert_eq!(result.lines_covered, 250);
+        assert_eq!(result.lines_total, 500);
+        // Missing sections should be zero
+        assert_eq!(result.functions_covered, 0);
+        assert_eq!(result.functions_total, 0);
+    }
+
+    #[test]
+    fn test_parse_coverage_json_empty_string() {
+        assert!(parse_coverage_json("", Duration::ZERO).is_none());
+    }
+
+    // ── extract_json_number edge cases ──────────────────────────────
+
+    #[test]
+    fn test_extract_json_number_with_spaces() {
+        let json = r#"{ "lines" : { "count" : 42 } }"#;
+        assert_eq!(
+            extract_json_number(json, "\"lines\"", "\"count\""),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn test_extract_json_number_zero_value() {
+        let json = r#"{"lines":{"count":0}}"#;
+        assert_eq!(extract_json_number(json, "\"lines\"", "\"count\""), Some(0));
+    }
+
+    #[test]
+    fn test_extract_json_number_large_value() {
+        let json = r#"{"lines":{"count":999999}}"#;
+        assert_eq!(
+            extract_json_number(json, "\"lines\"", "\"count\""),
+            Some(999999)
+        );
+    }
+
+    // ── html_escape edge cases ──────────────────────────────────────
+
+    #[test]
+    fn test_html_escape_all_special_chars_combined() {
+        assert_eq!(
+            html_escape("<b>\"hello\" & 'world'</b>"),
+            "&lt;b&gt;&quot;hello&quot; &amp; &#39;world&#39;&lt;/b&gt;"
+        );
+    }
+
+    #[test]
+    fn test_html_escape_unicode() {
+        // Unicode should pass through unchanged
+        assert_eq!(html_escape("hello 世界 🌍"), "hello 世界 🌍");
+    }
+
+    // ── categorize_tests edge cases ─────────────────────────────────
+
+    #[test]
+    fn test_categorize_tests_single_module_all_pass() {
+        let tests = vec![
+            make_result("foo::bar::test_a", true),
+            make_result("foo::bar::test_b", true),
+        ];
+        let categories = categorize_tests(&tests);
+        assert_eq!(categories.len(), 1);
+        assert_eq!(categories[0].name, "foo::bar");
+        assert_eq!(categories[0].total, 2);
+        assert_eq!(categories[0].passed, 2);
+        assert_eq!(categories[0].failed, 0);
+    }
+
+    #[test]
+    fn test_categorize_tests_sorts_failures_first() {
+        let tests = vec![
+            make_result("aaa::tests::test_a", true),
+            make_result("zzz::tests::test_b", false),
+        ];
+        let categories = categorize_tests(&tests);
+        assert_eq!(categories.len(), 2);
+        // zzz has failures, should be first despite alphabetical order
+        assert_eq!(categories[0].name, "zzz::tests");
+        assert_eq!(categories[1].name, "aaa::tests");
+    }
+
+    // ── write_report edge cases ─────────────────────────────────────
+
+    #[test]
+    fn test_write_report_overwrites_existing() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let path = temp.path().join("report.html");
+        write_report(&path, "first").expect("write first");
+        write_report(&path, "second").expect("write second");
+        let contents = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(contents, "second");
+    }
+
+    // ── diff_images edge cases ──────────────────────────────────────
+
+    #[test]
+    fn test_diff_images_zero_tolerance() {
+        // With zero tolerance, even 1-unit difference should count
+        let a = image::RgbaImage::from_pixel(2, 2, image::Rgba([100, 100, 100, 255]));
+        let mut b = a.clone();
+        b.put_pixel(0, 0, image::Rgba([101, 100, 100, 255]));
+        let (diff_pixels, max_delta) = diff_images(&a, &b, 0);
+        assert_eq!(diff_pixels, 1);
+        assert_eq!(max_delta, 1);
+    }
+
+    #[test]
+    fn test_diff_images_max_tolerance() {
+        // With tolerance=255, nothing should count as different
+        let a = image::RgbaImage::from_pixel(5, 5, image::Rgba([0, 0, 0, 255]));
+        let b = image::RgbaImage::from_pixel(5, 5, image::Rgba([255, 255, 255, 255]));
+        let (diff_pixels, _max_delta) = diff_images(&a, &b, 255);
+        assert_eq!(diff_pixels, 0);
+    }
+
+    #[test]
+    fn test_diff_images_1x1() {
+        let a = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255]));
+        let b = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255]));
+        let (diff_pixels, max_delta) = diff_images(&a, &b, 0);
+        assert_eq!(diff_pixels, 0);
+        assert_eq!(max_delta, 0);
+    }
+
+    // ── pad_to_common_size edge cases ───────────────────────────────
+
+    #[test]
+    fn test_pad_to_common_size_1x1_vs_large() {
+        let a = image::RgbaImage::from_pixel(1, 1, image::Rgba([50, 50, 50, 255]));
+        let b = image::RgbaImage::from_pixel(100, 100, image::Rgba([200, 200, 200, 255]));
+        let (pa, pb) = pad_to_common_size(&a, &b);
+        assert_eq!(pa.dimensions(), (100, 100));
+        assert_eq!(pb.dimensions(), (100, 100));
+    }
+
+    // ── parse_test_output edge cases ────────────────────────────────
+
+    #[test]
+    fn test_parse_test_output_malformed_lines_ignored() {
+        let stdout = "test no_separator\ntest partial ... \nnot a test ... ok\n";
+        let results = parse_test_output("tests", stdout, "", Duration::ZERO);
+        // None of these should parse as valid test results
+        assert_eq!(results.total, 0);
+    }
+
+    #[test]
+    fn test_parse_test_output_all_failed() {
+        let stdout = "test a ... FAILED\ntest b ... FAILED\ntest c ... FAILED\n";
+        let results = parse_test_output("tests", stdout, "", Duration::ZERO);
+        assert_eq!(results.total, 3);
+        assert_eq!(results.failed, 3);
+        assert_eq!(results.passed, 0);
+        assert_eq!(results.tests.len(), 3);
+        assert!(results.tests.iter().all(|t| !t.passed));
+    }
+
+    #[test]
+    fn test_parse_test_output_all_ignored() {
+        let stdout = "test a ... ignored\ntest b ... ignored\n";
+        let results = parse_test_output("tests", stdout, "", Duration::ZERO);
+        assert_eq!(results.total, 2);
+        assert_eq!(results.skipped, 2);
+        assert_eq!(results.passed, 0);
+        assert_eq!(results.failed, 0);
+        assert_eq!(results.tests.len(), 0); // ignored tests not added to vec
+    }
+
+    // ── extract_category edge cases ─────────────────────────────────
+
+    #[test]
+    fn test_extract_category_deeply_nested() {
+        assert_eq!(extract_category("a::b::c::d::e"), "a::b");
+    }
+
+    #[test]
+    fn test_extract_category_two_parts_only() {
+        assert_eq!(extract_category("module::tests"), "module::tests");
+    }
 }
