@@ -191,8 +191,21 @@ jobs:
           Write-Host "Version: $version"
           Write-Host "Installer URL: $installerUrl"
 
+          # Generate manifests locally (don't submit yet)
           .\wingetcreate.exe update $env:WINGET_PACKAGE_IDENTIFIER `
             --version $version `
             --urls $installerUrl `
-            --token "${{ steps.winget-config.outputs.winget_token }}" `
-            --submit
+            --out manifests
+
+          # Ensure ElevationRequirement is present (perMachine MSI needs elevation)
+          $installerManifest = Get-ChildItem -Path manifests -Recurse -Filter '*.installer.yaml' | Select-Object -First 1
+          $content = Get-Content $installerManifest.FullName -Raw
+          if ($content -notmatch 'ElevationRequirement') {
+            Write-Host "Adding ElevationRequirement: elevationRequired"
+            $content = $content -replace '(InstallModes:)', "ElevationRequirement: elevationRequired`n`$1"
+            Set-Content $installerManifest.FullName -Value $content -NoNewline
+          }
+
+          # Submit the patched manifests
+          .\wingetcreate.exe submit manifests `
+            --token "${{ steps.winget-config.outputs.winget_token }}"
