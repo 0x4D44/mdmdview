@@ -274,7 +274,7 @@ pub fn sanitize_window_state(ws: WindowState) -> Option<WindowState> {
     const MAX_POS: f32 = 20000.0;
 
     Some(WindowState {
-        pos: [ws.pos[0].clamp(0.0, MAX_POS), ws.pos[1].clamp(0.0, MAX_POS)],
+        pos: [ws.pos[0].clamp(-MAX_POS, MAX_POS), ws.pos[1].clamp(-MAX_POS, MAX_POS)],
         size: [
             ws.size[0].clamp(MIN_WIDTH, MAX_SIZE),
             ws.size[1].clamp(MIN_SIZE, MAX_SIZE),
@@ -289,8 +289,12 @@ fn load_window_state_registry() -> Option<WindowState> {
     use winreg::RegKey;
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let key = hkcu.open_subkey("Software\\MarkdownView").ok()?;
-    let x: u32 = key.get_value("PosX").ok()?;
-    let y: u32 = key.get_value("PosY").ok()?;
+    // Position stored as u32 but interpreted as i32 to support negative
+    // coordinates on multi-monitor setups (monitors left/above primary).
+    let x_raw: u32 = key.get_value("PosX").ok()?;
+    let y_raw: u32 = key.get_value("PosY").ok()?;
+    let x = x_raw as i32;
+    let y = y_raw as i32;
     let w: u32 = key.get_value("Width").ok()?;
     let h: u32 = key.get_value("Height").ok()?;
     let maximized: u32 = key.get_value("Maximized").unwrap_or(0);
@@ -308,6 +312,16 @@ fn save_window_state_registry(state: &WindowState) -> std::io::Result<()> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let (key, _disp) =
         hkcu.create_subkey_with_flags("Software\\MarkdownView", KEY_READ | KEY_WRITE)?;
+    // Position stored as u32 reinterpreted from i32 to support negative
+    // coordinates on multi-monitor setups (monitors left/above primary).
+    let pos_to_u32 = |v: f32| -> u32 {
+        let i = if v.is_finite() {
+            v.clamp(i32::MIN as f32, i32::MAX as f32).round() as i32
+        } else {
+            0
+        };
+        i as u32
+    };
     let to_u32 = |v: f32| -> u32 {
         if v.is_finite() {
             v.max(0.0).min(u32::MAX as f32).round() as u32
@@ -315,8 +329,8 @@ fn save_window_state_registry(state: &WindowState) -> std::io::Result<()> {
             0
         }
     };
-    key.set_value("PosX", &to_u32(state.pos[0]))?;
-    key.set_value("PosY", &to_u32(state.pos[1]))?;
+    key.set_value("PosX", &pos_to_u32(state.pos[0]))?;
+    key.set_value("PosY", &pos_to_u32(state.pos[1]))?;
     key.set_value("Width", &to_u32(state.size[0]))?;
     key.set_value("Height", &to_u32(state.size[1]))?;
     key.set_value("Maximized", &(state.maximized as u32))?;
@@ -637,7 +651,8 @@ mod tests {
             maximized: true,
         };
         let sanitized = sanitize_window_state(input).expect("expected sanitized state");
-        assert_eq!(sanitized.pos[0], 0.0);
+        // Negative positions are valid on multi-monitor (monitor left/above primary)
+        assert_eq!(sanitized.pos[0], -50.0);
         assert_eq!(sanitized.pos[1], 20000.0);
         assert_eq!(sanitized.size[0], 600.0);
         assert_eq!(sanitized.size[1], 400.0);
@@ -1280,6 +1295,39 @@ mod tests {
             maximized: false,
         };
         assert!(sanitize_window_state(invalid2).is_none());
+    }
+
+    #[test]
+    fn test_sanitize_window_state_preserves_multimonitor_positions() {
+        // Monitor to the left of primary: negative X
+        let left_monitor = WindowState {
+            pos: [-1920.0, 100.0],
+            size: [800.0, 600.0],
+            maximized: false,
+        };
+        let sanitized = sanitize_window_state(left_monitor).expect("valid multi-monitor position");
+        assert_eq!(sanitized.pos[0], -1920.0);
+        assert_eq!(sanitized.pos[1], 100.0);
+
+        // Monitor above primary: negative Y
+        let above_monitor = WindowState {
+            pos: [200.0, -1080.0],
+            size: [800.0, 600.0],
+            maximized: false,
+        };
+        let sanitized = sanitize_window_state(above_monitor).expect("valid multi-monitor position");
+        assert_eq!(sanitized.pos[0], 200.0);
+        assert_eq!(sanitized.pos[1], -1080.0);
+
+        // Monitor to the right: position beyond primary bounds
+        let right_monitor = WindowState {
+            pos: [1920.0, 200.0],
+            size: [800.0, 600.0],
+            maximized: false,
+        };
+        let sanitized = sanitize_window_state(right_monitor).expect("valid multi-monitor position");
+        assert_eq!(sanitized.pos[0], 1920.0);
+        assert_eq!(sanitized.pos[1], 200.0);
     }
 
     #[test]

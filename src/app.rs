@@ -1188,7 +1188,6 @@ impl MarkdownViewerApp {
 
         const MIN_WIDTH: f32 = 600.0;
         const MIN_HEIGHT: f32 = 400.0;
-        const OFFSCREEN_TOLERANCE: f32 = 32.0;
 
         let mut pos = outer.min;
         let mut size = inner.size();
@@ -1231,28 +1230,13 @@ impl MarkdownViewerApp {
             size_adjusted = true;
         }
 
-        let outer_size_for_bounds = size + frame;
-        let max_pos = egui::pos2(
-            (monitor.x - outer_size_for_bounds.x).max(0.0),
-            (monitor.y - outer_size_for_bounds.y).max(0.0),
-        );
-
-        if pos.x <= -0.25 * outer_size_for_bounds.x {
-            pos.x = 0.0;
-            pos_adjusted = true;
-        }
-        if pos.y <= -0.25 * outer_size_for_bounds.y {
-            pos.y = 0.0;
-            pos_adjusted = true;
-        }
-        if pos.x > max_pos.x + OFFSCREEN_TOLERANCE {
-            pos.x = max_pos.x;
-            pos_adjusted = true;
-        }
-        if pos.y > max_pos.y + OFFSCREEN_TOLERANCE {
-            pos.y = max_pos.y;
-            pos_adjusted = true;
-        }
+        // Note: We intentionally do NOT clamp position to monitor bounds here.
+        // On multi-monitor setups, window positions are in virtual desktop coordinates
+        // and can legitimately exceed a single monitor's dimensions (right/below) or
+        // be negative (left/above primary). egui only exposes the current monitor's
+        // size, not its offset in the virtual desktop, so we can't distinguish
+        // "moved to second monitor" from "off-screen". The OS handles the
+        // disconnected-monitor case by moving windows to a valid monitor.
 
         if pos_adjusted || size_adjusted {
             size.x = size.x.max(MIN_WIDTH.min(available_width));
@@ -4764,32 +4748,42 @@ The end.
     }
 
     #[test]
-    fn test_compute_window_adjustment_clamps_offscreen_window() {
+    fn test_compute_window_adjustment_does_not_clamp_position_for_multimonitor() {
+        // Window positioned beyond primary monitor (e.g. on a second monitor to the right).
+        // Position should NOT be clamped — it's a valid multi-monitor coordinate.
+        // Size fits within the monitor, so no adjustment at all.
         let outer = egui::Rect::from_min_size(egui::pos2(1200.0, 900.0), egui::vec2(800.0, 600.0));
         let monitor = egui::vec2(1024.0, 768.0);
         let adjustment =
+            MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(outer), Some(monitor));
+        assert!(adjustment.is_none(), "should not clamp position to single monitor bounds");
+
+        // Same position but with an oversized window — only size should be adjusted, not pos
+        let outer =
+            egui::Rect::from_min_size(egui::pos2(1200.0, 900.0), egui::vec2(1200.0, 900.0));
+        let adjustment =
             MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(outer), Some(monitor))
-                .expect("should adjust window geometry");
-        let pos = adjustment.pos.expect("expected position adjustment");
-        let size = adjustment.size.unwrap_or_else(|| outer.size());
-        assert!(pos.x <= monitor.x - size.x + 1.0);
-        assert!(pos.y <= monitor.y - size.y + 1.0);
-        assert!(adjustment.size.is_none());
+                .expect("should adjust oversized window");
+        assert!(adjustment.pos.is_none(), "position should not be clamped");
+        let size = adjustment.size.expect("expected size adjustment");
+        assert!(size.x <= monitor.x);
+        assert!(size.y <= monitor.y);
     }
 
     #[test]
     fn test_compute_window_adjustment_respects_min_size() {
+        // Window with sub-minimum size at a negative position (e.g. monitor to the left).
+        // Size should be adjusted to minimums, but position should NOT be clamped.
         let outer = egui::Rect::from_min_size(egui::pos2(-200.0, -100.0), egui::vec2(200.0, 100.0));
         let monitor = egui::vec2(1920.0, 1080.0);
         let adjustment =
             MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(outer), Some(monitor))
                 .expect("should enforce minimum window size");
-        let pos = adjustment.pos.unwrap_or(outer.min);
+        // Position is left alone — negative coordinates are valid for multi-monitor
+        assert!(adjustment.pos.is_none());
         let size = adjustment.size.expect("expected size adjustment");
         assert!(size.x >= 600.0);
         assert!(size.y >= 400.0);
-        assert!(pos.x >= 0.0);
-        assert!(pos.y >= 0.0);
     }
 
     #[test]
@@ -7337,6 +7331,32 @@ The end.
         .expect("adjustment");
         assert!(adjusted.pos.is_none());
         assert!(adjusted.size.is_some());
+    }
+
+    #[test]
+    fn test_compute_window_adjustment_allows_multimonitor_positions() {
+        let monitor = egui::vec2(1920.0, 1080.0);
+
+        // Window on a second monitor to the right (pos.x > monitor width)
+        let outer =
+            egui::Rect::from_min_size(egui::pos2(2000.0, 200.0), egui::vec2(800.0, 600.0));
+        let adjusted =
+            MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(outer), Some(monitor));
+        assert!(adjusted.is_none(), "should not adjust valid multi-monitor position");
+
+        // Window on a monitor to the left (negative X)
+        let outer =
+            egui::Rect::from_min_size(egui::pos2(-1500.0, 100.0), egui::vec2(800.0, 600.0));
+        let adjusted =
+            MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(outer), Some(monitor));
+        assert!(adjusted.is_none(), "should not adjust negative multi-monitor position");
+
+        // Window on a monitor above (negative Y)
+        let outer =
+            egui::Rect::from_min_size(egui::pos2(100.0, -800.0), egui::vec2(800.0, 600.0));
+        let adjusted =
+            MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(outer), Some(monitor));
+        assert!(adjusted.is_none(), "should not adjust above-primary monitor position");
     }
 
     #[test]
