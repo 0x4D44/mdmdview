@@ -468,6 +468,12 @@ pub struct MarkdownViewerApp {
     /// Whether GPU textures have been released (e.g., due to window minimize).
     /// When true, textures will rebuild lazily on the next visible render.
     gpu_textures_released: bool,
+    /// Whether "Select All" is active (Ctrl+A in rendered view).
+    /// When true, all text is rendered with selection highlight and Ctrl+C
+    /// copies the raw markdown source to the clipboard.
+    select_all_active: bool,
+    /// Deferred flag: copy all content to clipboard (processed after input context)
+    copy_all_requested: bool,
 }
 
 /// Navigation request for keyboard-triggered scrolling
@@ -697,6 +703,8 @@ impl MarkdownViewerApp {
             readability_request_id: 0,
             startup_frame: 0,
             gpu_textures_released: false,
+            select_all_active: false,
+            copy_all_requested: false,
         };
         // Apply loaded settings to renderer
         app.renderer
@@ -910,6 +918,8 @@ impl MarkdownViewerApp {
         if take_forced_load_error() {
             bail!("Forced load error");
         }
+
+        self.select_all_active = false;
 
         // Push current state to history before loading new file
         if record_history && !self.current_content.is_empty() {
@@ -1523,6 +1533,7 @@ impl MarkdownViewerApp {
                 }
             }
         }
+        self.select_all_active = false;
         self.view_mode = match self.view_mode {
             ViewMode::Rendered => {
                 self.raw_focus_requested = true;
@@ -1670,6 +1681,31 @@ impl MarkdownViewerApp {
                         self.renderer.zoom_out();
                     }
                 }
+            }
+
+            // Ctrl+A - Select all (rendered view only; raw view TextEdit handles natively)
+            if self.view_mode == ViewMode::Rendered
+                && i.consume_shortcut(&egui::KeyboardShortcut::new(
+                    egui::Modifiers::CTRL,
+                    egui::Key::A,
+                ))
+            {
+                self.select_all_active = true;
+            }
+
+            // Ctrl+C - Copy all markdown source when select-all is active.
+            // egui's platform layer converts Ctrl+C into Event::Copy, so we
+            // consume that event rather than using consume_shortcut.
+            if self.select_all_active {
+                if let Some(idx) = i.events.iter().position(|e| matches!(e, egui::Event::Copy)) {
+                    i.events.remove(idx);
+                    self.copy_all_requested = true;
+                }
+            }
+
+            // Clear select-all on mouse click
+            if self.select_all_active && i.pointer.any_click() {
+                self.select_all_active = false;
             }
 
             // Ctrl+R - Toggle raw view
@@ -2906,6 +2942,15 @@ impl MarkdownViewerApp {
             }
         }
 
+        // Handle deferred "copy all" (Ctrl+C after Ctrl+A)
+        if self.copy_all_requested {
+            self.copy_all_requested = false;
+            self.select_all_active = false;
+            ctx.copy_text(self.current_content.clone());
+            self.status_message =
+                Some(("Copied to clipboard".into(), std::time::Instant::now()));
+        }
+
         // Render chrome panels before the central area so they reserve space.
         if !hide_chrome {
             self.render_menu_bar(ctx);
@@ -3004,6 +3049,8 @@ impl MarkdownViewerApp {
                                 self.renderer.set_highlight_phrase(None);
                             }
 
+                            self.renderer
+                                .set_select_all_highlight(self.select_all_active);
                             self.renderer.render_to_ui(ui, &self.parsed_elements);
                             // If a header anchor was clicked, scroll to it
                             if let Some(anchor) = self.renderer.take_pending_anchor() {
@@ -6120,6 +6167,107 @@ The end.
         let saved = std::fs::read_to_string(&file_path)?;
         assert_eq!(saved, "Saved");
         Ok(())
+    }
+
+    #[test]
+    fn test_select_all_ctrl_a_sets_flag_in_rendered_mode() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_mode = ViewMode::Rendered;
+        assert!(!app.select_all_active);
+
+        let mut input = default_input();
+        input
+            .events
+            .push(key_event(egui::Key::A, egui::Modifiers::CTRL));
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(input, |ctx| {
+            app.handle_shortcuts(ctx);
+        });
+
+        assert!(app.select_all_active);
+    }
+
+    #[test]
+    fn test_select_all_ctrl_a_ignored_in_raw_edit_mode() {
+        let mut app = MarkdownViewerApp::new();
+        app.view_mode = ViewMode::Raw;
+        app.write_enabled = true;
+        assert!(!app.select_all_active);
+
+        let mut input = default_input();
+        input
+            .events
+            .push(key_event(egui::Key::A, egui::Modifiers::CTRL));
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(input, |ctx| {
+            app.handle_shortcuts(ctx);
+        });
+
+        // Raw edit mode: Ctrl+A should NOT set select_all (TextEdit handles it)
+        assert!(!app.select_all_active);
+    }
+
+    #[test]
+    fn test_select_all_ctrl_c_sets_copy_flag() {
+        let mut app = MarkdownViewerApp::new();
+        app.select_all_active = true;
+        app.current_content = "# Hello\nWorld".to_string();
+
+        // egui converts Ctrl+C into Event::Copy at the platform layer
+        let mut input = default_input();
+        input.events.push(egui::Event::Copy);
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(input, |ctx| {
+            app.handle_shortcuts(ctx);
+        });
+
+        assert!(app.copy_all_requested);
+    }
+
+    #[test]
+    fn test_select_all_ctrl_c_ignored_when_not_selected() {
+        let mut app = MarkdownViewerApp::new();
+        app.select_all_active = false;
+
+        let mut input = default_input();
+        input.events.push(egui::Event::Copy);
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(input, |ctx| {
+            app.handle_shortcuts(ctx);
+        });
+
+        // Event::Copy without select-all should not trigger copy_all
+        assert!(!app.copy_all_requested);
+    }
+
+    #[test]
+    fn test_select_all_cleared_on_view_toggle() {
+        let mut app = MarkdownViewerApp::new();
+        app.select_all_active = true;
+        app.view_mode = ViewMode::Rendered;
+
+        let ctx = egui::Context::default();
+        app.toggle_view_mode(&ctx);
+
+        assert!(!app.select_all_active);
+        assert_eq!(app.view_mode, ViewMode::Raw);
+    }
+
+    #[test]
+    fn test_select_all_cleared_on_file_load() {
+        let mut app = MarkdownViewerApp::new();
+        app.select_all_active = true;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.md");
+        std::fs::write(&file_path, "# Test").unwrap();
+        let _ = app.load_file(file_path, false);
+
+        assert!(!app.select_all_active);
     }
 
     #[test]
