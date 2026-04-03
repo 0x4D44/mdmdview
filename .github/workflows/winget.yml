@@ -1,0 +1,17 @@
+name: Publish to winget
+
+on:
+  release:
+    types: [released]
+
+jobs:
+  winget:
+    name: Update winget manifest
+    runs-on: windows-latest
+    steps:
+      - name: Submit to winget-pkgs
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: 0x4D44.mdmdview
+          installers-regex: '\.msi$'
+          token: ${{ secrets.WINGET_TOKEN }}
