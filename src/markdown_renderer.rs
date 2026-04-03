@@ -768,6 +768,9 @@ pub struct MarkdownRenderer {
     column_stats_cache: RefCell<HashMap<u64, ColumnStatsCacheEntry>>,
     /// Allow loading images from remote URLs (http/https)
     allow_remote_images: Cell<bool>,
+    /// When true, all text is rendered with selection highlight background
+    /// (used for Ctrl+A "select all" visual feedback).
+    select_all_highlight: Cell<bool>,
     /// Current theme mode — true for dark, false for light.
     /// Used by syntect highlighting at parse time.
     dark_mode: bool,
@@ -1188,6 +1191,7 @@ impl MarkdownRenderer {
             table_layout_cache: RefCell::new(CellLayoutCache::new(TABLE_LAYOUT_CACHE_CAPACITY)),
             table_metrics: RefCell::new(TableMetrics::default()),
             column_stats_cache: RefCell::new(HashMap::new()),
+            select_all_highlight: Cell::new(false),
             allow_remote_images: Cell::new(false),
             dark_mode: true,
             last_viewport_height: Cell::new(0.0),
@@ -1208,6 +1212,11 @@ impl MarkdownRenderer {
     #[cfg(feature = "mermaid-quickjs")]
     pub fn clear_mermaid_cache(&self) {
         self.mermaid.clear_mermaid_cache();
+    }
+
+    /// Set whether all text should be rendered with selection highlight.
+    pub fn set_select_all_highlight(&self, active: bool) {
+        self.select_all_highlight.set(active);
     }
 
     /// Set whether remote images (http/https URLs) should be loaded
@@ -3476,6 +3485,7 @@ impl MarkdownRenderer {
         if text.is_empty() {
             return;
         }
+        let highlighted = highlighted || self.select_all_highlight.get();
         let mut rich = RichText::new(text).size(size);
 
         // Apply formatting styles
@@ -15328,6 +15338,21 @@ contexts:
         with_test_ui(|_, ui| {
             renderer.render_to_ui(ui, &elements);
         });
+    }
+
+    #[test]
+    fn test_select_all_highlight_renders_without_panic() {
+        let renderer = MarkdownRenderer::new();
+        let md = "# Header\n\nSome **bold** and *italic* text.\n\n- list item\n";
+        let elements = renderer.parse(md).expect("parse ok");
+        renderer.set_select_all_highlight(true);
+        with_test_ui(|_, ui| {
+            renderer.render_to_ui(ui, &elements);
+        });
+        // Verify it was set and can be cleared
+        assert!(renderer.select_all_highlight.get());
+        renderer.set_select_all_highlight(false);
+        assert!(!renderer.select_all_highlight.get());
     }
 
     #[test]
