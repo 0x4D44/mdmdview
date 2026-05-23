@@ -4757,12 +4757,19 @@ impl MarkdownRenderer {
         }
     }
 
-    /// Estimate header and uniform row heights for a table pass.
+    /// Estimate header and per-row heights for a table pass.
     ///
     /// Runs the height estimation logic: begins the per-pass bookkeeping,
     /// computes header height (from cache or font-based estimation), and
-    /// calculates a uniform row height across all body rows. Returns
-    /// `(header_height, uniform_row_height)`.
+    /// calculates each body row's individual height. Returns
+    /// `(header_height, per_row_heights)`.
+    ///
+    /// IMPORTANT: every row must be estimated (no shortcuts). `heterogeneous_rows`
+    /// uses these values to compute the table's total content size for the outer
+    /// `ScrollArea`; if any height is wrong, scroll position jumps as rows scroll
+    /// into/out of view. See commit 62c2ad7 for the original scroll bug — its
+    /// root cause was skipping estimation for some rows, not heterogeneous_rows
+    /// itself.
     fn estimate_table_pass_heights(
         &self,
         ui: &egui::Ui,
@@ -4770,7 +4777,7 @@ impl MarkdownRenderer {
         headers: &[Vec<InlineSpan>],
         rows: &[Vec<Vec<InlineSpan>>],
         table_id: u64,
-    ) -> (f32, f32) {
+    ) -> (f32, Vec<f32>) {
         let needs_estimate = {
             let metrics = self.table_metrics.borrow();
             metrics
@@ -4807,9 +4814,11 @@ impl MarkdownRenderer {
 
         let fallback_row_height = self.row_height_fallback();
 
-        // Use uniform row height to avoid scroll issues with heterogeneous_rows.
-        // Calculate the maximum height across all rows for consistency.
-        let uniform_row_height = if needs_estimate {
+        // Compute per-row heights. Every row must be estimated (or pulled from cache)
+        // so `heterogeneous_rows` can compute the correct total content height for the
+        // outer ScrollArea — partial estimates were the root cause of the historical
+        // scroll-jumping bug (commit 62c2ad7).
+        let row_heights: Vec<f32> = if needs_estimate {
             let approx_widths = if plan.content_fits {
                 // Content-fit mode: use natural widths directly.
                 // These are the actual widths columns will render at.
@@ -4826,8 +4835,8 @@ impl MarkdownRenderer {
                 )
             };
             let style = ui.style().clone();
-            let mut max_height = fallback_row_height;
-            for row in rows.iter() {
+            let mut heights = Vec::with_capacity(rows.len());
+            for (idx, row) in rows.iter().enumerate() {
                 let estimate = self.estimate_table_row_height(
                     ui,
                     &style,
@@ -4836,27 +4845,28 @@ impl MarkdownRenderer {
                     &approx_widths,
                     fallback_row_height,
                 );
-                max_height = max_height.max(estimate);
+                // Cache the estimate immediately so off-screen rows still have an
+                // accurate height on subsequent frames (heterogeneous_rows virtualizes,
+                // so cells outside the clip rect don't run their measurement closure).
+                self.update_row_height(table_id, idx, estimate);
+                heights.push(estimate);
             }
-            // Cache as uniform height for all rows
-            for idx in 0..rows.len() {
-                self.update_row_height(table_id, idx, max_height);
-            }
-            max_height
+            heights
         } else {
-            // Use cached max height from previous frames
+            // Use cached per-row heights from previous frames.
             (0..rows.len())
-                .filter_map(|idx| {
+                .map(|idx| {
                     self.table_metrics
                         .borrow()
                         .entry(table_id)
                         .and_then(|e| e.row(idx))
                         .map(|r| r.max_height)
+                        .unwrap_or(fallback_row_height)
                 })
-                .fold(fallback_row_height, f32::max)
+                .collect()
         };
 
-        (header_height, uniform_row_height)
+        (header_height, row_heights)
     }
 
     /// Finalize a table rendering pass: restore spacing, update metrics caches,
@@ -4928,7 +4938,7 @@ impl MarkdownRenderer {
                 ui.allocate_ui_with_layout(Vec2::new(max_width, 0.0), layout, |ui| {
                     ui.set_width(max_width);
 
-                    let (header_height, uniform_row_height) =
+                    let (header_height, row_heights) =
                         self.estimate_table_pass_heights(ui, &plan, headers, rows, table_id);
 
                     let fallback_row_height = self.row_height_fallback();
@@ -4990,49 +5000,65 @@ impl MarkdownRenderer {
                             *column_widths.borrow_mut() = body.widths().to_vec();
                             *body_layout_rect.borrow_mut() = Some(body.max_rect());
 
-                            let row_count = rows.len();
-                            body.rows(uniform_row_height, row_count, |mut row| {
-                                let idx = row.index();
-                                let row_cells = rows.get(idx);
-                                let mut actual_row_height = fallback_row_height;
-                                for ci in 0..plan.column_specs.len() {
-                                    let mut cell_height = fallback_row_height;
-                                    row.col(|ui| {
-                                        let width = ui.available_width().max(1.0);
-                                        let spans = row_cells
-                                            .and_then(|cells| cells.get(ci))
-                                            .map(|cell| cell.as_slice())
-                                            .unwrap_or(&[]);
-                                        let halign = plan
-                                            .column_aligns
-                                            .get(ci)
-                                            .copied()
-                                            .unwrap_or(Align::LEFT);
-                                        cell_height = self.render_overhauled_cell(
-                                            ui,
-                                            spans,
-                                            width,
-                                            false,
-                                            Some(idx),
-                                            ci,
-                                            halign,
-                                        );
-                                        // max_rect() for allocated bounds; see header comment.
-                                        Self::extend_table_rect(&mut body_rect, ui.max_rect());
-                                        if body_clip_rect.borrow().is_none() {
-                                            *body_clip_rect.borrow_mut() = Some(ui.clip_rect());
-                                        }
-                                    });
-                                    actual_row_height = actual_row_height.max(cell_height);
-                                }
-                                // Track actual heights to refine uniform height on next frame
-                                let height_delta = actual_row_height - uniform_row_height;
-                                if height_delta > 0.5 {
-                                    height_change = true;
-                                }
-                                self.update_row_height(table_id, idx, actual_row_height);
-                                self.note_row_rendered(table_id);
-                            });
+                            // heterogeneous_rows lets each row use its own height,
+                            // sized from `row_heights`. The iterator is consumed lazily
+                            // for virtualization; only the visible rows run their
+                            // measurement closure, so off-screen heights come from the
+                            // pre-computed estimate. See estimate_table_pass_heights for
+                            // why we estimate every row up-front.
+                            let row_heights_for_body = row_heights.clone();
+                            body.heterogeneous_rows(
+                                row_heights_for_body.into_iter(),
+                                |mut row| {
+                                    let idx = row.index();
+                                    let row_cells = rows.get(idx);
+                                    let mut actual_row_height = fallback_row_height;
+                                    for ci in 0..plan.column_specs.len() {
+                                        let mut cell_height = fallback_row_height;
+                                        row.col(|ui| {
+                                            let width = ui.available_width().max(1.0);
+                                            let spans = row_cells
+                                                .and_then(|cells| cells.get(ci))
+                                                .map(|cell| cell.as_slice())
+                                                .unwrap_or(&[]);
+                                            let halign = plan
+                                                .column_aligns
+                                                .get(ci)
+                                                .copied()
+                                                .unwrap_or(Align::LEFT);
+                                            cell_height = self.render_overhauled_cell(
+                                                ui,
+                                                spans,
+                                                width,
+                                                false,
+                                                Some(idx),
+                                                ci,
+                                                halign,
+                                            );
+                                            // max_rect() for allocated bounds; see header comment.
+                                            Self::extend_table_rect(
+                                                &mut body_rect,
+                                                ui.max_rect(),
+                                            );
+                                            if body_clip_rect.borrow().is_none() {
+                                                *body_clip_rect.borrow_mut() = Some(ui.clip_rect());
+                                            }
+                                        });
+                                        actual_row_height = actual_row_height.max(cell_height);
+                                    }
+                                    // Compare against THIS row's estimate (not a uniform value)
+                                    // so we can request a repaint when our prediction was off.
+                                    let estimated = row_heights
+                                        .get(idx)
+                                        .copied()
+                                        .unwrap_or(fallback_row_height);
+                                    if (actual_row_height - estimated).abs() > 0.5 {
+                                        height_change = true;
+                                    }
+                                    self.update_row_height(table_id, idx, actual_row_height);
+                                    self.note_row_rendered(table_id);
+                                },
+                            );
                         });
 
                     let geometry = TableGeometry {
