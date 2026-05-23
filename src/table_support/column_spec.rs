@@ -420,11 +420,16 @@ fn classify_column(
 }
 
 fn column_needs_remainder(stat: Option<&ColumnStat>) -> bool {
+    // `has_link` was previously included here but is a poor proxy for
+    // "needs more space": a link renders as its link text (whose width is
+    // already captured by `max_graphemes`/`longest_word`), and the URL is
+    // hidden. Columns containing only short links like `[Report](...)`
+    // would be promoted to Remainder and grab huge amounts of leftover
+    // viewport space they don't need. `has_image`, long words, and large
+    // grapheme counts are kept because they genuinely correlate with
+    // content that wants more horizontal room.
     stat.is_some_and(|s| {
-        s.rich_content.has_image
-            || s.longest_word > 18
-            || s.max_graphemes > 60
-            || s.rich_content.has_link
+        s.rich_content.has_image || s.longest_word > 18 || s.max_graphemes > 60
     })
 }
 
