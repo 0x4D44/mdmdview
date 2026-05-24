@@ -4601,11 +4601,15 @@ impl MarkdownRenderer {
                             col
                         }
                         ColumnPolicy::Remainder { clip } => {
-                            let mut col = if scaled_down {
-                                Column::initial(width).at_least(min_floor.min(width))
-                            } else {
-                                Column::remainder().at_least(min_floor)
-                            };
+                            // Always use Column::initial with the pre-computed
+                            // adjusted width (weighted proportionally by natural
+                            // content width in the expansion case, or scaled in
+                            // the scaled_down case). This replaces the old
+                            // Column::remainder() equal-split and ensures the
+                            // rendered column widths match the widths used for
+                            // row-height estimation.
+                            let mut col =
+                                Column::initial(width).at_least(min_floor.min(width));
                             if clip {
                                 col = col.clip(true);
                             }
@@ -4726,6 +4730,50 @@ impl MarkdownRenderer {
                     }
                 }
                 scaled_down = true;
+            }
+        }
+        // Weighted Remainder allocation: when multiple Remainder columns
+        // exist and there's room to expand (not scaled_down), distribute
+        // the leftover space proportionally by natural content width
+        // instead of the equal split that Column::remainder() gives.
+        // This also aligns estimate widths with render widths — both now
+        // read from adjusted_widths — preventing the height-estimation
+        // drift that causes extra vertical space in rows (see the
+        // monotonic-grow comment in update_row_height).
+        if !use_hscroll && !scaled_down && !remainder_indices.is_empty() {
+            let nat_total: f32 = remainder_indices
+                .iter()
+                .map(|&idx| natural_widths.get(idx).copied().unwrap_or(0.0))
+                .sum();
+            let used_by_others: f32 = adjusted_widths
+                .iter()
+                .enumerate()
+                .filter(|(idx, _)| !remainder_indices.contains(idx))
+                .map(|(_, w)| *w)
+                .sum();
+            let remaining = (available_for_columns - used_by_others).max(0.0);
+            if remaining > 0.0 {
+                if nat_total > 0.0 {
+                    let mut alloc_sum = 0.0;
+                    let last = remainder_indices.len() - 1;
+                    for (i, &idx) in remainder_indices.iter().enumerate() {
+                        if i < last {
+                            let nat = natural_widths.get(idx).copied().unwrap_or(0.0);
+                            let target = (remaining * nat / nat_total).max(min_floor);
+                            adjusted_widths[idx] = target;
+                            alloc_sum += target;
+                        } else {
+                            // Last Remainder column absorbs rounding residual.
+                            adjusted_widths[idx] = (remaining - alloc_sum).max(min_floor);
+                        }
+                    }
+                } else {
+                    // All naturals zero: fall back to equal split.
+                    let per = (remaining / remainder_indices.len() as f32).max(min_floor);
+                    for &idx in &remainder_indices {
+                        adjusted_widths[idx] = per;
+                    }
+                }
             }
         }
         let column_layout = Self::build_table_column_layout(
@@ -5235,51 +5283,25 @@ impl MarkdownRenderer {
     #[allow(clippy::too_many_arguments)]
     fn estimate_table_row_widths(
         &self,
-        column_specs: &[ColumnSpec],
+        _column_specs: &[ColumnSpec],
         resolved_widths: &[f32],
         adjusted_widths: &[f32],
-        available_for_columns: f32,
-        min_floor: f32,
+        _available_for_columns: f32,
+        _min_floor: f32,
         use_hscroll: bool,
-        scaled_down: bool,
+        _scaled_down: bool,
     ) -> Vec<f32> {
+        // Remainder columns now have their weighted widths pre-computed in
+        // `adjusted_widths` by `compute_table_layout_plan`, so this
+        // function no longer needs to redistribute space. It returns the
+        // widths that the renderer will actually use — critical for height
+        // estimation accuracy (see monotonic-grow comment in
+        // `update_row_height`).
         if use_hscroll {
-            return resolved_widths.to_vec();
+            resolved_widths.to_vec()
+        } else {
+            adjusted_widths.to_vec()
         }
-
-        let mut widths = adjusted_widths.to_vec();
-        if scaled_down {
-            return widths;
-        }
-
-        let remainder_indices: Vec<usize> = column_specs
-            .iter()
-            .enumerate()
-            .filter(|(_, spec)| matches!(spec.policy, ColumnPolicy::Remainder { .. }))
-            .map(|(idx, _)| idx)
-            .collect();
-        if remainder_indices.is_empty() {
-            return widths;
-        }
-
-        let mut used = 0.0;
-        for (idx, width) in widths.iter().enumerate() {
-            if remainder_indices.contains(&idx) {
-                continue;
-            }
-            used += *width;
-        }
-        let remaining = available_for_columns - used;
-        if remaining <= 0.0 {
-            return widths;
-        }
-        let per = (remaining / remainder_indices.len() as f32).max(min_floor);
-        for idx in remainder_indices {
-            if let Some(width) = widths.get_mut(idx) {
-                *width = per;
-            }
-        }
-        widths
     }
 
     #[cfg(test)]
@@ -10718,7 +10740,9 @@ fn main() {}
     }
 
     #[test]
-    fn test_estimate_table_row_widths_distributes_remainder() {
+    fn test_estimate_table_row_widths_passes_through_adjusted() {
+        // Remainder distribution now lives in compute_table_layout_plan;
+        // estimate_table_row_widths just returns adjusted_widths as-is.
         let renderer = MarkdownRenderer::new();
         let min_floor = renderer.table_min_column_width();
         let specs = vec![
@@ -10726,12 +10750,13 @@ fn main() {}
             ColumnSpec::new(1, "Params", ColumnPolicy::Remainder { clip: false }, None),
         ];
         let resolved = vec![80.0, min_floor];
-        let adjusted = resolved.clone();
+        // Simulate pre-computed weighted width for the Remainder column.
+        let adjusted = vec![80.0, 240.0];
         let widths = renderer.estimate_table_row_widths(
             &specs, &resolved, &adjusted, 320.0, min_floor, false, false,
         );
         assert!((widths[0] - 80.0).abs() < 0.1);
-        assert!(widths[1] > min_floor + 40.0);
+        assert!((widths[1] - 240.0).abs() < 0.1, "should pass through adjusted_widths");
     }
 
     #[test]
