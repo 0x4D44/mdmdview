@@ -6,8 +6,6 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::markdown_renderer::InlineSpan;
 
-const MAX_REMAINDER_COLUMNS: usize = 2;
-
 fn normalize_body_font_px(body: f32) -> f32 {
     if body.is_finite() && body > 4.0 {
         body
@@ -16,55 +14,21 @@ fn normalize_body_font_px(body: f32) -> f32 {
     }
 }
 
+#[cfg(test)]
 fn px(body_px: f32, factor: f32) -> f32 {
     normalize_body_font_px(body_px) * factor
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColumnPolicy {
-    Auto,
-    Fixed {
-        width: f32,
-        clip: bool,
-    },
-    Remainder {
-        clip: bool,
-    },
-    Resizable {
-        min: f32,
-        preferred: f32,
-        clip: bool,
-    },
+    Resizable { min: f32 },
 }
 
 impl ColumnPolicy {
     pub fn to_column(&self) -> Column {
         match self {
-            ColumnPolicy::Auto => Column::auto(),
-            ColumnPolicy::Fixed { width, clip } => {
-                let mut col = Column::exact(*width);
-                if *clip {
-                    col = col.clip(true);
-                }
-                col
-            }
-            ColumnPolicy::Remainder { clip } => {
-                let mut col = Column::remainder();
-                if *clip {
-                    col = col.clip(true);
-                }
-                col
-            }
-            ColumnPolicy::Resizable {
-                min,
-                preferred,
-                clip,
-            } => {
-                let mut col = Column::initial(*preferred).at_least(*min).resizable(true);
-                if *clip {
-                    col = col.clip(true);
-                }
-                col
+            ColumnPolicy::Resizable { min } => {
+                Column::initial(*min).at_least(*min).resizable(true)
             }
         }
     }
@@ -72,24 +36,9 @@ impl ColumnPolicy {
 
 impl Hash for ColumnPolicy {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        std::mem::discriminant(self).hash(state);
         match self {
-            ColumnPolicy::Auto => {}
-            ColumnPolicy::Fixed { width, clip } => {
-                width.to_bits().hash(state);
-                clip.hash(state);
-            }
-            ColumnPolicy::Remainder { clip } => {
-                clip.hash(state);
-            }
-            ColumnPolicy::Resizable {
-                min,
-                preferred,
-                clip,
-            } => {
+            ColumnPolicy::Resizable { min } => {
                 min.to_bits().hash(state);
-                preferred.to_bits().hash(state);
-                clip.hash(state);
             }
         }
     }
@@ -100,7 +49,6 @@ pub struct ColumnSpec {
     pub index: usize,
     pub ident: String,
     pub policy: ColumnPolicy,
-    pub tooltip: Option<String>,
     pub policy_hash: u64,
 }
 
@@ -109,7 +57,6 @@ impl ColumnSpec {
         index: usize,
         ident: impl Into<String>,
         policy: ColumnPolicy,
-        tooltip: Option<String>,
     ) -> Self {
         let ident = ident.into();
         let policy_hash = calculate_policy_hash(index, &ident, &policy);
@@ -117,7 +64,6 @@ impl ColumnSpec {
             index,
             ident,
             policy,
-            tooltip,
             policy_hash,
         }
     }
@@ -129,19 +75,6 @@ impl ColumnSpec {
     pub fn set_policy(&mut self, policy: ColumnPolicy) {
         self.policy = policy;
         self.policy_hash = calculate_policy_hash(self.index, &self.ident, &self.policy);
-    }
-
-    pub fn apply_preferred_width(&mut self, width: f32) {
-        if let ColumnPolicy::Resizable {
-            min,
-            ref mut preferred,
-            ..
-        } = self.policy
-        {
-            let clamped = width.max(min);
-            *preferred = clamped;
-            self.policy_hash = calculate_policy_hash(self.index, &self.ident, &self.policy);
-        }
     }
 }
 
@@ -193,118 +126,40 @@ fn calculate_policy_hash(index: usize, ident: &str, policy: &ColumnPolicy) -> u6
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     index.hash(&mut hasher);
     ident.hash(&mut hasher);
-    std::mem::discriminant(policy).hash(&mut hasher);
     match policy {
-        ColumnPolicy::Auto => {}
-        ColumnPolicy::Fixed { width, clip } => {
-            width.to_bits().hash(&mut hasher);
-            clip.hash(&mut hasher);
-        }
-        ColumnPolicy::Remainder { clip } => {
-            clip.hash(&mut hasher);
-        }
-        ColumnPolicy::Resizable { min, clip, .. } => {
+        ColumnPolicy::Resizable { min } => {
             min.to_bits().hash(&mut hasher);
-            clip.hash(&mut hasher);
         }
     }
     hasher.finish()
 }
 
 pub fn derive_column_specs(ctx: &TableColumnContext) -> Vec<ColumnSpec> {
-    let mut remainder_assigned = 0usize;
-    let mut fallback_idx: Option<usize> = None;
-    let mut fallback_score: usize = 0;
     let column_count = ctx
         .stats
         .len()
         .max(ctx.headers.len())
         .max(ctx.rows.iter().map(|r| r.len()).max().unwrap_or(0));
 
-    let mut scored_indices: Vec<(usize, usize)> = Vec::with_capacity(column_count);
+    let body = normalize_body_font_px(ctx.body_font_px);
+    let min_floor = body * 4.0;
 
-    let mut specs: Vec<ColumnSpec> = (0..column_count)
+    (0..column_count)
         .map(|idx| {
             let spans = ctx.headers.get(idx).map(|v| v.as_slice()).unwrap_or(&[]);
             let label = header_text(spans);
-            let stat = ctx.column_stat(idx);
 
-            let candidate_score = stat
-                .map(|s| {
-                    let mut score = s.max_graphemes + s.longest_word * 2;
-                    if s.rich_content.has_image {
-                        score += 50;
-                    }
-                    if s.rich_content.has_link {
-                        score += 25;
-                    }
-                    score
-                })
-                .unwrap_or_else(|| label.len());
-            if candidate_score > fallback_score {
-                fallback_score = candidate_score;
-                fallback_idx = Some(idx);
-            }
-            scored_indices.push((idx, candidate_score));
+            // Min width: at least the header text width or global floor
+            let header_px = {
+                let hw = UnicodeWidthStr::width(label.as_str());
+                hw as f32 * (body * 0.62) + body * 1.8
+            };
+            let min = header_px.max(min_floor);
 
-            let policy =
-                classify_column(&label, idx, &mut remainder_assigned, stat, ctx.body_font_px);
-            let tooltip = column_tooltip(&label, &policy);
-            ColumnSpec::new(idx, label, policy, tooltip)
+            let policy = ColumnPolicy::Resizable { min };
+            ColumnSpec::new(idx, label, policy)
         })
-        .collect();
-
-    // Ensure at least one remainder if none assigned and available
-    if remainder_assigned == 0 {
-        let mut candidate = fallback_idx;
-        if let Some(idx) = candidate {
-            if matches!(specs[idx].policy, ColumnPolicy::Fixed { .. }) {
-                candidate = None;
-            }
-        }
-        let has_non_fixed_other = specs
-            .iter()
-            .enumerate()
-            .any(|(idx, spec)| idx != 0 && !matches!(spec.policy, ColumnPolicy::Fixed { .. }));
-        if has_non_fixed_other && (candidate.is_none() || candidate == Some(0)) {
-            candidate = scored_indices
-                .iter()
-                .filter(|(idx, _)| *idx != 0)
-                .filter(|(idx, _)| !matches!(specs[*idx].policy, ColumnPolicy::Fixed { .. }))
-                .max_by_key(|(_, score)| *score)
-                .map(|(idx, _)| *idx);
-        }
-        if candidate.is_none() {
-            for (idx, spec) in specs.iter().enumerate() {
-                if !matches!(spec.policy, ColumnPolicy::Fixed { .. }) {
-                    candidate = Some(idx);
-                    break;
-                }
-            }
-        }
-        if let Some(idx) = candidate {
-            let spec = &mut specs[idx];
-            spec.set_policy(ColumnPolicy::Remainder { clip: false });
-            remainder_assigned += 1;
-        }
-    }
-
-    // Promote additional wide columns to remainder up to the cap
-    scored_indices.sort_by(|a, b| b.1.cmp(&a.1));
-    for (idx, _) in scored_indices {
-        if remainder_assigned >= MAX_REMAINDER_COLUMNS {
-            break;
-        }
-        let spec = &mut specs[idx];
-        if matches!(spec.policy, ColumnPolicy::Resizable { .. })
-            && column_needs_remainder(ctx.column_stat(idx))
-        {
-            spec.set_policy(ColumnPolicy::Remainder { clip: false });
-            remainder_assigned += 1;
-        }
-    }
-
-    specs
+        .collect()
 }
 
 /// Concatenate the text content of inline spans, separated by spaces.
@@ -344,123 +199,6 @@ fn header_text(spans: &[InlineSpan]) -> String {
     } else {
         result.trim().to_string()
     }
-}
-
-fn classify_column(
-    label: &str,
-    index: usize,
-    remainder_assigned: &mut usize,
-    stat: Option<&ColumnStat>,
-    body_font_px: f32,
-) -> ColumnPolicy {
-    let lower = label.to_ascii_lowercase();
-    if matches_any(&lower, &["version", "rev", "#", "id"]) {
-        return ColumnPolicy::Fixed {
-            width: px(body_font_px, 5.8).clamp(80.0, 160.0),
-            clip: true,
-        };
-    }
-    if matches_any(&lower, &["date", "time", "timestamp"]) {
-        return ColumnPolicy::Fixed {
-            width: px(body_font_px, 8.5).clamp(110.0, 200.0),
-            clip: false,
-        };
-    }
-    if matches_any(&lower, &["author", "owner", "assignee", "user"]) {
-        return ColumnPolicy::Resizable {
-            min: px(body_font_px, 7.5),
-            preferred: px(body_font_px, 10.0),
-            clip: false,
-        };
-    }
-    if matches_any(&lower, &["status", "state"]) {
-        return ColumnPolicy::Fixed {
-            width: px(body_font_px, 7.0).clamp(90.0, 180.0),
-            clip: true,
-        };
-    }
-    if matches_any(
-        &lower,
-        &["notes", "changes", "description", "details", "summary"],
-    ) {
-        return ColumnPolicy::Resizable {
-            min: px(body_font_px, 10.5),
-            preferred: px(body_font_px, 14.5),
-            clip: false,
-        };
-    }
-    if matches_any(
-        &lower,
-        &["example", "examples", "sample", "use case", "use cases"],
-    ) {
-        *remainder_assigned += 1;
-        return ColumnPolicy::Remainder { clip: false };
-    }
-    if index == 0 {
-        // First column typically identifiers; keep fixed only for short labels.
-        if stat
-            .map(|s| s.max_graphemes <= 18 && s.longest_word <= 12)
-            .unwrap_or_else(|| label.len() <= 12)
-        {
-            return ColumnPolicy::Fixed {
-                width: px(body_font_px, 7.0).clamp(80.0, 180.0),
-                clip: true,
-            };
-        }
-    }
-    if *remainder_assigned < MAX_REMAINDER_COLUMNS && column_needs_remainder(stat) {
-        *remainder_assigned += 1;
-        return ColumnPolicy::Remainder { clip: false };
-    }
-    ColumnPolicy::Resizable {
-        min: px(body_font_px, 7.0),
-        preferred: px(body_font_px, 9.5),
-        clip: false,
-    }
-}
-
-fn column_needs_remainder(stat: Option<&ColumnStat>) -> bool {
-    // `has_link` was previously included here but is a poor proxy for
-    // "needs more space": a link renders as its link text (whose width is
-    // already captured by `max_graphemes`/`longest_word`), and the URL is
-    // hidden. Columns containing only short links like `[Report](...)`
-    // would be promoted to Remainder and grab huge amounts of leftover
-    // viewport space they don't need. `has_image`, long words, and large
-    // grapheme counts are kept because they genuinely correlate with
-    // content that wants more horizontal room.
-    stat.is_some_and(|s| {
-        s.rich_content.has_image || s.longest_word > 18 || s.max_graphemes > 60
-    })
-}
-
-fn matches_any(label: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| label.contains(needle))
-}
-
-fn column_tooltip(label: &str, policy: &ColumnPolicy) -> Option<String> {
-    let description = match policy {
-        ColumnPolicy::Auto => "Auto-sized column".to_string(),
-        ColumnPolicy::Fixed { width, clip } => format!(
-            "Fixed width {:.0}px{}",
-            width,
-            if *clip { " (clipped)" } else { "" }
-        ),
-        ColumnPolicy::Remainder { clip } => format!(
-            "Shared remainder width{}",
-            if *clip { " (clipped)" } else { "" }
-        ),
-        ColumnPolicy::Resizable {
-            min,
-            preferred,
-            clip,
-        } => format!(
-            "Resizable (min {:.0}px, start {:.0}px{})",
-            min,
-            preferred,
-            if *clip { ", clipped" } else { "" }
-        ),
-    };
-    Some(format!("{label}: {description}"))
 }
 
 pub fn compute_column_stats(
@@ -562,44 +300,9 @@ mod tests {
         InlineSpan::Text(text.to_string())
     }
 
-    #[test]
-    fn classify_version_column() {
-        let headers = vec![vec![span("Version")], vec![span("Changes")]];
-        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
-        let stats = compute_column_stats(&headers, &rows, 32);
-        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
-        let specs = derive_column_specs(&ctx);
-        assert!(matches!(specs[0].policy, ColumnPolicy::Fixed { .. }));
-        assert!(matches!(specs[1].policy, ColumnPolicy::Remainder { .. }));
-    }
-
-    #[test]
-    fn classify_author_column() {
-        let headers = vec![vec![span("Author")], vec![span("Examples")]];
-        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
-        let stats = compute_column_stats(&headers, &rows, 32);
-        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
-        let specs = derive_column_specs(&ctx);
-        assert!(matches!(specs[0].policy, ColumnPolicy::Resizable { .. }));
-        assert!(matches!(specs[1].policy, ColumnPolicy::Remainder { .. }));
-    }
-
-    #[test]
-    fn classify_examples_column() {
-        let headers = vec![
-            vec![span("Element")],
-            vec![span("Symbol")],
-            vec![span("Description")],
-            vec![span("Examples")],
-        ];
-        assert_eq!(header_text(&headers[3]), "Examples");
-        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
-        let stats = compute_column_stats(&headers, &rows, 32);
-        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
-        let specs = derive_column_specs(&ctx);
-        assert!(matches!(specs[3].policy, ColumnPolicy::Remainder { .. }));
-        assert!(matches!(specs[2].policy, ColumnPolicy::Resizable { .. }));
-    }
+    // -------------------------------------------------------------------
+    // Tests for compute_column_stats / accumulate_stats_for_cell
+    // -------------------------------------------------------------------
 
     #[test]
     fn compute_stats_counts_text() {
@@ -613,163 +316,90 @@ mod tests {
     }
 
     #[test]
-    fn fallback_assigns_remainder_based_on_stats() {
-        let headers = vec![vec![span("Foo")], vec![span("Bar")]];
-        let rows = vec![vec![
-            vec![span("Short")],
-            vec![span(
-                "This column contains a very long sentence that should force remainder selection.",
-            )],
-        ]];
-        let stats = compute_column_stats(&headers, &rows, 32);
-        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
-        let specs = derive_column_specs(&ctx);
-        assert!(matches!(specs[1].policy, ColumnPolicy::Remainder { .. }));
-    }
-
-    #[test]
-    fn fallback_avoids_first_column_when_possible() {
-        let headers = vec![
-            vec![span("Center")],
-            vec![span("Left")],
-            vec![span("Right")],
-        ];
-        let rows = vec![vec![
-            vec![span("Centered label with enough words to raise score")],
-            vec![span("L1")],
-            vec![span("R1")],
-        ]];
-        let stats = compute_column_stats(&headers, &rows, 32);
-        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
-        let specs = derive_column_specs(&ctx);
-        assert!(!matches!(specs[0].policy, ColumnPolicy::Remainder { .. }));
-        assert!(specs[1..]
-            .iter()
-            .any(|spec| matches!(spec.policy, ColumnPolicy::Remainder { .. })));
-    }
-
-    #[test]
-    fn derive_column_specs_handles_missing_stats_with_fixed_columns() {
-        let headers = vec![vec![span("Alpha")], vec![span("Status")]];
-        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
-        let stats: Vec<ColumnStat> = Vec::new();
-        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
-        let specs = derive_column_specs(&ctx);
-        assert_eq!(specs.len(), 2);
-        assert!(matches!(specs[0].policy, ColumnPolicy::Fixed { .. }));
-        assert!(matches!(specs[1].policy, ColumnPolicy::Fixed { .. }));
-    }
-
-    #[test]
-    fn derive_column_specs_empty_header_label_uses_fixed_policy() {
-        let headers = vec![Vec::new()];
-        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
-        let stats: Vec<ColumnStat> = Vec::new();
-        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
-        let specs = derive_column_specs(&ctx);
-        assert_eq!(specs.len(), 1);
-        assert!(matches!(specs[0].policy, ColumnPolicy::Fixed { .. }));
-    }
-
-    #[test]
-    fn derive_column_specs_picks_first_non_fixed_when_best_is_fixed() {
-        let headers = vec![vec![span("Notes")], vec![span("Status")]];
-        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
-        let stats: Vec<ColumnStat> = Vec::new();
-        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
-        let specs = derive_column_specs(&ctx);
-        assert!(matches!(specs[0].policy, ColumnPolicy::Remainder { .. }));
-    }
-
-    #[test]
-    fn fallback_skips_fixed_candidate_for_remainder() {
-        let headers = vec![
-            vec![span("Version")],
-            vec![span("Notes")],
-            vec![span("Owner")],
-        ];
-        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
-        let stats = vec![
-            ColumnStat {
-                max_graphemes: 50,
-                longest_word: 10,
-                rich_content: RichContentFlags {
-                    has_link: false,
-                    has_image: false,
-                    has_emoji_like: false,
-                },
-            },
-            ColumnStat {
-                max_graphemes: 5,
-                longest_word: 5,
-                rich_content: RichContentFlags {
-                    has_link: false,
-                    has_image: false,
-                    has_emoji_like: false,
-                },
-            },
-            ColumnStat {
-                max_graphemes: 4,
-                longest_word: 4,
-                rich_content: RichContentFlags {
-                    has_link: false,
-                    has_image: false,
-                    has_emoji_like: false,
-                },
-            },
-        ];
-        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
-        let specs = derive_column_specs(&ctx);
-        assert!(matches!(specs[0].policy, ColumnPolicy::Fixed { .. }));
-        assert!(specs[1..]
-            .iter()
-            .any(|spec| matches!(spec.policy, ColumnPolicy::Remainder { .. })));
-    }
-
-    #[test]
-    fn examples_header_prefers_remainder() {
-        let headers = vec![vec![span("Examples")], vec![span("Description")]];
-        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
-        let stats = compute_column_stats(&headers, &rows, 32);
-        let ctx = TableColumnContext::new(&headers, &rows, &stats, 16.0, 0);
-        let specs = derive_column_specs(&ctx);
-        assert!(matches!(specs[0].policy, ColumnPolicy::Remainder { .. }));
-        assert!(matches!(specs[1].policy, ColumnPolicy::Resizable { .. }));
-    }
-
-    #[test]
-    fn multiple_remainder_columns_allowed() {
-        let headers = vec![
-            vec![span("Summary")],
-            vec![span("Details")],
-            vec![span("Examples")],
-        ];
-        let rows = vec![vec![
-            vec![span("short")],
-            vec![span(
-                "Long content that should trigger a remainder column due to its width and words.",
-            )],
-            vec![span(
-                "Another large column with links https://example.com and more text.",
-            )],
-        ]];
-        let stats = compute_column_stats(&headers, &rows, 32);
-        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
-        let specs = derive_column_specs(&ctx);
-        let remainder_count = specs
-            .iter()
-            .filter(|s| matches!(s.policy, ColumnPolicy::Remainder { .. }))
-            .count();
-        assert!(remainder_count >= 2);
-    }
-
-    #[test]
     fn cjk_widths_increase_stat_estimates() {
         let headers = vec![vec![span("列")], vec![span("Column")]];
         let rows = vec![vec![vec![span("长内容长内容长内容")], vec![span("short")]]];
         let stats = compute_column_stats(&headers, &rows, 32);
         assert!(stats[0].max_graphemes > stats[1].max_graphemes);
     }
+
+    #[test]
+    fn test_compute_column_stats_empty() {
+        let stats = compute_column_stats(&[], &[], 10);
+        assert!(stats.is_empty());
+    }
+
+    #[test]
+    fn test_compute_column_stats_respects_max_samples() {
+        let headers = vec![vec![span("Header")]];
+        let rows = vec![
+            vec![vec![span("short")]],
+            vec![vec![span("this_is_a_much_longer_token")]],
+        ];
+        let stats = compute_column_stats(&headers, &rows, 1);
+        assert_eq!(stats.len(), 1);
+        assert!(stats[0].longest_word < 20, "should ignore second row");
+    }
+
+    #[test]
+    fn test_accumulate_stats_for_cell_tracks_images() {
+        let spans = vec![InlineSpan::Image {
+            src: "img.png".to_string(),
+            alt: "Alt".to_string(),
+            title: None,
+        }];
+        let mut stat = ColumnStat::default();
+        accumulate_stats_for_cell(&spans, &mut stat);
+        assert!(stat.rich_content.has_image);
+    }
+
+    #[test]
+    fn test_accumulate_stats_detects_emoji_like_text() {
+        let emoji = char::from_u32(0x1F600).expect("emoji");
+        let spans = vec![InlineSpan::Text(format!("Hello {emoji}"))];
+        let mut stat = ColumnStat::default();
+        accumulate_stats_for_cell(&spans, &mut stat);
+        assert!(stat.rich_content.has_emoji_like);
+    }
+
+    #[test]
+    fn test_accumulate_stats_preserves_existing_flags() {
+        let mut stat = ColumnStat {
+            max_graphemes: 0,
+            longest_word: 0,
+            rich_content: RichContentFlags {
+                has_link: false,
+                has_image: true,
+                has_emoji_like: false,
+            },
+        };
+        accumulate_stats_for_cell(&[InlineSpan::Text("plain".to_string())], &mut stat);
+        assert!(stat.rich_content.has_image);
+        assert!(!stat.rich_content.has_link);
+    }
+
+    #[test]
+    fn test_accumulate_stats_empty_text_and_existing_emoji_flag() {
+        let mut stat = ColumnStat {
+            max_graphemes: 0,
+            longest_word: 0,
+            rich_content: RichContentFlags {
+                has_link: false,
+                has_image: false,
+                has_emoji_like: true,
+            },
+        };
+        accumulate_stats_for_cell(&[InlineSpan::Text("Hello".to_string())], &mut stat);
+        assert!(stat.rich_content.has_emoji_like);
+
+        let mut empty_stat = ColumnStat::default();
+        accumulate_stats_for_cell(&[], &mut empty_stat);
+        assert_eq!(empty_stat.max_graphemes, 0);
+    }
+
+    // -------------------------------------------------------------------
+    // Tests for header_text / spans_to_text
+    // -------------------------------------------------------------------
 
     #[test]
     fn test_header_text_and_spans_to_text_variants() {
@@ -809,279 +439,6 @@ mod tests {
     }
 
     #[test]
-    fn test_column_policy_to_column_and_tooltip() {
-        let policies = vec![
-            ColumnPolicy::Auto,
-            ColumnPolicy::Fixed {
-                width: 120.0,
-                clip: true,
-            },
-            ColumnPolicy::Remainder { clip: false },
-            ColumnPolicy::Resizable {
-                min: 50.0,
-                preferred: 140.0,
-                clip: true,
-            },
-        ];
-
-        for policy in policies {
-            let _col = policy.to_column();
-            let tooltip = column_tooltip("Header", &policy).expect("tooltip");
-            assert!(tooltip.contains("Header"));
-        }
-    }
-
-    #[test]
-    fn test_apply_preferred_width_clamps_and_hash_stable_for_resizable() {
-        let mut spec = ColumnSpec::new(
-            0,
-            "body",
-            ColumnPolicy::Resizable {
-                min: 50.0,
-                preferred: 120.0,
-                clip: false,
-            },
-            None,
-        );
-        let original_hash = spec.policy_hash;
-        spec.apply_preferred_width(10.0);
-        assert!(matches!(spec.policy, ColumnPolicy::Resizable { .. }));
-        assert_eq!(spec.policy_hash, original_hash);
-
-        let mut fixed = ColumnSpec::new(
-            1,
-            "fixed",
-            ColumnPolicy::Fixed {
-                width: 40.0,
-                clip: false,
-            },
-            None,
-        );
-        let fixed_hash = fixed.policy_hash;
-        fixed.apply_preferred_width(100.0);
-        assert_eq!(fixed.policy_hash, fixed_hash);
-    }
-
-    #[test]
-    fn test_column_spec_hash_includes_index() {
-        let policy = ColumnPolicy::Resizable {
-            min: 40.0,
-            preferred: 120.0,
-            clip: false,
-        };
-        let first = ColumnSpec::new(0, "Header", policy.clone(), None);
-        let second = ColumnSpec::new(1, "Header", policy, None);
-        assert_ne!(first.policy_hash, second.policy_hash);
-    }
-
-    #[test]
-    fn test_compute_column_stats_empty() {
-        let stats = compute_column_stats(&[], &[], 10);
-        assert!(stats.is_empty());
-    }
-
-    #[test]
-    fn test_classify_date_status_notes_columns() {
-        let mut remainder = 0usize;
-        let date_policy = classify_column("Date", 0, &mut remainder, None, 14.0);
-        let status_policy = classify_column("Status", 1, &mut remainder, None, 14.0);
-        let notes_policy = classify_column("Notes", 2, &mut remainder, None, 14.0);
-
-        assert!(matches!(date_policy, ColumnPolicy::Fixed { .. }));
-        assert!(matches!(status_policy, ColumnPolicy::Fixed { .. }));
-        assert!(matches!(notes_policy, ColumnPolicy::Resizable { .. }));
-    }
-
-    #[test]
-    fn test_derive_column_specs_remainder_for_rich_content() {
-        let headers = vec![vec![span("Body")]];
-        let rows = vec![vec![vec![InlineSpan::Link {
-            text: "verylonglinkword".to_string(),
-            url: "https://example.invalid".to_string(),
-        }]]];
-        let stats = compute_column_stats(&headers, &rows, 32);
-        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
-        let specs = derive_column_specs(&ctx);
-
-        assert!(matches!(specs[0].policy, ColumnPolicy::Remainder { .. }));
-    }
-
-    #[test]
-    fn test_normalize_body_font_px_defaults_for_invalid_values() {
-        assert_eq!(normalize_body_font_px(f32::NAN), 14.0);
-        assert_eq!(normalize_body_font_px(-10.0), 14.0);
-        assert_eq!(normalize_body_font_px(0.0), 14.0);
-        assert_eq!(normalize_body_font_px(12.0), 12.0);
-        assert_eq!(px(10.0, 2.0), 20.0);
-    }
-
-    #[test]
-    fn test_column_policy_tooltip_variants_for_clip_flags() {
-        let fixed = ColumnPolicy::Fixed {
-            width: 120.0,
-            clip: false,
-        };
-        let remainder = ColumnPolicy::Remainder { clip: true };
-
-        let fixed_tooltip = column_tooltip("Fixed", &fixed).expect("tooltip");
-        assert!(!fixed_tooltip.contains("clipped"));
-
-        let remainder_tooltip = column_tooltip("Remainder", &remainder).expect("tooltip");
-        assert!(remainder_tooltip.contains("clipped"));
-    }
-
-    #[test]
-    fn test_set_policy_updates_hash() {
-        let mut spec = ColumnSpec::new(0, "col", ColumnPolicy::Auto, None);
-        let original = spec.policy_hash;
-        spec.set_policy(ColumnPolicy::Fixed {
-            width: 100.0,
-            clip: true,
-        });
-        assert_ne!(spec.policy_hash, original);
-    }
-
-    #[test]
-    fn test_apply_preferred_width_updates_preferred_value() {
-        let mut spec = ColumnSpec::new(
-            0,
-            "body",
-            ColumnPolicy::Resizable {
-                min: 50.0,
-                preferred: 120.0,
-                clip: false,
-            },
-            None,
-        );
-        spec.apply_preferred_width(180.0);
-        assert!(matches!(spec.policy, ColumnPolicy::Resizable { .. }));
-    }
-
-    #[test]
-    fn test_column_policy_hash_variants() {
-        let policies = [
-            ColumnPolicy::Auto,
-            ColumnPolicy::Fixed {
-                width: 120.0,
-                clip: true,
-            },
-            ColumnPolicy::Remainder { clip: true },
-            ColumnPolicy::Resizable {
-                min: 40.0,
-                preferred: 120.0,
-                clip: true,
-            },
-        ];
-        for policy in policies {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            policy.hash(&mut hasher);
-            let _ = hasher.finish();
-        }
-    }
-
-    #[test]
-    fn test_column_policy_to_column_clipped_variants() {
-        let fixed = ColumnPolicy::Fixed {
-            width: 120.0,
-            clip: true,
-        };
-        let fixed_unclipped = ColumnPolicy::Fixed {
-            width: 120.0,
-            clip: false,
-        };
-        let remainder = ColumnPolicy::Remainder { clip: true };
-        let resizable = ColumnPolicy::Resizable {
-            min: 40.0,
-            preferred: 120.0,
-            clip: true,
-        };
-        let _ = fixed.to_column();
-        let _ = fixed_unclipped.to_column();
-        let _ = remainder.to_column();
-        let _ = resizable.to_column();
-    }
-
-    #[test]
-    fn test_column_needs_remainder_none_is_false() {
-        assert!(!column_needs_remainder(None));
-    }
-
-    #[test]
-    fn test_accumulate_stats_for_cell_tracks_images() {
-        let spans = vec![InlineSpan::Image {
-            src: "img.png".to_string(),
-            alt: "Alt".to_string(),
-            title: None,
-        }];
-        let mut stat = ColumnStat::default();
-        accumulate_stats_for_cell(&spans, &mut stat);
-        assert!(stat.rich_content.has_image);
-    }
-
-    #[test]
-    fn test_accumulate_stats_detects_emoji_like_text() {
-        let emoji = char::from_u32(0x1F600).expect("emoji");
-        let spans = vec![InlineSpan::Text(format!("Hello {emoji}"))];
-        let mut stat = ColumnStat::default();
-        accumulate_stats_for_cell(&spans, &mut stat);
-        assert!(stat.rich_content.has_emoji_like);
-    }
-
-    #[test]
-    fn test_remainder_cap_forces_resizable() {
-        let mut remainder = MAX_REMAINDER_COLUMNS;
-        let stat = ColumnStat {
-            max_graphemes: 80,
-            longest_word: 40,
-            rich_content: RichContentFlags {
-                has_link: true,
-                has_image: false,
-                has_emoji_like: false,
-            },
-        };
-        let policy = classify_column("Notes", 2, &mut remainder, Some(&stat), 14.0);
-        assert!(matches!(policy, ColumnPolicy::Resizable { .. }));
-    }
-
-    #[test]
-    fn test_compute_column_stats_respects_max_samples() {
-        let headers = vec![vec![span("Header")]];
-        let rows = vec![
-            vec![vec![span("short")]],
-            vec![vec![span("this_is_a_much_longer_token")]],
-        ];
-        let stats = compute_column_stats(&headers, &rows, 1);
-        assert_eq!(stats.len(), 1);
-        assert!(stats[0].longest_word < 20, "should ignore second row");
-    }
-
-    #[test]
-    fn test_accumulate_stats_preserves_existing_flags() {
-        let mut stat = ColumnStat {
-            max_graphemes: 0,
-            longest_word: 0,
-            rich_content: RichContentFlags {
-                has_link: false,
-                has_image: true,
-                has_emoji_like: false,
-            },
-        };
-        accumulate_stats_for_cell(&[InlineSpan::Text("plain".to_string())], &mut stat);
-        assert!(stat.rich_content.has_image);
-        assert!(!stat.rich_content.has_link);
-    }
-
-    #[test]
-    fn test_derive_column_specs_empty_context_returns_empty() {
-        let headers: Vec<Vec<InlineSpan>> = Vec::new();
-        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
-        let stats: Vec<ColumnStat> = Vec::new();
-        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
-        let specs = derive_column_specs(&ctx);
-        assert!(specs.is_empty());
-    }
-
-    #[test]
     fn test_header_text_link_and_image_first() {
         let spans = vec![InlineSpan::Link {
             text: "Docs".to_string(),
@@ -1096,68 +453,95 @@ mod tests {
         assert_eq!(header_text(&spans), "Diagram");
     }
 
+    // -------------------------------------------------------------------
+    // Tests for derive_column_specs (simplified model: all Resizable)
+    // -------------------------------------------------------------------
+
     #[test]
-    fn test_column_needs_remainder_true_for_long_words() {
-        let stat = ColumnStat {
-            max_graphemes: 10,
-            longest_word: 24,
-            rich_content: RichContentFlags {
-                has_link: false,
-                has_image: false,
-                has_emoji_like: false,
-            },
-        };
-        assert!(column_needs_remainder(Some(&stat)));
+    fn test_derive_column_specs_empty_context_returns_empty() {
+        let headers: Vec<Vec<InlineSpan>> = Vec::new();
+        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
+        let stats: Vec<ColumnStat> = Vec::new();
+        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
+        let specs = derive_column_specs(&ctx);
+        assert!(specs.is_empty());
     }
 
     #[test]
-    fn test_column_needs_remainder_true_for_images() {
-        let stat = ColumnStat {
-            max_graphemes: 5,
-            longest_word: 5,
-            rich_content: RichContentFlags {
-                has_link: false,
-                has_image: true,
-                has_emoji_like: false,
-            },
-        };
-        assert!(column_needs_remainder(Some(&stat)));
+    fn test_derive_column_specs_all_resizable() {
+        let headers = vec![vec![span("Game")], vec![span("Year")], vec![span("Notes")]];
+        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
+        let stats = compute_column_stats(&headers, &rows, 32);
+        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
+        let specs = derive_column_specs(&ctx);
+        assert_eq!(specs.len(), 3);
+        for spec in &specs {
+            assert!(matches!(spec.policy, ColumnPolicy::Resizable { .. }));
+        }
     }
 
     #[test]
-    fn test_classify_column_skips_remainder_when_limit_reached() {
-        let mut remainder_assigned = MAX_REMAINDER_COLUMNS;
-        let stat = ColumnStat {
-            max_graphemes: 2,
-            longest_word: 2,
-            rich_content: RichContentFlags {
-                has_link: false,
-                has_image: true,
-                has_emoji_like: false,
-            },
-        };
-        let policy = classify_column("misc", 1, &mut remainder_assigned, Some(&stat), 14.0);
-        assert!(matches!(policy, ColumnPolicy::Resizable { .. }));
+    fn test_derive_column_specs_min_from_header_width() {
+        let headers = vec![vec![span("A")], vec![span("LongHeaderText")]];
+        let rows: Vec<Vec<Vec<InlineSpan>>> = Vec::new();
+        let stats = compute_column_stats(&headers, &rows, 32);
+        let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
+        let specs = derive_column_specs(&ctx);
+        let min_a = match specs[0].policy { ColumnPolicy::Resizable { min } => min };
+        let min_long = match specs[1].policy { ColumnPolicy::Resizable { min } => min };
+        assert!(min_long > min_a, "longer header should have larger min");
+    }
+
+    // -------------------------------------------------------------------
+    // Tests for ColumnPolicy / ColumnSpec
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_column_policy_to_column_resizable() {
+        let policy = ColumnPolicy::Resizable { min: 80.0 };
+        let _col = policy.to_column(); // should not panic
     }
 
     #[test]
-    fn test_accumulate_stats_empty_text_and_existing_emoji_flag() {
-        let mut stat = ColumnStat {
-            max_graphemes: 0,
-            longest_word: 0,
-            rich_content: RichContentFlags {
-                has_link: false,
-                has_image: false,
-                has_emoji_like: true,
-            },
-        };
-        accumulate_stats_for_cell(&[InlineSpan::Text("Hello".to_string())], &mut stat);
-        assert!(stat.rich_content.has_emoji_like);
-
-        let mut empty_stat = ColumnStat::default();
-        accumulate_stats_for_cell(&[], &mut empty_stat);
-        assert_eq!(empty_stat.max_graphemes, 0);
+    fn test_set_policy_updates_hash() {
+        let mut spec = ColumnSpec::new(0, "col", ColumnPolicy::Resizable { min: 50.0 });
+        let original = spec.policy_hash;
+        spec.set_policy(ColumnPolicy::Resizable { min: 100.0 });
+        assert_ne!(spec.policy_hash, original);
     }
+
+    #[test]
+    fn test_column_spec_hash_includes_index() {
+        let policy = ColumnPolicy::Resizable { min: 40.0 };
+        let first = ColumnSpec::new(0, "Header", policy.clone());
+        let second = ColumnSpec::new(1, "Header", policy);
+        assert_ne!(first.policy_hash, second.policy_hash);
+    }
+
+    #[test]
+    fn test_column_policy_hash_single_variant() {
+        let policy = ColumnPolicy::Resizable { min: 80.0 };
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        policy.hash(&mut hasher);
+        let _ = hasher.finish();
+    }
+
+    // -------------------------------------------------------------------
+    // Tests for normalize_body_font_px / px
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_normalize_body_font_px_defaults_for_invalid_values() {
+        assert_eq!(normalize_body_font_px(f32::NAN), 14.0);
+        assert_eq!(normalize_body_font_px(-10.0), 14.0);
+        assert_eq!(normalize_body_font_px(0.0), 14.0);
+        assert_eq!(normalize_body_font_px(12.0), 12.0);
+        assert_eq!(px(10.0, 2.0), 20.0);
+    }
+
+    // -------------------------------------------------------------------
+    // Tests for emoji detection
+    // -------------------------------------------------------------------
 
     #[test]
     fn test_emoji_detection_covers_all_blocks() {
@@ -1191,6 +575,10 @@ mod tests {
         assert!(!is_emoji_like('0'));
         assert!(!is_emoji_like(' '));
     }
+
+    // -------------------------------------------------------------------
+    // Tests for jagged rows
+    // -------------------------------------------------------------------
 
     #[test]
     fn test_compute_column_stats_jagged_rows() {

@@ -799,15 +799,12 @@ struct TableLayoutPlan {
     resolved_widths: Vec<f32>,
     adjusted_widths: Vec<f32>,
     natural_widths: Vec<f32>,
-    min_floor: f32,
     column_spacing: f32,
     viewport_width: f32,
-    available_for_columns: f32,
     content_width: f32,
     effective_width: f32,
     content_fits: bool,
     use_hscroll: bool,
-    scaled_down: bool,
 }
 
 /// Bundles post-render geometry tracking variables collected during the
@@ -4532,7 +4529,7 @@ impl MarkdownRenderer {
     /// Three modes depending on scroll/fit state:
     /// - **hscroll**: columns use their native policy from `ColumnSpec::as_column()`.
     /// - **content-fit**: columns sized to natural content width, all resizable.
-    /// - **viewport-fill**: columns use adjusted widths with policy-specific logic.
+    /// - **viewport-fill**: columns use adjusted widths, all resizable.
     ///
     /// This is a pure function with no `&self` — it only transforms the inputs.
     fn build_table_column_layout(
@@ -4542,38 +4539,27 @@ impl MarkdownRenderer {
         min_floor: f32,
         use_hscroll: bool,
         content_fits: bool,
-        scaled_down: bool,
     ) -> Vec<Column> {
         if use_hscroll {
             column_specs.iter().map(|spec| spec.as_column()).collect()
         } else if content_fits {
-            // CONTENT-FIT MODE — columns sized to content, no Remainder expansion.
+            // CONTENT-FIT MODE — columns sized to content, all resizable.
             column_specs
                 .iter()
                 .enumerate()
-                .map(|(idx, spec)| {
+                .map(|(idx, _spec)| {
                     let width = natural_widths
                         .get(idx)
                         .copied()
                         .unwrap_or(min_floor)
                         .max(1.0);
-                    let clip = match spec.policy {
-                        ColumnPolicy::Fixed { clip, .. } => clip,
-                        ColumnPolicy::Resizable { clip, .. } => clip,
-                        ColumnPolicy::Remainder { clip } => clip,
-                        ColumnPolicy::Auto => false,
-                    };
-                    let mut col = Column::initial(width)
+                    Column::initial(width)
                         .at_least(min_floor.min(width))
-                        .resizable(true);
-                    if clip {
-                        col = col.clip(true);
-                    }
-                    col
+                        .resizable(true)
                 })
                 .collect()
         } else {
-            // VIEWPORT-FILL MODE — existing policy logic unchanged.
+            // VIEWPORT-FILL MODE — all columns resizable with adjusted widths.
             column_specs
                 .iter()
                 .enumerate()
@@ -4583,46 +4569,12 @@ impl MarkdownRenderer {
                         .copied()
                         .unwrap_or(min_floor)
                         .max(1.0);
-                    match spec.policy {
-                        ColumnPolicy::Fixed { width, clip } => {
-                            let mut col = Column::exact(width);
-                            if clip {
-                                col = col.clip(true);
-                            }
-                            col
-                        }
-                        ColumnPolicy::Resizable { min, clip, .. } => {
-                            let mut col = Column::initial(width)
-                                .at_least(min.min(width))
-                                .resizable(true);
-                            if clip {
-                                col = col.clip(true);
-                            }
-                            col
-                        }
-                        ColumnPolicy::Remainder { clip } => {
-                            // Always use Column::initial with the pre-computed
-                            // adjusted width (weighted proportionally by natural
-                            // content width in the expansion case, or scaled in
-                            // the scaled_down case). This replaces the old
-                            // Column::remainder() equal-split and ensures the
-                            // rendered column widths match the widths used for
-                            // row-height estimation.
-                            let mut col =
-                                Column::initial(width).at_least(min_floor.min(width));
-                            if clip {
-                                col = col.clip(true);
-                            }
-                            col
-                        }
-                        ColumnPolicy::Auto => {
-                            if scaled_down {
-                                Column::initial(width).at_least(min_floor.min(width))
-                            } else {
-                                Column::auto_with_initial_suggestion(width).at_least(min_floor)
-                            }
-                        }
-                    }
+                    let min = match spec.policy {
+                        ColumnPolicy::Resizable { min } => min,
+                    };
+                    Column::initial(width)
+                        .at_least(min.min(width))
+                        .resizable(true)
                 })
                 .collect()
         }
@@ -4646,6 +4598,7 @@ impl MarkdownRenderer {
         let column_stats = self.column_stats_for_table(table_id, headers, rows, alignments);
         let ctx =
             TableColumnContext::new(headers, rows, &column_stats, self.font_sizes.body, table_id);
+        #[allow(unused_mut)] // mutated only under #[cfg(test)]
         let mut column_specs = derive_column_specs(&ctx);
         #[cfg(test)]
         if let Some(policies) = take_forced_table_policies() {
@@ -4653,7 +4606,6 @@ impl MarkdownRenderer {
                 spec.set_policy(policy);
             }
         }
-        self.apply_persisted_widths(table_id, &mut column_specs);
         let column_aligns: Vec<Align> = (0..column_specs.len())
             .map(|ci| Self::alignment_for_column(alignments, ci))
             .collect();
@@ -4661,14 +4613,13 @@ impl MarkdownRenderer {
         let column_spacing = ui.spacing().item_spacing.x.max(6.0);
         let viewport_width = ui.available_width().max(1.0);
         let min_floor = self.table_min_column_width();
-        let resolved_widths = self.resolve_table_column_widths(table_id, &column_specs, min_floor);
+        let resolved_widths = self.resolve_table_column_widths(table_id, &column_specs);
 
-        // Content-driven table width: estimate natural column widths from content
-        // and policy, then determine if the table fits within the viewport.
+        // Content-driven table width: estimate natural column widths purely from
+        // content statistics, independent of persisted/resolved widths.
         let natural_widths = self.estimate_natural_column_widths(
             &column_stats,
             headers,
-            &resolved_widths,
             column_specs.len(),
         );
         let natural_total = Self::natural_table_width(&natural_widths, column_spacing);
@@ -4678,101 +4629,102 @@ impl MarkdownRenderer {
         let min_widths: Vec<f32> = column_specs
             .iter()
             .map(|spec| match spec.policy {
-                ColumnPolicy::Fixed { width, .. } => width,
-                ColumnPolicy::Resizable { min, .. } => min,
-                ColumnPolicy::Remainder { .. } | ColumnPolicy::Auto => min_floor,
+                ColumnPolicy::Resizable { min } => min,
             })
             .collect();
         let spacing_total = column_spacing * column_specs.len().saturating_sub(1) as f32;
         let available_for_columns = viewport_width - spacing_total;
-        let mut fixed_total = 0.0;
-        let mut flexible_indices: Vec<usize> = Vec::new();
-        let mut remainder_indices: Vec<usize> = Vec::new();
-        for (idx, spec) in column_specs.iter().enumerate() {
-            match spec.policy {
-                ColumnPolicy::Fixed { width, .. } => fixed_total += width,
-                ColumnPolicy::Resizable { .. } => flexible_indices.push(idx),
-                ColumnPolicy::Remainder { .. } => {
-                    flexible_indices.push(idx);
-                    remainder_indices.push(idx);
-                }
-                ColumnPolicy::Auto => flexible_indices.push(idx),
-            }
-        }
-        let min_flex_total: f32 = flexible_indices.iter().map(|idx| min_widths[*idx]).sum();
+
+        // All columns are flexible in the unified model
+        let min_total: f32 = min_widths.iter().sum();
         let desired_total_width = resolved_widths.iter().sum::<f32>() + spacing_total;
         let content_width = desired_total_width.max(viewport_width);
-        let remaining_for_flex = available_for_columns - fixed_total;
-        let use_hscroll = available_for_columns <= 0.0
-            || fixed_total > available_for_columns + 0.5
-            || remaining_for_flex < min_flex_total - 0.5;
+        let use_hscroll =
+            available_for_columns <= 0.0 || available_for_columns < min_total - 0.5;
         let mut adjusted_widths = resolved_widths.clone();
         let mut scaled_down = false;
         if !use_hscroll {
-            let remaining = remaining_for_flex.max(0.0);
-            let flex_total: f32 = flexible_indices
-                .iter()
-                .map(|idx| resolved_widths[*idx])
-                .sum();
-            if flex_total > remaining + 0.5 {
-                if remaining <= min_flex_total + 0.5 {
-                    for idx in &flexible_indices {
-                        adjusted_widths[*idx] = min_widths[*idx].max(1.0);
+            let total: f32 = resolved_widths.iter().sum();
+            if total > available_for_columns + 0.5 {
+                if available_for_columns <= min_total + 0.5 {
+                    for i in 0..column_specs.len() {
+                        adjusted_widths[i] = min_widths[i].max(1.0);
                     }
                 } else {
-                    let extra_total = flex_total - min_flex_total;
-                    let extra_scale = ((remaining - min_flex_total) / extra_total).clamp(0.0, 1.0);
-                    for idx in &flexible_indices {
-                        let min_width = min_widths[*idx];
-                        let desired = resolved_widths[*idx];
+                    let extra_total = total - min_total;
+                    let extra_scale =
+                        ((available_for_columns - min_total) / extra_total).clamp(0.0, 1.0);
+                    for i in 0..column_specs.len() {
+                        let min_width = min_widths[i];
+                        let desired = resolved_widths[i];
                         let extra = (desired - min_width).max(0.0);
-                        adjusted_widths[*idx] = (min_width + extra * extra_scale).max(1.0);
+                        adjusted_widths[i] = (min_width + extra * extra_scale).max(1.0);
                     }
                 }
                 scaled_down = true;
             }
         }
-        // Weighted Remainder allocation: when multiple Remainder columns
-        // exist and there's room to expand (not scaled_down), distribute
-        // the leftover space proportionally by natural content width
-        // instead of the equal split that Column::remainder() gives.
-        // This also aligns estimate widths with render widths — both now
-        // read from adjusted_widths — preventing the height-estimation
-        // drift that causes extra vertical space in rows (see the
-        // monotonic-grow comment in update_row_height).
-        if !use_hscroll && !scaled_down && !remainder_indices.is_empty() {
-            let nat_total: f32 = remainder_indices
-                .iter()
-                .map(|&idx| natural_widths.get(idx).copied().unwrap_or(0.0))
-                .sum();
-            let used_by_others: f32 = adjusted_widths
-                .iter()
-                .enumerate()
-                .filter(|(idx, _)| !remainder_indices.contains(idx))
-                .map(|(_, w)| *w)
-                .sum();
-            let remaining = (available_for_columns - used_by_others).max(0.0);
-            if remaining > 0.0 {
+        // Proportional allocation: distribute available viewport space
+        // proportionally to natural content width. Columns with user-persisted
+        // widths (from drag-to-resize) keep their persisted value; remaining
+        // space is distributed among non-persisted columns.
+        if !use_hscroll && !scaled_down && !content_fits {
+            let persisted: Vec<Option<f32>> = {
+                let metrics = self.table_metrics.borrow();
+                match metrics.entry(table_id) {
+                    Some(entry) => column_specs
+                        .iter()
+                        .map(|spec| entry.persisted_width(spec.policy_hash))
+                        .collect(),
+                    None => vec![None; column_specs.len()],
+                }
+            };
+
+            // Lock persisted columns, compute remaining space for non-persisted
+            let mut remaining = available_for_columns;
+            let mut non_persisted_indices: Vec<usize> = Vec::new();
+            for (i, pw) in persisted.iter().enumerate() {
+                if let Some(width) = pw {
+                    adjusted_widths[i] = width.max(min_widths[i]);
+                    remaining -= adjusted_widths[i];
+                } else {
+                    non_persisted_indices.push(i);
+                }
+            }
+
+            if !non_persisted_indices.is_empty() && remaining > 0.0 {
+                let nat_total: f32 = non_persisted_indices
+                    .iter()
+                    .map(|&idx| natural_widths.get(idx).copied().unwrap_or(0.0))
+                    .sum();
                 if nat_total > 0.0 {
                     let mut alloc_sum = 0.0;
-                    let last = remainder_indices.len() - 1;
-                    for (i, &idx) in remainder_indices.iter().enumerate() {
-                        if i < last {
+                    let last = non_persisted_indices.len() - 1;
+                    for (j, &idx) in non_persisted_indices.iter().enumerate() {
+                        if j < last {
                             let nat = natural_widths.get(idx).copied().unwrap_or(0.0);
-                            let target = (remaining * nat / nat_total).max(min_floor);
+                            let target = (remaining * nat / nat_total).max(min_widths[idx]);
                             adjusted_widths[idx] = target;
                             alloc_sum += target;
                         } else {
-                            // Last Remainder column absorbs rounding residual.
-                            adjusted_widths[idx] = (remaining - alloc_sum).max(min_floor);
+                            adjusted_widths[idx] =
+                                (remaining - alloc_sum).max(min_widths[idx]);
                         }
                     }
                 } else {
-                    // All naturals zero: fall back to equal split.
-                    let per = (remaining / remainder_indices.len() as f32).max(min_floor);
-                    for &idx in &remainder_indices {
-                        adjusted_widths[idx] = per;
+                    let per = (remaining / non_persisted_indices.len() as f32).max(0.0);
+                    for &idx in &non_persisted_indices {
+                        adjusted_widths[idx] = per.max(min_widths[idx]);
                     }
+                }
+            }
+
+            // Defensive: if total exceeds budget (from min clamping), scale down
+            let total: f32 = adjusted_widths.iter().sum();
+            if total > available_for_columns + 0.5 {
+                let scale = available_for_columns / total;
+                for w in adjusted_widths.iter_mut() {
+                    *w = (*w * scale).max(1.0);
                 }
             }
         }
@@ -4783,7 +4735,6 @@ impl MarkdownRenderer {
             min_floor,
             use_hscroll,
             content_fits,
-            scaled_down,
         );
 
         TableLayoutPlan {
@@ -4793,15 +4744,12 @@ impl MarkdownRenderer {
             resolved_widths,
             adjusted_widths,
             natural_widths,
-            min_floor,
             column_spacing,
             viewport_width,
-            available_for_columns,
             content_width,
             effective_width,
             content_fits,
             use_hscroll,
-            scaled_down,
         }
     }
 
@@ -4873,13 +4821,9 @@ impl MarkdownRenderer {
                 plan.natural_widths.clone()
             } else {
                 self.estimate_table_row_widths(
-                    &plan.column_specs,
                     &plan.resolved_widths,
                     &plan.adjusted_widths,
-                    plan.available_for_columns,
-                    plan.min_floor,
                     plan.use_hscroll,
-                    plan.scaled_down,
                 )
             };
             let style = ui.style().clone();
@@ -5210,7 +5154,6 @@ impl MarkdownRenderer {
         &self,
         table_id: u64,
         column_specs: &[ColumnSpec],
-        min_floor: f32,
     ) -> Vec<f32> {
         if column_specs.is_empty() {
             return Vec::new();
@@ -5224,23 +5167,32 @@ impl MarkdownRenderer {
                 .unwrap_or_default()
         };
 
+        // Also check for user-persisted widths (from drag-to-resize)
+        let persisted_widths: Vec<Option<f32>> = {
+            let metrics = self.table_metrics.borrow();
+            match metrics.entry(table_id) {
+                Some(entry) => column_specs
+                    .iter()
+                    .map(|spec| entry.persisted_width(spec.policy_hash))
+                    .collect(),
+                None => vec![None; column_specs.len()],
+            }
+        };
+
         column_specs
             .iter()
             .enumerate()
             .map(|(idx, spec)| {
+                let min = match spec.policy {
+                    ColumnPolicy::Resizable { min } => min,
+                };
+                // Priority: persisted (user-dragged) > stored (frame-tracked) > min
+                let persisted = persisted_widths.get(idx).copied().flatten();
                 let stored = stored_widths
                     .get(idx)
                     .copied()
                     .filter(|width| width.is_finite() && *width > 0.0);
-                let width = match spec.policy {
-                    ColumnPolicy::Fixed { width, .. } => width,
-                    ColumnPolicy::Resizable { min, preferred, .. } => {
-                        stored.unwrap_or(preferred.max(min)).max(min)
-                    }
-                    ColumnPolicy::Remainder { .. } => min_floor,
-                    ColumnPolicy::Auto => stored.unwrap_or(min_floor).max(min_floor),
-                };
-                width.max(1.0)
+                persisted.or(stored).unwrap_or(min).max(min).max(1.0)
             })
             .collect()
     }
@@ -5255,14 +5207,10 @@ impl MarkdownRenderer {
         let column_count = column_specs.len().max(1);
         let spacing_total = column_spacing * column_count.saturating_sub(1) as f32;
         let available = (max_width - spacing_total).max(1.0);
-        let min_floor = self.table_min_column_width();
         let mut widths: Vec<f32> = column_specs
             .iter()
             .map(|spec| match spec.policy {
-                ColumnPolicy::Fixed { width, .. } => width,
-                ColumnPolicy::Resizable { min, .. } => min,
-                ColumnPolicy::Remainder { .. } => min_floor,
-                ColumnPolicy::Auto => min_floor,
+                ColumnPolicy::Resizable { min } => min,
             })
             .map(|width| width.max(1.0))
             .collect();
@@ -5280,22 +5228,16 @@ impl MarkdownRenderer {
         widths
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn estimate_table_row_widths(
         &self,
-        _column_specs: &[ColumnSpec],
         resolved_widths: &[f32],
         adjusted_widths: &[f32],
-        _available_for_columns: f32,
-        _min_floor: f32,
         use_hscroll: bool,
-        _scaled_down: bool,
     ) -> Vec<f32> {
-        // Remainder columns now have their weighted widths pre-computed in
-        // `adjusted_widths` by `compute_table_layout_plan`, so this
-        // function no longer needs to redistribute space. It returns the
-        // widths that the renderer will actually use — critical for height
-        // estimation accuracy (see monotonic-grow comment in
+        // All column widths are pre-computed in `adjusted_widths` by
+        // `compute_table_layout_plan`, so this function simply returns
+        // the widths that the renderer will actually use — critical for
+        // height estimation accuracy (see monotonic-grow comment in
         // `update_row_height`).
         if use_hscroll {
             resolved_widths.to_vec()
@@ -5314,25 +5256,23 @@ impl MarkdownRenderer {
         if column_specs.is_empty() {
             return 0.0;
         }
-        let min_floor = self.table_min_column_width();
-        let widths = self.resolve_table_column_widths(table_id, column_specs, min_floor);
+        let widths = self.resolve_table_column_widths(table_id, column_specs);
         let spacing_total = column_spacing * widths.len().saturating_sub(1) as f32;
         widths.iter().sum::<f32>() + spacing_total
     }
 
-    /// Estimate per-column natural widths from content statistics and
-    /// policy-resolved widths (which include any user-persisted widths).
+    /// Estimate per-column natural widths purely from content statistics.
     ///
-    /// For each column, takes the maximum of:
+    /// For each column, computes:
     /// - Content-based estimate (grapheme count * char_width_factor + cell_padding)
-    /// - Policy-resolved width (from resolve_table_column_widths)
     ///
     /// Each column width is clamped to [MIN_COL_WIDTH, MAX_COL_WIDTH].
+    /// User-persisted widths (from drag-to-resize) are NOT considered here;
+    /// they are applied during proportional allocation in `compute_table_layout_plan`.
     fn estimate_natural_column_widths(
         &self,
         column_stats: &[ColumnStat],
         headers: &[Vec<InlineSpan>],
-        resolved_widths: &[f32],
         column_count: usize,
     ) -> Vec<f32> {
         let body = self.font_sizes.body;
@@ -5357,9 +5297,7 @@ impl MarkdownRenderer {
 
                 let display_graphemes = header_width.max(content_graphemes);
                 let content_width = display_graphemes as f32 * char_width_factor + cell_padding;
-                let policy_width = resolved_widths.get(i).copied().unwrap_or(0.0);
-                let natural = content_width.max(policy_width);
-                natural.clamp(min_col_width, max_col_width)
+                content_width.clamp(min_col_width, max_col_width)
             })
             .collect()
     }
@@ -5502,19 +5440,6 @@ impl MarkdownRenderer {
         metrics.entry_mut(table_id).note_row_rendered();
     }
 
-    fn apply_persisted_widths(&self, table_id: u64, specs: &mut [ColumnSpec]) {
-        if specs.is_empty() {
-            return;
-        }
-        let mut metrics = self.table_metrics.borrow_mut();
-        let entry = metrics.entry_mut(table_id);
-        for spec in specs.iter_mut() {
-            if let Some(width) = entry.persisted_width(spec.policy_hash) {
-                spec.apply_preferred_width(width);
-            }
-        }
-    }
-
     fn persist_resizable_widths(&self, table_id: u64, specs: &[ColumnSpec], widths: &[f32]) {
         if specs.is_empty() || widths.is_empty() {
             return;
@@ -5530,11 +5455,9 @@ impl MarkdownRenderer {
         }
 
         for (spec, width) in specs.iter().zip(widths.iter()) {
-            if let ColumnPolicy::Resizable { .. } = spec.policy {
-                let stored = entry.persisted_width(spec.policy_hash).unwrap_or(-1.0);
-                if stored < 0.0 || (stored - width).abs() > 0.5 {
-                    entry.set_persisted_width(spec.policy_hash, *width);
-                }
+            let stored = entry.persisted_width(spec.policy_hash).unwrap_or(-1.0);
+            if stored < 0.0 || (stored - width).abs() > 0.5 {
+                entry.set_persisted_width(spec.policy_hash, *width);
             }
         }
     }
@@ -7099,22 +7022,17 @@ mod tests {
     }
 
     /// Creates a ColumnSpec with Resizable policy for test use.
-    fn resizable_spec(col: usize, name: &str, min: f32, preferred: f32) -> ColumnSpec {
+    fn resizable_spec(col: usize, name: &str, min: f32) -> ColumnSpec {
         ColumnSpec::new(
             col,
             name,
-            ColumnPolicy::Resizable {
-                min,
-                preferred,
-                clip: false,
-            },
-            None,
+            ColumnPolicy::Resizable { min },
         )
     }
 
-    /// Creates a ColumnSpec with Fixed policy for test use.
-    fn fixed_spec(col: usize, name: &str, width: f32) -> ColumnSpec {
-        ColumnSpec::new(col, name, ColumnPolicy::Fixed { width, clip: false }, None)
+    /// Creates a ColumnSpec with Resizable policy and a specific min width for test use.
+    fn spec_with_min(col: usize, name: &str, width: f32) -> ColumnSpec {
+        ColumnSpec::new(col, name, ColumnPolicy::Resizable { min: width })
     }
 
     #[test]
@@ -8333,7 +8251,7 @@ mod tests {
     #[test]
     fn test_persist_resizable_widths_returns_on_empty_widths() {
         let renderer = MarkdownRenderer::new();
-        let spec = resizable_spec(0, "A", 20.0, 80.0);
+        let spec = resizable_spec(0, "A", 20.0);
         let table_id = 7u64;
         renderer.persist_resizable_widths(table_id, &[spec], &[]);
         let metrics = renderer.table_metrics.borrow();
@@ -8806,7 +8724,7 @@ mod tests {
     fn font_size_change_does_not_repersist_stale_widths() {
         let mut renderer = MarkdownRenderer::new();
         let table_id = 7u64;
-        let specs = vec![resizable_spec(0, "A", 20.0, 100.0)];
+        let specs = vec![resizable_spec(0, "A", 20.0)];
         let widths = vec![100.0f32];
 
         // Initial persist at default font size.
@@ -8843,7 +8761,7 @@ mod tests {
     fn highlight_phrase_keeps_persisted_table_widths() {
         let renderer = MarkdownRenderer::new();
         let table_id = 11u64;
-        let specs = vec![resizable_spec(0, "A", 20.0, 100.0)];
+        let specs = vec![resizable_spec(0, "A", 20.0)];
         let widths = vec![120.0f32];
         let policy_hash = specs[0].policy_hash;
 
@@ -10730,8 +10648,8 @@ fn main() {}
     fn test_estimate_table_column_widths_scales_down() {
         let renderer = MarkdownRenderer::new();
         let specs = vec![
-            resizable_spec(0, "A", 100.0, 100.0),
-            resizable_spec(1, "B", 100.0, 100.0),
+            resizable_spec(0, "A", 100.0),
+            resizable_spec(1, "B", 100.0),
         ];
 
         let widths = renderer.estimate_table_column_widths(&specs, 150.0, 10.0);
@@ -10745,15 +10663,11 @@ fn main() {}
         // estimate_table_row_widths just returns adjusted_widths as-is.
         let renderer = MarkdownRenderer::new();
         let min_floor = renderer.table_min_column_width();
-        let specs = vec![
-            fixed_spec(0, "Ord", 80.0),
-            ColumnSpec::new(1, "Params", ColumnPolicy::Remainder { clip: false }, None),
-        ];
         let resolved = vec![80.0, min_floor];
         // Simulate pre-computed weighted width for the Remainder column.
         let adjusted = vec![80.0, 240.0];
         let widths = renderer.estimate_table_row_widths(
-            &specs, &resolved, &adjusted, 320.0, min_floor, false, false,
+            &resolved, &adjusted, false,
         );
         assert!((widths[0] - 80.0).abs() < 0.1);
         assert!((widths[1] - 240.0).abs() < 0.1, "should pass through adjusted_widths");
@@ -12972,17 +12886,10 @@ contexts:
     fn test_render_table_tablebuilder_forced_policies() {
         let renderer = MarkdownRenderer::new();
         let _forced = ForcedTablePolicies::new(vec![
-            ColumnPolicy::Auto,
-            ColumnPolicy::Fixed {
-                width: 120.0,
-                clip: true,
-            },
-            ColumnPolicy::Resizable {
-                min: 60.0,
-                preferred: 120.0,
-                clip: true,
-            },
-            ColumnPolicy::Remainder { clip: true },
+            ColumnPolicy::Resizable { min: 30.0 },
+            ColumnPolicy::Resizable { min: 120.0 },
+            ColumnPolicy::Resizable { min: 60.0 },
+            ColumnPolicy::Resizable { min: 40.0 },
         ]);
         let headers = vec![
             vec![InlineSpan::Text("A".to_string())],
@@ -13006,14 +12913,8 @@ contexts:
     fn test_render_table_tablebuilder_fixed_columns_no_clip() {
         let renderer = MarkdownRenderer::new();
         let _forced = ForcedTablePolicies::new(vec![
-            ColumnPolicy::Fixed {
-                width: 80.0,
-                clip: false,
-            },
-            ColumnPolicy::Fixed {
-                width: 100.0,
-                clip: false,
-            },
+            ColumnPolicy::Resizable { min: 80.0 },
+            ColumnPolicy::Resizable { min: 100.0 },
         ]);
         let headers = vec![
             vec![InlineSpan::Text("Left".to_string())],
@@ -13038,17 +12939,10 @@ contexts:
     fn test_render_table_tablebuilder_non_scaled_clip_variants() {
         let renderer = MarkdownRenderer::new();
         let _forced = ForcedTablePolicies::new(vec![
-            ColumnPolicy::Fixed {
-                width: 80.0,
-                clip: true,
-            },
-            ColumnPolicy::Resizable {
-                min: 60.0,
-                preferred: 140.0,
-                clip: true,
-            },
-            ColumnPolicy::Remainder { clip: true },
-            ColumnPolicy::Auto,
+            ColumnPolicy::Resizable { min: 80.0 },
+            ColumnPolicy::Resizable { min: 60.0 },
+            ColumnPolicy::Resizable { min: 40.0 },
+            ColumnPolicy::Resizable { min: 30.0 },
         ]);
         let headers = vec![
             vec![InlineSpan::Text("Fixed".to_string())],
@@ -13078,16 +12972,8 @@ contexts:
     fn test_render_table_tablebuilder_scaled_down_min_flex_forced() {
         let renderer = MarkdownRenderer::new();
         let _forced = ForcedTablePolicies::new(vec![
-            ColumnPolicy::Resizable {
-                min: 50.0,
-                preferred: 120.0,
-                clip: false,
-            },
-            ColumnPolicy::Resizable {
-                min: 50.0,
-                preferred: 120.0,
-                clip: false,
-            },
+            ColumnPolicy::Resizable { min: 50.0 },
+            ColumnPolicy::Resizable { min: 50.0 },
         ]);
         let headers = vec![
             vec![InlineSpan::Text("A".to_string())],
@@ -13132,9 +13018,8 @@ contexts:
     #[test]
     fn test_render_table_estimates_wrapped_row_height() {
         let renderer = MarkdownRenderer::new();
-        let _forced = ForcedTablePolicies::new(vec![ColumnPolicy::Fixed {
-            width: 80.0,
-            clip: false,
+        let _forced = ForcedTablePolicies::new(vec![ColumnPolicy::Resizable {
+            min: 80.0,
         }]);
         let headers = vec![vec![InlineSpan::Text("Params".to_string())]];
         let rows = vec![vec![vec![InlineSpan::Text(
@@ -13835,7 +13720,7 @@ contexts:
         let empty = renderer.estimate_table_column_widths(&[], 120.0, 6.0);
         assert_eq!(empty, vec![120.0]);
 
-        let specs = vec![fixed_spec(0, "A", 100.0), fixed_spec(1, "B", 100.0)];
+        let specs = vec![spec_with_min(0, "A", 100.0), spec_with_min(1, "B", 100.0)];
         let widths = renderer.estimate_table_column_widths(&specs, 100.0, 10.0);
         assert_eq!(widths.len(), 2);
         let sum: f32 = widths.iter().sum();
@@ -13845,7 +13730,7 @@ contexts:
     #[test]
     fn test_estimate_table_column_widths_no_scale_when_available() {
         let renderer = MarkdownRenderer::new();
-        let specs = vec![fixed_spec(0, "A", 80.0), fixed_spec(1, "B", 60.0)];
+        let specs = vec![spec_with_min(0, "A", 80.0), spec_with_min(1, "B", 60.0)];
         let widths = renderer.estimate_table_column_widths(&specs, 300.0, 10.0);
         assert_eq!(widths, vec![80.0, 60.0]);
     }
@@ -13870,9 +13755,7 @@ contexts:
                 ..Default::default()
             },
         ];
-        // Small resolved widths so content should dominate
-        let resolved = vec![60.0, 60.0];
-        let widths = renderer.estimate_natural_column_widths(&stats, &headers, &resolved, 2);
+        let widths = renderer.estimate_natural_column_widths(&stats, &headers, 2);
         assert_eq!(widths.len(), 2);
         // body=14.0, char_width_factor=14*0.62=8.68, cell_padding=14*1.8=25.2
         // col0: max(4,20)=20 → 20*8.68+25.2 = 198.8 → clamp(198.8, 56, 490) = 198.8
@@ -13882,8 +13765,9 @@ contexts:
     }
 
     #[test]
-    fn test_natural_widths_uses_max_of_content_and_policy() {
-        // Short content (3 graphemes), policy width 98 should win
+    fn test_natural_widths_purely_content_driven() {
+        // Natural widths are purely content-driven; persisted/policy widths are
+        // NOT considered (they are applied during proportional allocation).
         let renderer = MarkdownRenderer::new();
         let headers = vec![vec![InlineSpan::Text("ID".to_string())]];
         let stats = vec![ColumnStat {
@@ -13892,13 +13776,14 @@ contexts:
         }];
         // body=14.0, char_width_factor=8.68, cell_padding=25.2
         // header "ID" → width 2; max(2,3)=3 → 3*8.68+25.2 = 51.24
-        // policy = 98.0 → max(51.24, 98.0) = 98.0
-        let resolved = vec![98.0];
-        let widths = renderer.estimate_natural_column_widths(&stats, &headers, &resolved, 1);
+        // min_col_width = 56.0, so clamped up to 56.0
+        let widths = renderer.estimate_natural_column_widths(&stats, &headers, 1);
         assert_eq!(widths.len(), 1);
+        let min_col = renderer.font_sizes.body * 4.0; // 56.0
         assert!(
-            (widths[0] - 98.0).abs() < 0.1,
-            "policy should win: got {}",
+            (widths[0] - min_col).abs() < 0.1,
+            "content-only width should be clamped to min {}: got {}",
+            min_col,
             widths[0]
         );
     }
@@ -13910,15 +13795,14 @@ contexts:
         let min_col = 14.0 * 4.0; // 56
         let max_col = 14.0 * 35.0; // 490
 
-        // Tiny content: 1 grapheme → 1*8.68+25.2 = 33.88, policy=10 → clamp to min
+        // Tiny content: 1 grapheme → 1*8.68+25.2 = 33.88 → clamp to min
         let headers_tiny = vec![vec![InlineSpan::Text("X".to_string())]];
         let stats_tiny = vec![ColumnStat {
             max_graphemes: 1,
             ..Default::default()
         }];
-        let resolved_tiny = vec![10.0];
         let widths_tiny =
-            renderer.estimate_natural_column_widths(&stats_tiny, &headers_tiny, &resolved_tiny, 1);
+            renderer.estimate_natural_column_widths(&stats_tiny, &headers_tiny, 1);
         assert!(
             (widths_tiny[0] - min_col).abs() < 0.1,
             "tiny should clamp to min {}: got {}",
@@ -13932,9 +13816,8 @@ contexts:
             max_graphemes: 200,
             ..Default::default()
         }];
-        let resolved_huge = vec![10.0];
         let widths_huge =
-            renderer.estimate_natural_column_widths(&stats_huge, &headers_huge, &resolved_huge, 1);
+            renderer.estimate_natural_column_widths(&stats_huge, &headers_huge, 1);
         assert!(
             (widths_huge[0] - max_col).abs() < 0.1,
             "huge should clamp to max {}: got {}",
@@ -13976,8 +13859,7 @@ contexts:
                 ..Default::default()
             },
         ];
-        let resolved = vec![60.0, 60.0];
-        let widths = renderer.estimate_natural_column_widths(&stats, &headers, &resolved, 2);
+        let widths = renderer.estimate_natural_column_widths(&stats, &headers, 2);
         let total = MarkdownRenderer::natural_table_width(&widths, 6.0);
         assert!(
             total < 1100.0,
@@ -13999,8 +13881,7 @@ contexts:
                 ..Default::default()
             })
             .collect();
-        let resolved: Vec<f32> = vec![80.0; 9];
-        let widths = renderer.estimate_natural_column_widths(&stats, &headers, &resolved, 9);
+        let widths = renderer.estimate_natural_column_widths(&stats, &headers, 9);
         let total = MarkdownRenderer::natural_table_width(&widths, 6.0);
         assert!(
             total > 1100.0,
@@ -14009,7 +13890,7 @@ contexts:
         );
     }
 
-    // Test: column_count exceeds headers/stats/resolved_widths length
+    // Test: column_count exceeds headers/stats length
     #[test]
     fn test_natural_widths_handles_mismatched_lengths() {
         let renderer = MarkdownRenderer::new();
@@ -14019,11 +13900,10 @@ contexts:
             longest_word: 5,
             ..Default::default()
         }]; // only 1 stat
-        let resolved = vec![98.0]; // only 1 width
-                                   // column_count = 3, exceeds all inputs
-        let widths = renderer.estimate_natural_column_widths(&stats, &headers, &resolved, 3);
+            // column_count = 3, exceeds all inputs
+        let widths = renderer.estimate_natural_column_widths(&stats, &headers, 3);
         assert_eq!(widths.len(), 3);
-        // First column should be content/policy-driven
+        // First column should be content-driven
         assert!(widths[0] > 50.0);
         // Remaining columns should be clamped to MIN (body * 4.0 = 56.0)
         let min_col = renderer.font_sizes.body * 4.0;
@@ -14048,11 +13928,10 @@ contexts:
             "\u{540D}\u{524D}\u{5217}\u{5E45}".into(),
         )]]; // 4 CJK chars = 8 display width
         let stats = vec![ColumnStat::default()]; // no content
-        let resolved = vec![0.0]; // no policy
         let widths_ascii =
-            renderer.estimate_natural_column_widths(&stats, &headers_ascii, &resolved, 1);
+            renderer.estimate_natural_column_widths(&stats, &headers_ascii, 1);
         let widths_cjk =
-            renderer.estimate_natural_column_widths(&stats, &headers_cjk, &resolved, 1);
+            renderer.estimate_natural_column_widths(&stats, &headers_cjk, 1);
         // CJK header should produce a wider natural width than ASCII header
         assert!(
             widths_cjk[0] > widths_ascii[0],
@@ -14426,13 +14305,9 @@ contexts:
         let widths = [220.0, 240.0];
         for (idx, width) in widths.iter().enumerate() {
             let _forced = ForcedTablePolicies::new(vec![
-                ColumnPolicy::Resizable {
-                    min: 40.0,
-                    preferred: 200.0,
-                    clip: false,
-                },
-                ColumnPolicy::Auto,
-                ColumnPolicy::Remainder { clip: false },
+                ColumnPolicy::Resizable { min: 40.0 },
+                ColumnPolicy::Resizable { min: 30.0 },
+                ColumnPolicy::Resizable { min: 30.0 },
             ]);
             let input = screen_input(*width, 120.0);
             run_frame_with_input(&ctx, input, |_, ui| {
@@ -14628,13 +14503,12 @@ contexts:
     fn test_table_width_helpers_empty_inputs() {
         let renderer = MarkdownRenderer::new();
         let table_id = 100u64;
-        let mut specs: Vec<ColumnSpec> = Vec::new();
-        renderer.apply_persisted_widths(table_id, &mut specs);
+        let _specs: Vec<ColumnSpec> = Vec::new();
         renderer.persist_resizable_widths(table_id, &[], &[]);
         let change = renderer.record_resolved_widths(table_id, 0, &[]);
         assert!(matches!(change, WidthChange::None));
         assert!(renderer
-            .resolve_table_column_widths(table_id, &[], 10.0)
+            .resolve_table_column_widths(table_id, &[])
             .is_empty());
         assert_eq!(renderer.estimate_table_total_width(table_id, &[], 6.0), 0.0);
         with_test_ui(|_, ui| {
@@ -14675,18 +14549,18 @@ contexts:
             entry.resolved_widths = vec![f32::NAN, -5.0];
         }
         let specs = vec![
-            resizable_spec(0, "A", 20.0, 40.0),
-            ColumnSpec::new(1, "B", ColumnPolicy::Auto, None),
+            resizable_spec(0, "A", 20.0),
+            ColumnSpec::new(1, "B", ColumnPolicy::Resizable { min: 30.0 }),
         ];
-        let widths = renderer.resolve_table_column_widths(table_id, &specs, 30.0);
-        assert_eq!(widths, vec![40.0, 30.0]);
+        let widths = renderer.resolve_table_column_widths(table_id, &specs);
+        assert_eq!(widths, vec![20.0, 30.0]);
     }
 
     #[test]
     fn test_persist_resizable_widths_stores_new_width() {
         let renderer = MarkdownRenderer::new();
         let table_id = 200u64;
-        let specs = vec![resizable_spec(0, "A", 20.0, 100.0)];
+        let specs = vec![resizable_spec(0, "A", 20.0)];
         let widths = vec![140.0f32];
         renderer.persist_resizable_widths(table_id, &specs, &widths);
         let metrics = renderer.table_metrics.borrow();
@@ -14698,7 +14572,7 @@ contexts:
     fn test_persist_resizable_widths_skips_small_delta() {
         let renderer = MarkdownRenderer::new();
         let table_id = 201u64;
-        let spec = resizable_spec(0, "A", 20.0, 100.0);
+        let spec = resizable_spec(0, "A", 20.0);
         let hash = spec.policy_hash;
         let specs = vec![spec];
         renderer.persist_resizable_widths(table_id, &specs, &[120.0]);
@@ -14713,7 +14587,7 @@ contexts:
     fn test_persist_resizable_widths_updates_on_large_delta() {
         let renderer = MarkdownRenderer::new();
         let table_id = 202u64;
-        let spec = resizable_spec(0, "A", 20.0, 100.0);
+        let spec = resizable_spec(0, "A", 20.0);
         let hash = spec.policy_hash;
         let specs = vec![spec];
         renderer.persist_resizable_widths(table_id, &specs, &[120.0]);
@@ -15121,7 +14995,7 @@ contexts:
     #[test]
     fn test_persist_resizable_widths_records_change() {
         let renderer = MarkdownRenderer::new();
-        let spec = resizable_spec(0, "col", 40.0, 80.0);
+        let spec = resizable_spec(0, "col", 40.0);
         let hash = spec.policy_hash;
         renderer.persist_resizable_widths(42, &[spec], &[120.0]);
         let metrics = renderer.table_metrics.borrow();
@@ -15355,11 +15229,11 @@ contexts:
     }
 
     #[test]
-    fn test_estimate_table_column_widths_remainder_and_auto_use_min_floor() {
+    fn test_estimate_table_column_widths_resizable_uses_min() {
         let renderer = MarkdownRenderer::new();
         let specs = vec![
-            ColumnSpec::new(0, "Auto", ColumnPolicy::Auto, None),
-            ColumnSpec::new(1, "Rest", ColumnPolicy::Remainder { clip: true }, None),
+            ColumnSpec::new(0, "ColA", ColumnPolicy::Resizable { min: 30.0 }),
+            ColumnSpec::new(1, "ColB", ColumnPolicy::Resizable { min: 40.0 }),
         ];
         let widths = renderer.estimate_table_column_widths(&specs, 80.0, 8.0);
         assert_eq!(widths.len(), 2);
@@ -16166,23 +16040,11 @@ contexts:
     #[test]
     fn test_estimate_table_row_widths_returns_existing_widths_when_no_remaining_space() {
         let renderer = MarkdownRenderer::new();
-        let specs = vec![
-            ColumnSpec::new(
-                0,
-                "Name",
-                ColumnPolicy::Fixed {
-                    width: 80.0,
-                    clip: false,
-                },
-                None,
-            ),
-            ColumnSpec::new(1, "Notes", ColumnPolicy::Remainder { clip: false }, None),
-        ];
         let resolved = vec![80.0, 40.0];
         let adjusted = resolved.clone();
 
         let widths = renderer
-            .estimate_table_row_widths(&specs, &resolved, &adjusted, 40.0, 8.0, false, false);
+            .estimate_table_row_widths(&resolved, &adjusted, false);
 
         assert_eq!(widths, adjusted);
     }
@@ -16225,157 +16087,81 @@ contexts:
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_build_table_column_layout_viewport_fill_fixed_with_clip() {
+    fn test_build_table_column_layout_viewport_fill_resizable_basic() {
         // Viewport-fill mode: use_hscroll=false, content_fits=false, scaled_down=false
-        // Tests ColumnPolicy::Fixed { clip: true } branch at line 4579-4580
         let specs = vec![ColumnSpec::new(
             0,
             "col0",
-            ColumnPolicy::Fixed {
-                width: 100.0,
-                clip: true,
-            },
-            None,
+            ColumnPolicy::Resizable { min: 100.0 },
         )];
         let natural = vec![100.0];
         let adjusted = vec![100.0];
         let cols = MarkdownRenderer::build_table_column_layout(
-            &specs, &natural, &adjusted, 30.0, false, false, false,
+            &specs, &natural, &adjusted, 30.0, false, false,
         );
         assert_eq!(cols.len(), 1);
     }
 
     #[test]
-    fn test_build_table_column_layout_viewport_fill_resizable_with_clip() {
-        // Tests ColumnPolicy::Resizable { clip: true } branch at line 4588-4589
+    fn test_build_table_column_layout_viewport_fill_resizable_with_min() {
+        // Tests ColumnPolicy::Resizable with different min value
         let specs = vec![ColumnSpec::new(
             0,
             "col0",
-            ColumnPolicy::Resizable {
-                min: 50.0,
-                preferred: 150.0,
-                clip: true,
-            },
-            None,
+            ColumnPolicy::Resizable { min: 50.0 },
         )];
         let natural = vec![150.0];
         let adjusted = vec![150.0];
         let cols = MarkdownRenderer::build_table_column_layout(
-            &specs, &natural, &adjusted, 30.0, false, false, false,
+            &specs, &natural, &adjusted, 30.0, false, false,
         );
         assert_eq!(cols.len(), 1);
     }
 
     #[test]
-    fn test_build_table_column_layout_viewport_fill_remainder_not_scaled_down() {
-        // Tests ColumnPolicy::Remainder { clip: false } with scaled_down=false
-        // Exercises Column::remainder() path at line 4597
+    fn test_build_table_column_layout_viewport_fill_large_adjusted() {
+        // Viewport-fill mode with a wide adjusted width
         let specs = vec![ColumnSpec::new(
             0,
             "col0",
-            ColumnPolicy::Remainder { clip: false },
-            None,
+            ColumnPolicy::Resizable { min: 30.0 },
         )];
         let natural = vec![200.0];
         let adjusted = vec![200.0];
         let cols = MarkdownRenderer::build_table_column_layout(
-            &specs, &natural, &adjusted, 30.0, false, false, false,
+            &specs, &natural, &adjusted, 30.0, false, false,
         );
         assert_eq!(cols.len(), 1);
     }
 
     #[test]
-    fn test_build_table_column_layout_viewport_fill_remainder_with_clip() {
-        // Tests ColumnPolicy::Remainder { clip: true } with scaled_down=false
-        // Exercises clip(true) path at line 4599-4600
+    fn test_build_table_column_layout_viewport_fill_scaled_down() {
+        // Viewport-fill mode with scaled_down=true
         let specs = vec![ColumnSpec::new(
             0,
             "col0",
-            ColumnPolicy::Remainder { clip: true },
-            None,
-        )];
-        let natural = vec![200.0];
-        let adjusted = vec![200.0];
-        let cols = MarkdownRenderer::build_table_column_layout(
-            &specs, &natural, &adjusted, 30.0, false, false, false,
-        );
-        assert_eq!(cols.len(), 1);
-    }
-
-    #[test]
-    fn test_build_table_column_layout_viewport_fill_auto_not_scaled_down() {
-        // Tests ColumnPolicy::Auto with scaled_down=false
-        // Exercises Column::auto_with_initial_suggestion() path at line 4608
-        let specs = vec![ColumnSpec::new(0, "col0", ColumnPolicy::Auto, None)];
-        let natural = vec![120.0];
-        let adjusted = vec![120.0];
-        let cols = MarkdownRenderer::build_table_column_layout(
-            &specs, &natural, &adjusted, 30.0, false, false, false,
-        );
-        assert_eq!(cols.len(), 1);
-    }
-
-    #[test]
-    fn test_build_table_column_layout_viewport_fill_remainder_scaled_down() {
-        // Tests ColumnPolicy::Remainder { clip: false } with scaled_down=true
-        // Exercises Column::initial(width) path at line 4594-4595
-        let specs = vec![ColumnSpec::new(
-            0,
-            "col0",
-            ColumnPolicy::Remainder { clip: false },
-            None,
+            ColumnPolicy::Resizable { min: 30.0 },
         )];
         let natural = vec![200.0];
         let adjusted = vec![100.0];
         let cols = MarkdownRenderer::build_table_column_layout(
-            &specs, &natural, &adjusted, 30.0, false, false, true,
+            &specs, &natural, &adjusted, 30.0, false, false,
         );
         assert_eq!(cols.len(), 1);
     }
 
     #[test]
-    fn test_build_table_column_layout_viewport_fill_auto_scaled_down() {
-        // Tests ColumnPolicy::Auto with scaled_down=true
-        // Exercises Column::initial(width) path at line 4606
-        let specs = vec![ColumnSpec::new(0, "col0", ColumnPolicy::Auto, None)];
-        let natural = vec![120.0];
-        let adjusted = vec![80.0];
-        let cols = MarkdownRenderer::build_table_column_layout(
-            &specs, &natural, &adjusted, 30.0, false, false, true,
-        );
-        assert_eq!(cols.len(), 1);
-    }
-
-    #[test]
-    fn test_build_table_column_layout_content_fit_mode_with_clip() {
+    fn test_build_table_column_layout_content_fit_mode() {
         // Content-fit mode: use_hscroll=false, content_fits=true
-        // Tests the clip branch at lines 4559-4560
         let specs = vec![
-            ColumnSpec::new(
-                0,
-                "col0",
-                ColumnPolicy::Fixed {
-                    width: 80.0,
-                    clip: true,
-                },
-                None,
-            ),
-            ColumnSpec::new(
-                1,
-                "col1",
-                ColumnPolicy::Resizable {
-                    min: 50.0,
-                    preferred: 100.0,
-                    clip: true,
-                },
-                None,
-            ),
-            ColumnSpec::new(2, "col2", ColumnPolicy::Remainder { clip: true }, None),
+            ColumnSpec::new(0, "col0", ColumnPolicy::Resizable { min: 80.0 }),
+            ColumnSpec::new(1, "col1", ColumnPolicy::Resizable { min: 50.0 }),
+            ColumnSpec::new(2, "col2", ColumnPolicy::Resizable { min: 40.0 }),
         ];
         let natural = vec![80.0, 100.0, 200.0];
         let adjusted = vec![80.0, 100.0, 200.0];
         let cols = MarkdownRenderer::build_table_column_layout(
-            &specs, &natural, &adjusted, 30.0, false, true, false,
+            &specs, &natural, &adjusted, 30.0, false, true,
         );
         assert_eq!(cols.len(), 3);
     }
@@ -16384,47 +16170,30 @@ contexts:
     fn test_build_table_column_layout_hscroll_mode() {
         // hscroll mode delegates to ColumnSpec::as_column()
         let specs = vec![
-            ColumnSpec::new(0, "col0", ColumnPolicy::Auto, None),
-            ColumnSpec::new(1, "col1", ColumnPolicy::Remainder { clip: false }, None),
+            ColumnSpec::new(0, "col0", ColumnPolicy::Resizable { min: 30.0 }),
+            ColumnSpec::new(1, "col1", ColumnPolicy::Resizable { min: 40.0 }),
         ];
         let natural = vec![100.0, 200.0];
         let adjusted = vec![100.0, 200.0];
         let cols = MarkdownRenderer::build_table_column_layout(
-            &specs, &natural, &adjusted, 30.0, true, false, false,
+            &specs, &natural, &adjusted, 30.0, true, false,
         );
         assert_eq!(cols.len(), 2);
     }
 
     #[test]
-    fn test_build_table_column_layout_viewport_fill_all_policies_mixed() {
-        // Mix all four policies in viewport-fill mode, not scaled down
+    fn test_build_table_column_layout_viewport_fill_multiple_resizable() {
+        // Multiple resizable columns with different min values in viewport-fill mode
         let specs = vec![
-            ColumnSpec::new(
-                0,
-                "fixed",
-                ColumnPolicy::Fixed {
-                    width: 60.0,
-                    clip: true,
-                },
-                None,
-            ),
-            ColumnSpec::new(
-                1,
-                "resizable",
-                ColumnPolicy::Resizable {
-                    min: 40.0,
-                    preferred: 120.0,
-                    clip: true,
-                },
-                None,
-            ),
-            ColumnSpec::new(2, "remainder", ColumnPolicy::Remainder { clip: true }, None),
-            ColumnSpec::new(3, "auto", ColumnPolicy::Auto, None),
+            ColumnSpec::new(0, "col0", ColumnPolicy::Resizable { min: 60.0 }),
+            ColumnSpec::new(1, "col1", ColumnPolicy::Resizable { min: 40.0 }),
+            ColumnSpec::new(2, "col2", ColumnPolicy::Resizable { min: 30.0 }),
+            ColumnSpec::new(3, "col3", ColumnPolicy::Resizable { min: 50.0 }),
         ];
         let natural = vec![60.0, 120.0, 200.0, 90.0];
         let adjusted = vec![60.0, 120.0, 200.0, 90.0];
         let cols = MarkdownRenderer::build_table_column_layout(
-            &specs, &natural, &adjusted, 30.0, false, false, false,
+            &specs, &natural, &adjusted, 30.0, false, false,
         );
         assert_eq!(cols.len(), 4);
     }
