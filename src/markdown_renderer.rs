@@ -5446,11 +5446,21 @@ impl MarkdownRenderer {
     }
 
     fn update_row_height(&self, table_id: u64, idx: usize, height: f32) {
+        // Monotonic-grow: never shrink a cached row height within a single
+        // table-id session. Why: `body.heterogeneous_rows` accumulates total
+        // content height from the iterator we hand it, regardless of which
+        // rows are actually visible. If a render measurement (smaller than
+        // the prior estimate) replaced the cached value, the next frame's
+        // iterator would yield a smaller total, the outer ScrollArea would
+        // see content shrink, and the scroll position would clamp back to
+        // the top once the user scrolled past the (now invalid) old extent.
+        // Cached heights are bounded by table-id (content hash) and reset
+        // automatically when content/font/zoom changes invalidate the entry.
         let clamped = height.max(self.row_height_fallback());
         let mut metrics = self.table_metrics.borrow_mut();
         let entry = metrics.entry_mut(table_id);
         let row = entry.ensure_row(idx);
-        row.max_height = clamped;
+        row.max_height = row.max_height.max(clamped);
         row.dirty = false;
     }
 
@@ -13125,6 +13135,66 @@ contexts:
             .map(|r| r.max_height)
             .unwrap_or(0.0);
         assert!(height > renderer.row_height_fallback() + 0.5);
+    }
+
+    /// Regression test for the scroll-jumps-to-top bug.
+    ///
+    /// When estimates over-predict and a row's render measurement comes in
+    /// SMALLER, the cache must NOT shrink — otherwise the total content
+    /// height that `body.heterogeneous_rows` reports to the outer ScrollArea
+    /// would shrink as the user scrolls, and the scroll position would
+    /// clamp back to the top.
+    ///
+    /// Conversely, when measurements come in LARGER than the cached value
+    /// (estimate under-predicted), the cache must grow so allocated row
+    /// slots can hold the actual content.
+    #[test]
+    fn test_update_row_height_monotonic_grow() {
+        let renderer = MarkdownRenderer::new();
+        let table_id = 0x1234_5678;
+        let fallback = renderer.row_height_fallback();
+        let big = fallback + 100.0;
+        let small = fallback + 10.0;
+
+        // Initial set
+        renderer.update_row_height(table_id, 0, big);
+        let h1 = renderer
+            .table_metrics
+            .borrow()
+            .entry(table_id)
+            .and_then(|e| e.row(0))
+            .map(|r| r.max_height)
+            .unwrap();
+        assert!((h1 - big).abs() < 0.01);
+
+        // Smaller measurement must NOT shrink the cache
+        renderer.update_row_height(table_id, 0, small);
+        let h2 = renderer
+            .table_metrics
+            .borrow()
+            .entry(table_id)
+            .and_then(|e| e.row(0))
+            .map(|r| r.max_height)
+            .unwrap();
+        assert!(
+            (h2 - big).abs() < 0.01,
+            "monotonic-grow: cache must not shrink; expected {big}, got {h2}"
+        );
+
+        // Larger measurement MUST grow the cache
+        let bigger = big + 50.0;
+        renderer.update_row_height(table_id, 0, bigger);
+        let h3 = renderer
+            .table_metrics
+            .borrow()
+            .entry(table_id)
+            .and_then(|e| e.row(0))
+            .map(|r| r.max_height)
+            .unwrap();
+        assert!(
+            (h3 - bigger).abs() < 0.01,
+            "monotonic-grow: cache must grow on larger value; expected {bigger}, got {h3}"
+        );
     }
 
     #[test]
