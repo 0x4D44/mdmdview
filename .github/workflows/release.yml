@@ -206,6 +206,10 @@ jobs:
             Set-Content $installerManifest.FullName -Value $content -NoNewline
           }
 
-          # Submit the patched manifests
-          .\wingetcreate.exe submit manifests `
+          # Submit the patched manifests.
+          # wingetcreate update --out manifests places yamls in
+          # manifests/manifests/<letter>/<publisher>/<package>/<version>/ ; submit
+          # expects the leaf directory containing those yamls directly, so derive
+          # it from the installer manifest we just located.
+          .\wingetcreate.exe submit $installerManifest.Directory.FullName `
             --token "${{ steps.winget-config.outputs.winget_token }}"
