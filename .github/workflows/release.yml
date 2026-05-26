@@ -197,13 +197,39 @@ jobs:
             --urls $installerUrl `
             --out manifests
 
-          # Ensure ElevationRequirement is present (perMachine MSI needs elevation)
+          # Strip ElevationRequirement from the generated installer manifest.
+          #
+          # Background: previously this step ADDED ElevationRequirement:
+          # elevationRequired, on the assumption that perMachine MSIs need it.
+          # That turned out to be wrong AND actively harmful:
+          #
+          #   - winget honors ElevationRequirement: elevationRequired by trying to
+          #     elevate the installer via ShellExecuteEx(verb="runas"). For .exe
+          #     installers that works (the EXE ProgId has an implicit runas verb).
+          #     For .msi installers it FAILS: the Msi.Package ProgId only defines
+          #     Open / Repair / Uninstall verbs, not runas. ShellExecuteEx returns
+          #     SE_ERR_NOASSOC and the user sees a dialog saying "This file does
+          #     not have an app associated with it for performing this action."
+          #     `sudo winget install` works only because winget is already
+          #     elevated and skips the runas step.
+          #
+          #   - The correct path for a perMachine MSI is: winget launches the
+          #     installer via the default `open` verb (= msiexec /i "%1" %*),
+          #     msiexec sees ALLUSERS=1 + the Privileged bit in the Word Count
+          #     summary, and triggers its own UAC prompt under /passive. This is
+          #     how essentially every perMachine MSI on winget works.
+          #
+          # `wingetcreate update` inherits ElevationRequirement from the existing
+          # published manifest (and may auto-detect it from the MSI), so we have
+          # to strip it on every release, not just add-if-missing.
           $installerManifest = Get-ChildItem -Path manifests -Recurse -Filter '*.installer.yaml' | Select-Object -First 1
           $content = Get-Content $installerManifest.FullName -Raw
-          if ($content -notmatch 'ElevationRequirement') {
-            Write-Host "Adding ElevationRequirement: elevationRequired"
-            $content = $content -replace '(InstallModes:)', "ElevationRequirement: elevationRequired`n`$1"
+          if ($content -match '(?m)^\s*ElevationRequirement:.*\r?\n') {
+            Write-Host "Stripping ElevationRequirement from installer manifest"
+            $content = $content -replace '(?m)^\s*ElevationRequirement:.*\r?\n', ''
             Set-Content $installerManifest.FullName -Value $content -NoNewline
+          } else {
+            Write-Host "ElevationRequirement not present in generated manifest (good)"
           }
 
           # Submit the patched manifests.
