@@ -2577,13 +2577,11 @@ impl MarkdownRenderer {
                         text.push(' ');
                     }
                 }
-                Event::Html(html) => {
-                    if Self::is_html_line_break(html) {
-                        if keep_breaks {
-                            text.push('\n');
-                        } else {
-                            text.push(' ');
-                        }
+                Event::Html(html) if Self::is_html_line_break(html) => {
+                    if keep_breaks {
+                        text.push('\n');
+                    } else {
+                        text.push(' ');
                     }
                 }
                 _ => {}
@@ -4602,7 +4600,7 @@ impl MarkdownRenderer {
         let mut column_specs = derive_column_specs(&ctx);
         #[cfg(test)]
         if let Some(policies) = take_forced_table_policies() {
-            for (spec, policy) in column_specs.iter_mut().zip(policies.into_iter()) {
+            for (spec, policy) in column_specs.iter_mut().zip(policies) {
                 spec.set_policy(policy);
             }
         }
@@ -4617,11 +4615,8 @@ impl MarkdownRenderer {
 
         // Content-driven table width: estimate natural column widths purely from
         // content statistics, independent of persisted/resolved widths.
-        let natural_widths = self.estimate_natural_column_widths(
-            &column_stats,
-            headers,
-            column_specs.len(),
-        );
+        let natural_widths =
+            self.estimate_natural_column_widths(&column_stats, headers, column_specs.len());
         let natural_total = Self::natural_table_width(&natural_widths, column_spacing);
         let effective_width = natural_total.min(viewport_width);
         let content_fits = effective_width < viewport_width - 0.5;
@@ -4639,8 +4634,7 @@ impl MarkdownRenderer {
         let min_total: f32 = min_widths.iter().sum();
         let desired_total_width = resolved_widths.iter().sum::<f32>() + spacing_total;
         let content_width = desired_total_width.max(viewport_width);
-        let use_hscroll =
-            available_for_columns <= 0.0 || available_for_columns < min_total - 0.5;
+        let use_hscroll = available_for_columns <= 0.0 || available_for_columns < min_total - 0.5;
         let mut adjusted_widths = resolved_widths.clone();
         let mut scaled_down = false;
         if !use_hscroll {
@@ -4707,8 +4701,7 @@ impl MarkdownRenderer {
                             adjusted_widths[idx] = target;
                             alloc_sum += target;
                         } else {
-                            adjusted_widths[idx] =
-                                (remaining - alloc_sum).max(min_widths[idx]);
+                            adjusted_widths[idx] = (remaining - alloc_sum).max(min_widths[idx]);
                         }
                     }
                 } else {
@@ -4999,58 +4992,50 @@ impl MarkdownRenderer {
                             // pre-computed estimate. See estimate_table_pass_heights for
                             // why we estimate every row up-front.
                             let row_heights_for_body = row_heights.clone();
-                            body.heterogeneous_rows(
-                                row_heights_for_body.into_iter(),
-                                |mut row| {
-                                    let idx = row.index();
-                                    let row_cells = rows.get(idx);
-                                    let mut actual_row_height = fallback_row_height;
-                                    for ci in 0..plan.column_specs.len() {
-                                        let mut cell_height = fallback_row_height;
-                                        row.col(|ui| {
-                                            let width = ui.available_width().max(1.0);
-                                            let spans = row_cells
-                                                .and_then(|cells| cells.get(ci))
-                                                .map(|cell| cell.as_slice())
-                                                .unwrap_or(&[]);
-                                            let halign = plan
-                                                .column_aligns
-                                                .get(ci)
-                                                .copied()
-                                                .unwrap_or(Align::LEFT);
-                                            cell_height = self.render_overhauled_cell(
-                                                ui,
-                                                spans,
-                                                width,
-                                                false,
-                                                Some(idx),
-                                                ci,
-                                                halign,
-                                            );
-                                            // max_rect() for allocated bounds; see header comment.
-                                            Self::extend_table_rect(
-                                                &mut body_rect,
-                                                ui.max_rect(),
-                                            );
-                                            if body_clip_rect.borrow().is_none() {
-                                                *body_clip_rect.borrow_mut() = Some(ui.clip_rect());
-                                            }
-                                        });
-                                        actual_row_height = actual_row_height.max(cell_height);
-                                    }
-                                    // Compare against THIS row's estimate (not a uniform value)
-                                    // so we can request a repaint when our prediction was off.
-                                    let estimated = row_heights
-                                        .get(idx)
-                                        .copied()
-                                        .unwrap_or(fallback_row_height);
-                                    if (actual_row_height - estimated).abs() > 0.5 {
-                                        height_change = true;
-                                    }
-                                    self.update_row_height(table_id, idx, actual_row_height);
-                                    self.note_row_rendered(table_id);
-                                },
-                            );
+                            body.heterogeneous_rows(row_heights_for_body.into_iter(), |mut row| {
+                                let idx = row.index();
+                                let row_cells = rows.get(idx);
+                                let mut actual_row_height = fallback_row_height;
+                                for ci in 0..plan.column_specs.len() {
+                                    let mut cell_height = fallback_row_height;
+                                    row.col(|ui| {
+                                        let width = ui.available_width().max(1.0);
+                                        let spans = row_cells
+                                            .and_then(|cells| cells.get(ci))
+                                            .map(|cell| cell.as_slice())
+                                            .unwrap_or(&[]);
+                                        let halign = plan
+                                            .column_aligns
+                                            .get(ci)
+                                            .copied()
+                                            .unwrap_or(Align::LEFT);
+                                        cell_height = self.render_overhauled_cell(
+                                            ui,
+                                            spans,
+                                            width,
+                                            false,
+                                            Some(idx),
+                                            ci,
+                                            halign,
+                                        );
+                                        // max_rect() for allocated bounds; see header comment.
+                                        Self::extend_table_rect(&mut body_rect, ui.max_rect());
+                                        if body_clip_rect.borrow().is_none() {
+                                            *body_clip_rect.borrow_mut() = Some(ui.clip_rect());
+                                        }
+                                    });
+                                    actual_row_height = actual_row_height.max(cell_height);
+                                }
+                                // Compare against THIS row's estimate (not a uniform value)
+                                // so we can request a repaint when our prediction was off.
+                                let estimated =
+                                    row_heights.get(idx).copied().unwrap_or(fallback_row_height);
+                                if (actual_row_height - estimated).abs() > 0.5 {
+                                    height_change = true;
+                                }
+                                self.update_row_height(table_id, idx, actual_row_height);
+                                self.note_row_rendered(table_id);
+                            });
                         });
 
                     let geometry = TableGeometry {
@@ -5150,11 +5135,7 @@ impl MarkdownRenderer {
         (self.font_sizes.body * 6.0).max(48.0)
     }
 
-    fn resolve_table_column_widths(
-        &self,
-        table_id: u64,
-        column_specs: &[ColumnSpec],
-    ) -> Vec<f32> {
+    fn resolve_table_column_widths(&self, table_id: u64, column_specs: &[ColumnSpec]) -> Vec<f32> {
         if column_specs.is_empty() {
             return Vec::new();
         }
@@ -7023,11 +7004,7 @@ mod tests {
 
     /// Creates a ColumnSpec with Resizable policy for test use.
     fn resizable_spec(col: usize, name: &str, min: f32) -> ColumnSpec {
-        ColumnSpec::new(
-            col,
-            name,
-            ColumnPolicy::Resizable { min },
-        )
+        ColumnSpec::new(col, name, ColumnPolicy::Resizable { min })
     }
 
     /// Creates a ColumnSpec with Resizable policy and a specific min width for test use.
@@ -10647,10 +10624,7 @@ fn main() {}
     #[test]
     fn test_estimate_table_column_widths_scales_down() {
         let renderer = MarkdownRenderer::new();
-        let specs = vec![
-            resizable_spec(0, "A", 100.0),
-            resizable_spec(1, "B", 100.0),
-        ];
+        let specs = vec![resizable_spec(0, "A", 100.0), resizable_spec(1, "B", 100.0)];
 
         let widths = renderer.estimate_table_column_widths(&specs, 150.0, 10.0);
         let total = widths.iter().sum::<f32>() + 10.0;
@@ -10666,11 +10640,12 @@ fn main() {}
         let resolved = vec![80.0, min_floor];
         // Simulate pre-computed weighted width for the Remainder column.
         let adjusted = vec![80.0, 240.0];
-        let widths = renderer.estimate_table_row_widths(
-            &resolved, &adjusted, false,
-        );
+        let widths = renderer.estimate_table_row_widths(&resolved, &adjusted, false);
         assert!((widths[0] - 80.0).abs() < 0.1);
-        assert!((widths[1] - 240.0).abs() < 0.1, "should pass through adjusted_widths");
+        assert!(
+            (widths[1] - 240.0).abs() < 0.1,
+            "should pass through adjusted_widths"
+        );
     }
 
     #[test]
@@ -13018,9 +12993,7 @@ contexts:
     #[test]
     fn test_render_table_estimates_wrapped_row_height() {
         let renderer = MarkdownRenderer::new();
-        let _forced = ForcedTablePolicies::new(vec![ColumnPolicy::Resizable {
-            min: 80.0,
-        }]);
+        let _forced = ForcedTablePolicies::new(vec![ColumnPolicy::Resizable { min: 80.0 }]);
         let headers = vec![vec![InlineSpan::Text("Params".to_string())]];
         let rows = vec![vec![vec![InlineSpan::Text(
             "word word word word word word word word".to_string(),
@@ -13801,8 +13774,7 @@ contexts:
             max_graphemes: 1,
             ..Default::default()
         }];
-        let widths_tiny =
-            renderer.estimate_natural_column_widths(&stats_tiny, &headers_tiny, 1);
+        let widths_tiny = renderer.estimate_natural_column_widths(&stats_tiny, &headers_tiny, 1);
         assert!(
             (widths_tiny[0] - min_col).abs() < 0.1,
             "tiny should clamp to min {}: got {}",
@@ -13816,8 +13788,7 @@ contexts:
             max_graphemes: 200,
             ..Default::default()
         }];
-        let widths_huge =
-            renderer.estimate_natural_column_widths(&stats_huge, &headers_huge, 1);
+        let widths_huge = renderer.estimate_natural_column_widths(&stats_huge, &headers_huge, 1);
         assert!(
             (widths_huge[0] - max_col).abs() < 0.1,
             "huge should clamp to max {}: got {}",
@@ -13928,10 +13899,8 @@ contexts:
             "\u{540D}\u{524D}\u{5217}\u{5E45}".into(),
         )]]; // 4 CJK chars = 8 display width
         let stats = vec![ColumnStat::default()]; // no content
-        let widths_ascii =
-            renderer.estimate_natural_column_widths(&stats, &headers_ascii, 1);
-        let widths_cjk =
-            renderer.estimate_natural_column_widths(&stats, &headers_cjk, 1);
+        let widths_ascii = renderer.estimate_natural_column_widths(&stats, &headers_ascii, 1);
+        let widths_cjk = renderer.estimate_natural_column_widths(&stats, &headers_cjk, 1);
         // CJK header should produce a wider natural width than ASCII header
         assert!(
             widths_cjk[0] > widths_ascii[0],
@@ -16043,8 +16012,7 @@ contexts:
         let resolved = vec![80.0, 40.0];
         let adjusted = resolved.clone();
 
-        let widths = renderer
-            .estimate_table_row_widths(&resolved, &adjusted, false);
+        let widths = renderer.estimate_table_row_widths(&resolved, &adjusted, false);
 
         assert_eq!(widths, adjusted);
     }

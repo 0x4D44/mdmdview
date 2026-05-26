@@ -27,9 +27,7 @@ pub enum ColumnPolicy {
 impl ColumnPolicy {
     pub fn to_column(&self) -> Column {
         match self {
-            ColumnPolicy::Resizable { min } => {
-                Column::initial(*min).at_least(*min).resizable(true)
-            }
+            ColumnPolicy::Resizable { min } => Column::initial(*min).at_least(*min).resizable(true),
         }
     }
 }
@@ -53,11 +51,7 @@ pub struct ColumnSpec {
 }
 
 impl ColumnSpec {
-    pub fn new(
-        index: usize,
-        ident: impl Into<String>,
-        policy: ColumnPolicy,
-    ) -> Self {
+    pub fn new(index: usize, ident: impl Into<String>, policy: ColumnPolicy) -> Self {
         let ident = ident.into();
         let policy_hash = calculate_policy_hash(index, &ident, &policy);
         Self {
@@ -487,8 +481,12 @@ mod tests {
         let stats = compute_column_stats(&headers, &rows, 32);
         let ctx = TableColumnContext::new(&headers, &rows, &stats, 14.0, 0);
         let specs = derive_column_specs(&ctx);
-        let min_a = match specs[0].policy { ColumnPolicy::Resizable { min } => min };
-        let min_long = match specs[1].policy { ColumnPolicy::Resizable { min } => min };
+        let min_a = match specs[0].policy {
+            ColumnPolicy::Resizable { min } => min,
+        };
+        let min_long = match specs[1].policy {
+            ColumnPolicy::Resizable { min } => min,
+        };
         assert!(min_long > min_a, "longer header should have larger min");
     }
 

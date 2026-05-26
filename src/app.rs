@@ -2931,8 +2931,7 @@ impl MarkdownViewerApp {
             self.copy_all_requested = false;
             self.select_all_active = false;
             ctx.copy_text(self.current_content.clone());
-            self.status_message =
-                Some(("Copied to clipboard".into(), std::time::Instant::now()));
+            self.status_message = Some(("Copied to clipboard".into(), std::time::Instant::now()));
         }
 
         // Render chrome panels before the central area so they reserve space.
@@ -4756,11 +4755,13 @@ The end.
         let monitor = egui::vec2(1024.0, 768.0);
         let adjustment =
             MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(outer), Some(monitor));
-        assert!(adjustment.is_none(), "should not clamp position to single monitor bounds");
+        assert!(
+            adjustment.is_none(),
+            "should not clamp position to single monitor bounds"
+        );
 
         // Same position but with an oversized window — only size should be adjusted, not pos
-        let outer =
-            egui::Rect::from_min_size(egui::pos2(1200.0, 900.0), egui::vec2(1200.0, 900.0));
+        let outer = egui::Rect::from_min_size(egui::pos2(1200.0, 900.0), egui::vec2(1200.0, 900.0));
         let adjustment =
             MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(outer), Some(monitor))
                 .expect("should adjust oversized window");
@@ -7338,25 +7339,31 @@ The end.
         let monitor = egui::vec2(1920.0, 1080.0);
 
         // Window on a second monitor to the right (pos.x > monitor width)
-        let outer =
-            egui::Rect::from_min_size(egui::pos2(2000.0, 200.0), egui::vec2(800.0, 600.0));
+        let outer = egui::Rect::from_min_size(egui::pos2(2000.0, 200.0), egui::vec2(800.0, 600.0));
         let adjusted =
             MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(outer), Some(monitor));
-        assert!(adjusted.is_none(), "should not adjust valid multi-monitor position");
+        assert!(
+            adjusted.is_none(),
+            "should not adjust valid multi-monitor position"
+        );
 
         // Window on a monitor to the left (negative X)
-        let outer =
-            egui::Rect::from_min_size(egui::pos2(-1500.0, 100.0), egui::vec2(800.0, 600.0));
+        let outer = egui::Rect::from_min_size(egui::pos2(-1500.0, 100.0), egui::vec2(800.0, 600.0));
         let adjusted =
             MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(outer), Some(monitor));
-        assert!(adjusted.is_none(), "should not adjust negative multi-monitor position");
+        assert!(
+            adjusted.is_none(),
+            "should not adjust negative multi-monitor position"
+        );
 
         // Window on a monitor above (negative Y)
-        let outer =
-            egui::Rect::from_min_size(egui::pos2(100.0, -800.0), egui::vec2(800.0, 600.0));
+        let outer = egui::Rect::from_min_size(egui::pos2(100.0, -800.0), egui::vec2(800.0, 600.0));
         let adjusted =
             MarkdownViewerApp::compute_window_adjustment(Some(outer), Some(outer), Some(monitor));
-        assert!(adjusted.is_none(), "should not adjust above-primary monitor position");
+        assert!(
+            adjusted.is_none(),
+            "should not adjust above-primary monitor position"
+        );
     }
 
     #[test]

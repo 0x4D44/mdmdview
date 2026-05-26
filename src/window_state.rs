@@ -274,7 +274,10 @@ pub fn sanitize_window_state(ws: WindowState) -> Option<WindowState> {
     const MAX_POS: f32 = 20000.0;
 
     Some(WindowState {
-        pos: [ws.pos[0].clamp(-MAX_POS, MAX_POS), ws.pos[1].clamp(-MAX_POS, MAX_POS)],
+        pos: [
+            ws.pos[0].clamp(-MAX_POS, MAX_POS),
+            ws.pos[1].clamp(-MAX_POS, MAX_POS),
+        ],
         size: [
             ws.size[0].clamp(MIN_WIDTH, MAX_SIZE),
             ws.size[1].clamp(MIN_SIZE, MAX_SIZE),
